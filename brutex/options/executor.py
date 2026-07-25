@@ -444,6 +444,160 @@ def select_option_leg(
     )
 
 
+# --- exec-rust dispatch helper (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+def _materialize_tail_rust(
+    signal: SpotSignal,
+    rule: StrikeRule,
+    leg: OptionLeg,
+    pair: OptionBarPair,
+    *,
+    broker: Broker,
+    gst_split: GstSplit,
+    n_lots: int,
+) -> MaterializedTrade | RejectedTrade | None:
+    """The ``BRUTEX_EXEC_RUST`` tail of :func:`materialize_trade`, or ``None``.
+
+    Serves the post-I/O stale/tick/cost tail from the Rust kernel via
+    :mod:`brutex.exec_rust` (default-OFF — MIGRATION.md #1979). ``None``
+    means "not served": the verbatim Python tail below reproduces the exact
+    behaviour (including any raise) from its own natural site — so ANY prep
+    or kernel fallback is behaviour-neutral. The stale gate is UNCONDITIONAL
+    on both arms (DEC-FILL-WORST-CASE-ONLY-001 — the opt-out knob is
+    deleted) and the fills anchor on the fill bars' adverse EXTREMES. A
+    served ``trade`` verdict is re-materialized through the EXISTING frozen
+    ``TradeInput`` + ``TradeCostBreakdown`` dataclasses —
+    ``TradeInput.__post_init__`` re-validates the INPUTS byte-identically
+    (extremes bracketing included), while ``TradeCostBreakdown`` defines NO
+    ``__post_init__``: breakdown-VALUE integrity is guarded by the Rust-side
+    ``ChargeStack::validated()`` construction check + the
+    dual-arm/golden/differential parity gates, not a Python-side assert;
+    the reject WARNs are emitted HERE with the identical event names /
+    keys / cardinality.
+    """
+    from brutex import exec_rust
+
+    if not exec_rust.exec_rust_enabled():
+        return None
+    from brutex.costs import constants as cost_constants
+    from brutex.costs.types import TradeCostBreakdown, TradeInput
+
+    try:
+        # The SAME conversions/resolutions the Python tail performs — gates
+        # 1-2 already proved the lot + ETC lookups succeed for this signal,
+        # so none of these can raise on a well-formed pair; a malformed bar
+        # (the conversion raise class) falls back and re-raises — or
+        # stale-rejects first — from the Python tail exactly as today.
+        entry_open_paisa = rupees_to_paisa(pair.entry_bar.open)
+        exit_open_paisa = rupees_to_paisa(pair.exit_bar.open)
+        entry_high_paisa = rupees_to_paisa(pair.entry_bar.high)
+        entry_low_paisa = rupees_to_paisa(pair.entry_bar.low)
+        exit_high_paisa = rupees_to_paisa(pair.exit_bar.high)
+        exit_low_paisa = rupees_to_paisa(pair.exit_bar.low)
+        entry_date = signal.entry_ts.date()
+        lot_size = get_lot_size(signal.instrument, entry_date)
+        instrument_literal = _INSTRUMENT_LITERAL[signal.instrument]
+        tail = exec_rust.materialize_option_tail(
+            entry_open_paisa,
+            exit_open_paisa,
+            entry_high_paisa,
+            entry_low_paisa,
+            exit_high_paisa,
+            exit_low_paisa,
+            entry_volume=pair.entry_bar.volume,
+            exit_volume=pair.exit_bar.volume,
+            is_long=leg.side.startswith("long"),
+            lot_size=lot_size,
+            n_lots=n_lots,
+            brokerage_round_trip_paisa=cost_constants.brokerage_paisa(broker) * 2,
+            stt_rate=cost_constants.stt_options_rate_bps_x100(entry_date),
+            etc_rate=cost_constants.exchange_charge_bps_x100(instrument_literal, entry_date),
+            sebi_rate=cost_constants.SEBI_FEE_BPS_X100,
+            ipft_rate=cost_constants.ipft_bps_x100(instrument_literal),
+            stamp_rate=cost_constants.STAMP_DUTY_OPTIONS_BPS_X100,
+            gst_rate=cost_constants.GST_TOTAL_BPS_X100,
+        )
+    except (ValueError, TypeError, ArithmeticError):
+        return None
+    if tail is None:
+        return None
+    kind, stack = tail
+    if kind == "stale_bar":
+        _LOG.warning(
+            "options.reject.stale_bar",
+            rule=rule.name,
+            instrument=signal.instrument.value,
+            strike=leg.strike,
+            entry_volume=pair.entry_bar.volume,
+            exit_volume=pair.exit_bar.volume,
+        )
+        return RejectedTrade(leg=leg, reason=RejectReason.STALE_BAR)
+    if kind == "tick_floor":
+        return RejectedTrade(leg=leg, reason=RejectReason.TICK_FLOOR)
+    if kind != "trade" or stack is None:
+        # Executor-side BELT: the seam's _verdict_fault already warn-onces
+        # + refuses these shapes (review round 2, R3-F3 — the structural
+        # loudness law lives INSIDE brutex.exec_rust), so this branch is
+        # reachable only via an injected seam; the Python oracle arm serves
+        # (a wrong VALUE cannot escape — the Python arm recomputes).
+        return None
+    # Validation parity: construct the SAME TradeInput the Python tail
+    # builds — its __post_init__ re-validates the inputs and raises
+    # byte-identically (e.g. n_lots < 1, extremes bracketing); the instance
+    # itself is not needed because the kernel already computed the breakdown.
+    TradeInput(
+        entry_dt_ist=signal.entry_ts,
+        exit_dt_ist=signal.exit_ts,
+        instrument=instrument_literal,
+        option_type=leg.option_type,
+        strike=leg.strike * 100,
+        expiry_date=signal.expiry_date,
+        entry_bar_open_paisa=entry_open_paisa,
+        exit_bar_open_paisa=exit_open_paisa,
+        side=leg.side,  # type: ignore[arg-type]  # always long_call/long_put (DEC-EXEC-008)
+        n_lots=n_lots,
+        broker=broker,
+        gst_split=gst_split,
+        trade_outcome="NORMAL_CLOSE",
+        entry_bar_high_paisa=entry_high_paisa,
+        entry_bar_low_paisa=entry_low_paisa,
+        exit_bar_high_paisa=exit_high_paisa,
+        exit_bar_low_paisa=exit_low_paisa,
+    )
+    breakdown = TradeCostBreakdown(
+        n_shares_per_lot=lot_size,
+        n_shares=stack.n_shares,
+        buy_fill_paisa=stack.buy_fill_paisa,
+        sell_fill_paisa=stack.sell_fill_paisa,
+        buy_notional_paisa=stack.buy_notional_paisa,
+        sell_notional_paisa=stack.sell_notional_paisa,
+        brokerage_paisa=stack.brokerage_paisa,
+        stt_paisa=stack.stt_paisa,
+        exch_paisa=stack.exch_paisa,
+        sebi_paisa=stack.sebi_paisa,
+        ipft_paisa=stack.ipft_paisa,
+        stamp_paisa=stack.stamp_paisa,
+        gst_paisa=stack.gst_paisa,
+        slippage_paisa=stack.slippage_paisa,
+        total_charges_paisa=stack.total_charges_paisa,
+        gross_pnl_paisa=stack.gross_pnl_paisa,
+        net_pnl_paisa=stack.net_pnl_paisa,
+        used_exercise_branch=False,
+        n_orders_per_leg=1,
+        lot_size_basis="trade_date",
+    )
+    return MaterializedTrade(
+        leg=leg,
+        expiry_date=signal.expiry_date,
+        entry_open_paisa=entry_open_paisa,
+        exit_open_paisa=exit_open_paisa,
+        iv_at_entry=pair.entry_bar.iv,
+        breakdown=breakdown,
+    )
+
+
+# --- end exec-rust dispatch helper ---
+
+
 def materialize_trade(
     signal: SpotSignal,
     rule: StrikeRule,
@@ -539,6 +693,23 @@ def materialize_trade(
     )
     if pair is None:
         return RejectedTrade(leg=leg, reason=RejectReason.NO_DATA)
+
+    # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+    # Default-OFF (`BRUTEX_EXEC_RUST`): None unless the kernel serves the
+    # whole stale/tick/cost tail; the verbatim Python tail below is the
+    # permanent oracle arm.
+    rust_served = _materialize_tail_rust(
+        signal,
+        rule,
+        leg,
+        pair,
+        broker=broker,
+        gst_split=gst_split,
+        n_lots=n_lots,
+    )
+    if rust_served is not None:
+        return rust_served
+    # --- end exec-rust dispatch ---
 
     # Zero-volume staleness guard — UNCONDITIONAL (DEC-FILL-WORST-CASE-ONLY-001,
     # superseding the opt-out knob): a minute bar with volume == 0 carries a

@@ -176,6 +176,19 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # excluding it here keeps that complement honest instead of blocking
         # EVERY stage1a-touching PR (DEC-COVERAGE-DISCOVERY-STAGE1A-001).
         "brutex/engine/stage1a.py",
+        # The combo/mask primitive layer. Its 100% line+branch is reached by the
+        # WHOLE tests/unit/test_engine_*.py suite together (the static engine
+        # gate — verified 100.00% incl. the ResidentBars fno_math fallback +
+        # u128 two-limb legs, which are exercised by test_engine_rust_trade_sim.py
+        # and the sign-bit battery, NOT by the stem files): the stem suites
+        # (test_engine_combo_mask.py + test_combo_mask_doctests.py) structurally
+        # top out below 100% STANDALONE — the SAME multi-file-suite mismatch as
+        # stage1a.py above. First discovered when DEC-FIB-TEMPLATE-EXPRESS-001
+        # (MIGRATION.md #2205) touched the module (VOCAB_BITS 66 -> 74); the
+        # sub-100 stem readout PRE-DATES that change (measured at the merge
+        # base too). The real gates: the static engine gate + the
+        # whole-package --cov-fail-under=100 floor.
+        "brutex/engine/combo_mask.py",
         # The Stage-2 sweep driver. Its 100% line+branch is reached by a CURATED
         # two-file suite — test_engine_sweep_driver.py (evaluate/sweep/rank +
         # the public metrics_for_mask / metrics_from_trades seams) +

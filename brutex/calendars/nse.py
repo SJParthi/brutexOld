@@ -1248,7 +1248,7 @@ def expected_bars_per_day_for_tf(tf_minutes: int) -> int:
     - 1m  -> 375 bars
     - 5m  -> 75 bars
     - 15m -> 25 bars
-    - 30m -> 13 bars (12 full + the truncated 15:00-15:29 final bucket)
+    - 30m -> 13 bars (12 full + the truncated 15:15-15:29 final bucket)
     - 60m -> 7 bars (6 full + the truncated 15:15-15:29 final bucket)
     - 1d  -> 1 bar
 

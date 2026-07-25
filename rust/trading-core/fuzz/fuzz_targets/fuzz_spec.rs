@@ -99,6 +99,13 @@ fuzz_target!(|data: &[u8]| {
         pivot_proximity_bps: (read_u64(data, 17) % 10_001) as i64,
         pdh_pdl_proximity_bps: (read_u64(data, 25) % 10_001) as i64,
         fib_proximity_bps: (read_u64(data, 33) % 10_001) as i64,
+        // Gap/swing bands at the signature defaults — both are
+        // deliberately NOT in the frozen canonical encode
+        // (gap_mid_bps_is_deliberately_not_encoded; the express DEC's
+        // ungrown 57-byte law), so the layout properties below are
+        // knob-independent by construction.
+        gap_mid_proximity_bps: trading_core::evaluator::DEFAULT_GAP_MID_PROXIMITY_BPS,
+        swing_proximity_bps: 10,
     };
     let prior_n = (read_u64(data, 41) % 9) as usize;
     let symbol_id = read_u64(data, 49) as u32;

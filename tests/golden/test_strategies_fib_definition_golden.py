@@ -19,17 +19,20 @@ import json
 
 from brutex.strategies import fib_definitions as F
 from brutex.vocabulary.bits import (
-    BIT_CLOSE_ABOVE_VWAP,
+    BIT_ABOVE_CPR_TC,
     BIT_EARLY_MORNING,
     BIT_EMA20_ABOVE_EMA200,
     BIT_NEAR_FIB_50,
 )
 
-# A fixed swept mask: trend-up + above-VWAP + Fib-50 + early-morning (one bit per
-# decoder group, so the composed sentence exercises trend→level→structure→time).
+# A fixed swept mask: trend-up + above-CPR-TC + Fib-50 + early-morning (this
+# golden's swept member moved from VWAP to the CPR bit at the 60→66 reshape and
+# deliberately STAYS on CPR after DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md
+# #2206) revived bits 52/53 — the composed sentence still exercises
+# trend→level→time across groups).
 _GOLDEN_MASK = (
     (1 << BIT_EMA20_ABOVE_EMA200)
-    | (1 << BIT_CLOSE_ABOVE_VWAP)
+    | (1 << BIT_ABOVE_CPR_TC)
     | (1 << BIT_NEAR_FIB_50)
     | (1 << BIT_EARLY_MORNING)
 )
@@ -46,15 +49,25 @@ _GOLDEN_DECLARATION = {
     "forced_exit_ist": "15:20:00",
     "stop_loss_bps": None,
     "take_profit_bps": None,
-    "candidate_mask_hex": "00000000000000000fffffffffffffff",
-    "spec_mask_hex": "00000000000000000010100000400010",
+    # DELIBERATE RE-LOCK (the vocab-66 SuperTrend flip, then
+    # DEC-GAP-MIDPOINT-CONDITIONS-001, then DEC-FIB-TEMPLATE-EXPRESS-001 at
+    # the train fold, then DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206)):
+    # the empty condition_scope means "every IMPLEMENTED bit", so the
+    # candidate mask follows IMPLEMENTED_MASK — bits 64/65 joined at the
+    # flip, the gap trio 66-68 at the gap append, the five express bits
+    # 69-73 (0x3e0 << 64) at the fib-template express, and the retained
+    # VWAP pair 52/53 closed the wipe-era ...Cf... hole at the retention
+    # fold, so the mask is exactly (1 << 74) - 1
+    # (old: 00000000000003ffffcfffffffffffff).
+    "candidate_mask_hex": "00000000000003ffffffffffffffffff",
+    "spec_mask_hex": "00000000000000001000100000400010",
 }
 
 _GOLDEN_SIMPLE = (
-    "Buy on 15m when trend is up, price beats the day's average price, "
-    "at the halfway bounce zone and first hour (uptrend)."
+    "Buy on 15m when trend is up, at the halfway bounce zone, "
+    "above the pivot-range ceiling and first hour (uptrend)."
 )
-_GOLDEN_PRO = "Buy 15m [uptrend]: EMA20>EMA200, close>VWAP, Fib 50% and early morning."
+_GOLDEN_PRO = "Buy 15m [uptrend]: EMA20>EMA200, Fib 50%, close>CPR-TC and early morning."
 
 
 def test_fib_prev_day_declaration_is_frozen() -> None:

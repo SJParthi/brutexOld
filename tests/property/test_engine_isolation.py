@@ -3,7 +3,7 @@
 DEC-ENGINE-ISOLATION-INVARIANT-001 — the P0 mitigation gate for Stage 2b
 (DEC-NIFTY-TOTAL-MARKET-001). The Stage 2b hostile review (CLAUDE.md Golden
 Rule #9) flagged that admitting ~750 non-F&O equities as REFERENCE_ONLY risks
-microcaps leaking into the brute-force combinations + the 52-condition
+microcaps leaking into the brute-force combinations + the shared condition
 vocabulary if any future code trusts the wrong scope filter — a Golden Rule #3
 scope-lock violation. Today that protection (``is_in_brute_force_scope``,
 ``brutex/universe.py``) is real but only **unit**-tested; this turns it into a

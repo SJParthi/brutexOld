@@ -201,11 +201,14 @@ def default_condition_bits() -> list[int]:
     pivot R5/S5, BOS/CHoCH — from every default sweep).
 
     Deriving from ``IMPLEMENTED_MASK`` (rather than ``range(TOTAL_CONDITIONS)``)
-    is deliberately HONEST: a future LAYOUT-ONLY bit (``implemented=false`` in
-    ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so the
-    default never sweeps a dead condition that could never fire. Today every one
-    of the ``TOTAL_CONDITIONS`` bits is implemented (``IMPLEMENTED_MASK`` is
-    dense ``0..TOTAL_CONDITIONS-1``), so this returns ``[0, 1, ..., 59]``.
+    is deliberately HONEST: a LAYOUT-ONLY or RETIRED bit (``implemented=false``
+    in ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so
+    the default never sweeps a dead condition that could never fire. On the
+    74-condition layout ALL 74 bits are ACTIVE (``[0..73]``): the session-VWAP
+    pair 52/53 is RETAINED-ACTIVE per DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md
+    #2206 — the wipe-era tombstone exclusion reversed), and the SuperTrend
+    (64/65), gap-midpoint (66-68) and fib-express (69-73) bits all landed
+    implemented, so the derivation currently excludes nothing.
 
     Returns
     -------
@@ -244,23 +247,54 @@ def parse_condition_ids(raw: str) -> list[int]:
     The ONE parser behind all three sweep surfaces (``sweep`` / ``sweep-all`` /
     ``sweep-verify``), replacing three inline copies. Valid input parses
     byte-identically to the old inline expression. Each id is a 0-indexed bit
-    position validated against the VOCABULARY range
-    ``0..TOTAL_CONDITIONS - 1`` (0..59) — deliberately NOT the engine's
-    forward-compat ``[0, 128)`` u128 ceiling: bits 60..127 are
-    reserved/undefined dead bits the results store rejects
-    (``MASK_BITS_MAX``), so admitting them here would be a silent illusion.
+    position that must be IMPLEMENTED
+    (:data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK` — the 64 active bits on
+    the 66-condition layout): a bit whose evaluator emits a constant 0 can
+    NEVER fire, so sweeping it is hours of silent dead compute — the results
+    store ADMITS every declared bit (``MASK_BITS_MAX`` spans the full layout),
+    so nothing downstream would catch it (TOMB-03/G-U64U12-02/G-RETROT-03; the
+    old rationale here — "the results store rejects dead bits" — had it
+    inverted). The refusal names the bit, its condition name, and its status:
+    RETIRED (a ``reserved = true`` tombstone — NONE on today's 74/74 layout:
+    the VWAP pair 52/53 left that class at the retention,
+    DEC-VOCAB-VWAP-RETAIN-001 / MIGRATION.md #2206) vs
+    declared-but-NOT-YET-implemented (a LAYOUT-ONLY bit awaiting its math —
+    also none today: the SuperTrend bits 64/65 left that class at the
+    vocab-66 implemented-flip; DEC-VOCAB-U128-CODEGEN-001 grow-only
+    territory). Both refusal arms are KEPT — mask-driven, vacuous at
+    ``RETIRED_MASK == 0`` — for any future tombstone/layout-only bit. Bits outside the declared
+    layout (``>= TOTAL_CONDITIONS``) stay the plain out-of-range refusal —
+    deliberately NOT the engine's forward-compat ``[0, 128)`` u128 ceiling.
 
     Raises
     ------
     CliUserError
-        On a non-integer token or an out-of-range bit index.
+        On a non-integer token, an out-of-range bit index, or an unimplemented
+        (retired / layout-only) bit.
     """
+    from brutex.vocabulary.bits import BIT_TO_NAME, RETIRED_MASK
+
     bits = _parse_int_csv(raw, flag="--conditions")
     for bit in bits:
         if not 0 <= bit <= TOTAL_CONDITIONS - 1:
             raise CliUserError(
                 f"--conditions bit {bit} out of range: valid bit indices are "
                 f"0..{TOTAL_CONDITIONS - 1}"
+            )
+        if not (IMPLEMENTED_MASK >> bit) & 1:
+            if (RETIRED_MASK >> bit) & 1:
+                raise CliUserError(
+                    f"--conditions bit {bit} ({BIT_TO_NAME[bit]}) is RETIRED — a tombstone "
+                    "whose math was deleted (the VWAP wipe: the engine is spot-only, "
+                    "DEC-ENGINE-SPOT-ONLY-001, and spot indices carry no volume). The "
+                    "evaluator emits 0 for it forever, so sweeping it is dead compute; "
+                    "drop it from the list (a pre-reshape saved script must be updated)"
+                )
+            raise CliUserError(
+                f"--conditions bit {bit} ({BIT_TO_NAME[bit]}) is declared but NOT YET "
+                "implemented (LAYOUT-ONLY — its math lands in a later PR; "
+                "DEC-VOCAB-U128-CODEGEN-001 grow-only layout). The evaluator emits 0 "
+                "for it today, so sweeping it is dead compute; drop it from the list"
             )
     return bits
 
@@ -618,8 +652,9 @@ def _add_sweep_grid_args(
         "--conditions",
         default=None,
         help=(
-            f"Comma-separated condition bit indices 0..{TOTAL_CONDITIONS - 1} to sweep "
-            f"(default: all {TOTAL_CONDITIONS} implemented conditions)"
+            f"Comma-separated IMPLEMENTED condition bit indices to sweep "
+            f"(default: all {IMPLEMENTED_MASK.bit_count()} implemented conditions; "
+            f"the layout declares {TOTAL_CONDITIONS} bits — retired/layout-only bits are refused)"
         ),
     )
     parser.add_argument(
@@ -1820,8 +1855,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--conditions",
         default=None,
         help=(
-            f"Comma-separated condition bit indices 0..{TOTAL_CONDITIONS - 1} to sweep "
-            f"(default: all {TOTAL_CONDITIONS} implemented conditions)"
+            f"Comma-separated IMPLEMENTED condition bit indices to sweep "
+            f"(default: all {IMPLEMENTED_MASK.bit_count()} implemented conditions; "
+            f"the layout declares {TOTAL_CONDITIONS} bits — retired/layout-only bits are refused)"
         ),
     )
     sweep.add_argument(
@@ -8463,92 +8499,21 @@ def _git_identity(
 ) -> str | None:
     """Resolve the git HEAD SHA of the repo rooted at *cwd*, dirty-suffixed.
 
-    Returns the 40-char HEAD SHA (with a ``-dirty`` suffix when the working tree
-    has uncommitted changes), or ``None`` when git is unavailable / *cwd* is not
-    a checkout that TRACKS *tracked_path* (the caller then falls back to the
-    pinned package version).
-
-    Two run-identity completeness guarantees (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001):
-
-    * ``cwd`` is passed EXPLICITLY, so ``git rev-parse`` always resolves THIS
-      repository regardless of the process launch directory. Without it the SHA
-      forked with the invocation directory (R3-RUNID-01) — running the sweep from
-      a sibling checkout served a foreign / corrupt identity.
-    * a ``git status --porcelain`` probe (same ``cwd``) appends ``-dirty`` so an
-      uncommitted, edited working tree can never serve stale pre-edit identity
-      (RIF-2 / audit C9). If HEAD resolves but the dirty probe itself fails, the
-      clean SHA is returned rather than a fabricated (unverified) dirty flag.
-
-    Enclosing-repo guard (PR-4 review): ``git`` walks parent directories for a
-    ``.git``, so a brutex package nested inside an UNRELATED enclosing repository
-    (a non-editable wheel unpacked into a venv that itself lives inside another
-    checkout) would resolve the ENCLOSING repo's HEAD — a FALSE code identity for
-    brutex. When *tracked_path* is given, a ``git ls-files --error-unmatch`` probe
-    (same ``cwd``, same *runner* seam) CONFIRMS the resolved repo actually tracks
-    that file BEFORE the SHA is trusted; a non-zero exit (the path is not tracked
-    here) ⇒ ``None`` ⇒ the honest ``brutex-{__version__}`` fallback. The
-    editable / source deployment (file tracked by brutex's own repo) is
-    unaffected — only the nested-enclosing-repo case changes.
-
-    Honest limits (Golden Rule #10):
-
-    * The ``-dirty`` suffix is a single boolean flag, NOT a working-tree digest —
-      it collapses EVERY uncommitted state into one identity, so two DIFFERENT
-      uncommitted edits over the same HEAD share ``<sha>-dirty`` and are NOT
-      distinguished (dirty-state distinctness is not captured; a committed SHA is
-      the only genuinely fork/collision-free code identity).
-    * Dirty detection is best-effort: ``git status --porcelain`` also reports
-      UNTRACKED non-ignored files, so a stray build artifact flips the flag to
-      ``-dirty``; and a timed-out / errored status probe drops the flag and serves
-      the clean SHA.
-
-    *runner* injects the subprocess entry point (defaults to ``subprocess.run``)
-    so the git seam is fully unit-testable without a live repository.
+    COMMON (Golden Rule #11): thin delegator to the engine leaf
+    :func:`brutex.engine.run_environment.git_identity` — the ONE home of the
+    DEC-SWEEP-RUN-IDENTITY-COMPLETE-001 identity seam (explicit ``cwd`` so the
+    SHA never forks with the process launch directory; a ``-dirty`` suffix on
+    an uncommitted tree; the enclosing-repo ``ls-files --error-unmatch`` guard
+    when *tracked_path* is given; the injectable *runner* subprocess seam).
+    Kept as a CLI-level name so tests may monkeypatch
+    ``brutex.cli._git_identity`` and so :func:`_resolve_code_commit_sha` reads
+    the module-global seam; see the leaf docstring for the full contract +
+    honest limits (the ``-dirty`` flag is a boolean, not a working-tree
+    digest; dirty detection is best-effort).
     """
-    import subprocess  # nosec B404 — git SHA read only; fixed constant argv below
+    from brutex.engine.run_environment import git_identity
 
-    run = runner if runner is not None else subprocess.run
-    try:
-        head = run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-            cwd=cwd,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    sha = head.stdout.strip()
-    if not sha:
-        return None
-    if tracked_path is not None:
-        # Confirm the resolved repo actually TRACKS this file before trusting its
-        # HEAD — an enclosing foreign repo would otherwise serve a false identity.
-        # `ls-files --error-unmatch` exits non-zero when the path is untracked here.
-        try:
-            run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
-                ["git", "ls-files", "--error-unmatch", "--", str(tracked_path)],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=5,
-                cwd=cwd,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-    try:
-        status = run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-            cwd=cwd,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return sha
-    return f"{sha}-dirty" if status.stdout.strip() else sha
+    return git_identity(cwd=cwd, tracked_path=tracked_path, runner=runner)
 
 
 def _resolve_code_commit_sha() -> str:
@@ -8564,6 +8529,11 @@ def _resolve_code_commit_sha() -> str:
     (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001). If git is unavailable (e.g. a wheel
     install with no repo) or the resolved repo does not track brutex, falls back
     to the pinned ``brutex.__version__`` — still a real, traceable code identity.
+    The engine leaf's
+    :func:`brutex.engine.run_environment.current_code_commit_sha` derives the
+    SAME string through the SAME ``git_identity`` seam (rooted at its own
+    tracked file in the SAME repo), so the cascade replay's REPL-01 gate and
+    this launcher can never drift apart.
     """
     pkg_file = Path(__file__).resolve()
     sha = _git_identity(cwd=pkg_file.parent, tracked_path=pkg_file)
@@ -8573,37 +8543,20 @@ def _resolve_code_commit_sha() -> str:
 
 
 def _indicator_version() -> str:
-    """Return a real indicator-stack version string.
+    """Return a real indicator-stack version string (COMMON — the engine leaf's).
 
-    Encodes the FULL Rust hot-kernel stack in run identity: BruteX + the
-    ``fno_math`` sweep-simulation kernel + the shared ``trading_core`` evaluator
-    crate. The kernel tokens are appended in a fixed alphabetical order
-    (``fno_math`` before ``trading_core``) so the string is deterministic.
-
-    Adding ``fno_math`` closes R3-RUNID-02 (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001):
-    the prior string omitted it, so an ``fno_math`` rebuild did NOT re-key run
-    identity — a stale sweep-sim kernel could serve results under an unchanged
-    identity. A missing module (a source checkout without a built wheel) drops
-    only its own token; the remaining order is unchanged.
+    Thin delegator to
+    :func:`brutex.engine.run_environment.current_indicator_version` (CLAUDE.md
+    §11 COMMON): BruteX + the ``fno_math`` sweep-simulation kernel + the shared
+    ``trading_core`` evaluator crate, kernel tokens in fixed alphabetical order
+    (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001 R3-RUNID-02 — an ``fno_math`` rebuild
+    re-keys run identity; a missing wheel drops only its own token). The
+    cascade replay's REPL-01 vocabulary gate reads the SAME builder, so the two
+    surfaces can never drift apart.
     """
-    parts = [f"brutex-{__version__}"]
-    try:
-        import fno_math
+    from brutex.engine.run_environment import current_indicator_version
 
-        parts.append(f"fno_math-{fno_math.__version__}")
-    except (ImportError, AttributeError):
-        # No built fno_math wheel (source checkout) → drop only its token and
-        # keep the deterministic order; a missing kernel never fails identity.
-        pass
-    try:
-        import trading_core
-
-        parts.append(f"trading_core-{trading_core.__version__}")
-    except (ImportError, AttributeError):
-        # No built trading_core wheel → drop only its token; the remaining
-        # tokens still form a real, traceable indicator-stack identity.
-        pass
-    return "+".join(parts)
+    return current_indicator_version()
 
 
 def _data_snapshot_hash(  # pragma: no cover — cli-omitted thin delegate (helper tested in engine)
@@ -10450,6 +10403,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         # resets AND is recorded in the manifest for the MANUAL replay
                         # — never a schedule-blind re-score of a futures winner.
                         roll_schedule_by_instrument=roll_schedule_by_instrument,
+                        # REPL-01: record the GRID's run-identity strings (the exact
+                        # environment the winners were minted under) so the MANUAL
+                        # replay can refuse a vocabulary/code flip instead of
+                        # re-scoring old winners through a different evaluator.
+                        indicator_version=grid.indicator_version,
+                        code_commit_sha=grid.code_commit_sha,
                         # No stamper seam: the cascade candidate re-simulations are
                         # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
                         # see cascade_wire.build_candidate_input's sanctioned

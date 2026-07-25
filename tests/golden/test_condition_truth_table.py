@@ -1,7 +1,9 @@
 """Golden consumer test for the condition truth table.
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
-"52-condition truth table / per-condition determinism (G9)").
+"condition truth table / per-condition determinism (G9)"; the table now
+spans the 69-declared / 67-active layout — rows exist only for IMPLEMENTED
+bits).
 
 ``tests/golden/condition_truth_table.csv`` is the flat, human-auditable
 projection of the frozen ``input → u128`` oracle
@@ -47,7 +49,17 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
-_EXPECTED_SHA256 = "e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33"
+# DELIBERATE RE-LOCK (the vocab-train Regen — the ONE golden transition):
+# the table projects the IMPLEMENTED bits per selected case over the
+# regenerated version-4 fixture (408 cases; the generator selects 26) —
+# 26 cases x 74 implemented bits = 1924 rows. ALL 74 bits carry rows: the
+# gap trio 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001, #2204) + the express
+# bits 69-73 (DEC-FIB-TEMPLATE-EXPRESS-001, #2205) are IMPLEMENTED, and
+# bits 52/53 are RETAINED-ACTIVE per DEC-VOCAB-VWAP-RETAIN-001
+# (MIGRATION.md #2206 — the wipe reversed; the tombstone no-row clause is
+# dead). Old digest (the kept ST-era 22 x 64 table):
+# c044cb2cee17d5be14bf5589312ce3ffc7a034e3247670d0baeea31dc6cb5dcc.
+_EXPECTED_SHA256 = "24b26f448e5a1bcec655abb66a95426c6290c89826578bfddcda0e413fbccfff"
 
 
 def _read_rows() -> list[dict[str, str]]:

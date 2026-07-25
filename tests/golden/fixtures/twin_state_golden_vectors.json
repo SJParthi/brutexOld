@@ -2,7 +2,7 @@
  "schema": "twin-state-golden-v1",
  "description": "Language-neutral golden vectors for the stateful indicator twins: trading_core VwapState / MarketStructureState (Rust, PRODUCTION \u2014 expected values computed from it) vs brutex.indicators (Python mirrors). session_day_ordinal is the proleptic-Gregorian ordinal (Python date.toordinal() == the Rust i64 day ordinal). expected_signal is [bos_bullish, bos_bearish, choch_bullish, choch_bearish].",
  "seed": 20260703,
- "generated_with_crate_version": "0.3.0",
+ "generated_with_crate_version": "0.6.0",
  "generator": "tests/golden/generate_twin_state_golden.py",
  "vwap_streams": [
   {

@@ -57,7 +57,12 @@ jobs:
     # Gated to the self-hosted M4 Pro runner. If no runner with this label set
     # is online the job sits "queued" indefinitely — harmless (no PR to block).
     runs-on: [self-hosted, macos, m4pro]
-    timeout-minutes: 45
+    # 150 min: run 29190052122 was wall-clock CANCELLED at ~44 min with the
+    # full suite at 97% (the old 45-min cap), so the -rA summary never printed.
+    # Generous headroom is the house norm on this dedicated runner (it also
+    # hosts multi-hour soaks via soak-selfhosted.yml's duration-derived cap;
+    # this job's duration is fixed, so a plain value suffices).
+    timeout-minutes: 150
 
     env:
       PYTHONHASHSEED: "0"
@@ -101,7 +106,7 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
-          pip install -e ".[dev,optimize]"
+          pip install -e ".[dev,data,ui,optimize]"
           pip install maturin
           # Belt-and-suspenders crates.io flake guard (on top of the
           # workflow-level CARGO_NET_RETRY=10): retry each maturin build up to
@@ -138,13 +143,28 @@ jobs:
       - name: Type check (mypy --strict + pyright)
         run: |
           . .venv/bin/activate
-          mypy --strict brutex
+          # mypy analysis pinned to linux to match the required ubuntu gate;
+          # this job's value is the REAL-hardware test suite + benches, not a
+          # second type-check platform (darwin narrowing flags e.g.
+          # process_probe.py's sys.platform branch as unreachable).
+          mypy --strict --platform linux brutex
           pyright brutex
+
+      # This step is the M4-Pro pow-identity host census for the (b*) ranking
+      # rows (DEC-RANKING-RUST-001, MIGRATION.md #1731 amendment): run
+      # 29194011032 MEASURED this host non-identity (91+123/80,015,
+      # coordinator-ruled 2026-07-12), so the strong legs skip loudly here by
+      # design and the (b*) rows serve the Python oracle per call — this step
+      # keeps the census evidence visible on every run.
+      - name: "Pow-identity host probe (host census — measured non-identity, run 29194011032)"
+        run: |
+          . .venv/bin/activate
+          pytest tests/unit/test_pow_host_probe.py tests/golden/test_ranking_rust_golden.py tests/golden/test_ranking_parity_corpus.py -v -rA -p no:cacheprovider
 
       - name: Full test suite (unit + integration + property + golden + bench)
         run: |
           . .venv/bin/activate
-          pytest -q -p no:cacheprovider
+          pytest -q -rA -p no:cacheprovider
 
       - name: Runtime health (brutex doctor)
         run: |

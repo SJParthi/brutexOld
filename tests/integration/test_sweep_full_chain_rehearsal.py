@@ -154,7 +154,7 @@ _CI_K_SAMPLES = 8
 #: no cascade/stage3/DSR/metrics math; the run-identity engine goldens are
 #: byte-unchanged vs main). Re-measured under 0.3.2 (same 4-vCPU sandbox, INFO
 #: log guard active): ``"deadbeef"*5`` → 3.46 s and ``"abad1dea"*5`` → 2.80 s
-#: both now draw a DSR-KILLED pool, while THIS constant (``"feedface"*5``) →
+#: both now draw a DSR-KILLED pool, while the then-pin (``"feedface"*5``) →
 #: 18.56 s draws ONE candidate through the DSR gate and exercises the ENTIRE
 #: statistical cascade — walk-forward, CPCV, PBO, SPA/reality-check,
 #: Romano-Wolf, lockbox AND the 1000-permutation Monte-Carlo filter (which
@@ -173,8 +173,8 @@ _CI_K_SAMPLES = 8
 #: worst-case fills the OLD fixture's DSR pool was unpassable for EVERY
 #: measured sha (28 candidates, all deflated_sharpe=0 — leaderboard Sharpe
 #: variance 2.5-39.9 vs candidate Sharpes <= 3.3), so the FIXTURE was
-#: re-derived (see ``_bars`` + ``_sweep_all``) rather than the sha: this SAME
-#: constant (``"feedface"*5``) now draws TWO candidates through the DSR gate
+#: re-derived (see ``_bars`` + ``_sweep_all``) rather than the sha: the SAME
+#: then-pin (``"feedface"*5``) then drew TWO candidates through the DSR gate
 #: over the re-derived 9-candidate pool (variance 0.788 measured) and
 #: exercises the ENTIRE statistical cascade — walk-forward, CPCV, PBO,
 #: SPA/reality-check, Romano-Wolf, the LOCKBOX (which filters one — a real
@@ -720,7 +720,20 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     # DISTINCT quantized cells, was 3; measured cells_written=4 +
     # cascade n_input=7); conscious re-pin per
     # DEC-R38-REHEARSAL-DETERMINISM-001 — never a blind bump.
-    assert surv["hard_gates"] == 7, _msg
+    # 74-VOCAB RE-MEASURE (2026-07-24, the #1726 train-vocab fold onto the
+    # exec-grid main — DEC-VOCAB-U128-CODEGEN-001 grows the vocabulary
+    # 60->74 conditions and bumps indicator_version (crate 0.3.2->0.6.0),
+    # a Golden-Rule-#4 run-identity RE-KEY): the pinned-sha run identity
+    # re-keys, so the deterministic Rust stage-3 first-generation cell
+    # VALUES shift and one of the 7 candidates (n_input still 7 = 3
+    # min-hits survivors + 4 machine-stable Rust cells) now fails a hard
+    # gate, so hard_gates 7->6. Re-measured 2x deterministic (6/6) on the
+    # woven tree (per_door_kills: min_hits=2, cascade dsr=1); the R38 LAW
+    # still holds unchanged (dsr=5 >= 1, every mid leg + lockbox process 5
+    # candidates, MC executes-and-kills 5->0 — legal under the law).
+    # Conscious re-pin per DEC-R38-REHEARSAL-DETERMINISM-001 — never a
+    # blind bump.
+    assert surv["hard_gates"] == 6, _msg
     dsr = surv["deflated_sharpe"]
     assert 1 <= dsr <= surv["hard_gates"], _msg  # NOT DSR-killed — the legs run
     for leg in ("walk_forward", "cpcv", "pbo", "reality_check_spa", "romano_wolf"):

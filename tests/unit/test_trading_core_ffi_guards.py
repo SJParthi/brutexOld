@@ -21,16 +21,16 @@ that the valid domain is byte-unchanged. The Rust ``#[cfg(test)]`` suite
 covers the pure ``*_impl`` cores; this file is the complementary Python-level
 oracle — mirroring ``tests/unit/test_fno_math_overflow_guard.py``.
 
-Also pinned here: the VWAP NEGATIVE-TYPICAL rejection. Historical note (the
-trunc-vs-floor seam this guard closed): while the hand-synced Python twin
+Also pinned here: the VWAP NEGATIVE-TYPICAL rejection (the trunc-vs-floor
+twin-divergence guard). Historical note: while the hand-synced Python twin
 still existed, feeding bars ``(typical=-7, vol=1)`` then ``(0, 1)`` gave Rust
 ``-3`` (i128 ``/`` truncates toward zero) vs Python ``-4`` (``//`` floors)
-pre-guard — a silent one-paisa twin divergence on garbage input. Both twins
-then rejected ``typical_paisa < 0`` with ``ValueError`` (a negative typical is
-not a real price — HLC3 of positive prices). The Python twin was deleted by
-DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (``trading_core.VwapState`` is the
-single source), and the Rust-boundary rejection stays pinned here so the
-closed domain hole cannot silently reopen.
+pre-guard — a silent one-paisa twin divergence on garbage input. The Python
+twin was deleted by DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001, the
+``VwapState`` pyclass itself was deleted with the bits-52/53 tombstone at
+crate 0.4.0, and DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206, crate 0.6.0)
+REVIVED it — so the guard battery below is RESTORED from the pre-wipe suite
+and re-pins the closed domain hole at the single-source Rust boundary.
 """
 
 from __future__ import annotations
@@ -142,10 +142,12 @@ class TestVwapNegativeTypicalRejected:
     """The floor-vs-trunc domain hole stays CLOSED at the PyO3 boundary:
     negative typical raises instead of silently entering the accumulator.
 
-    Historical teeth (kept so the closed hole cannot silently reopen): the
-    (-7,1),(0,1) stream is the exact empirical input on which the Rust i128
-    truncating ``/`` (-3) and the deleted Python twin's flooring ``//`` (-4)
-    diverged pre-guard."""
+    RESTORED from the pre-wipe suite per DEC-VOCAB-VWAP-RETAIN-001
+    (MIGRATION.md #2206) — the ``VwapState`` pyclass is LIVE again at crate
+    0.6.0. Historical teeth (kept so the closed hole cannot silently
+    reopen): the (-7,1),(0,1) stream is the exact empirical input on which
+    the Rust i128 truncating ``/`` (-3) and the deleted Python twin's
+    flooring ``//`` (-4) diverged pre-guard."""
 
     def test_rust_state_rejects_negative_typical(self) -> None:
         state = trading_core.VwapState()

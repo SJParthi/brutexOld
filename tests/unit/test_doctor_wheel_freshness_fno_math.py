@@ -36,6 +36,7 @@ parity cases alone were proven blind to a 1-ULP fold-op-order mutant wheel).
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import sys
@@ -171,6 +172,31 @@ class TestBuildCrateVersion:
         payload = _fingerprint_payload()
         installed = {a for a in dir(_fno_math) if not a.startswith("_") or a == "__version__"}
         assert set(payload["symbols"]) == installed
+
+    def test_stub_all_matches_runtime_all(self) -> None:
+        # Drift pin (slice-4 refuter R3.1): the ``__init__.pyi`` stub's
+        # ``__all__`` must stay byte-equal to the runtime ``__init__.py``
+        # ``__all__`` — the stub is the pyright/mypy-strict contract for
+        # ``from fno_math import X``, and the caught drift class was a
+        # runtime-exported symbol (``sweep_drawdown_stats``) silently
+        # missing from the stub list. Parsed statically via ``ast`` so the
+        # pin reads the COMMITTED stub text, not any installed copy.
+        stub_path = REPO_FINGERPRINT.parent / "__init__.pyi"
+        tree = ast.parse(stub_path.read_text(encoding="utf-8"))
+        stub_all: list[str] | None = None
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+                and isinstance(node.value, ast.List)
+            ):
+                stub_all = [
+                    elt.value
+                    for elt in node.value.elts
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                ]
+        assert stub_all is not None, "stub __all__ list not found"
+        assert stub_all == list(fno_math.__all__)
 
 
 # ────────────────────────────────────────────────────────────────────────

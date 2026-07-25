@@ -15,7 +15,7 @@ consecutive rolls — and roll-on-first-bar layouts); backwards-dated bars
 Decimal bars** (the HLC3 snap trap — the typical price is computed from the
 RAW Decimals then snapped ONCE, so re-deriving it from the individually
 snapped OHLC diverges: the 0.004/0.004/0.007 counter-example is pinned);
-zero-volume / pre-open-only feeds (VWAP never warms); all-doji feeds;
+zero-volume / pre-open-only feeds; all-doji feeds;
 ``apply_1day_mask=True``; flag-ON suffix independence (truncation +
 mutation); flag-ON roll equivalence; and the G-6 exception-parity arm
 (envelope violations raise IDENTICAL exceptions ON vs OFF).
@@ -312,7 +312,7 @@ def test_flag_on_roll_equivalence_post_roll_equals_fresh_build() -> None:
     )
 
     bars = _stitched_bars()
-    n_pre = len(_HLC_SCRIPT)
+    n_pre = 2 * len(_HLC_SCRIPT)  # the pre-roll contract runs TWO script days
     _, full = _dual_arm(bars, roll_schedule=_ROLL_SCHEDULE)
     _, fresh = _dual_arm(bars[n_pre:], roll_schedule=_ROLL_SCHEDULE)
     assert full[n_pre:] == fresh

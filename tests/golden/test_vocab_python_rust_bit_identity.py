@@ -98,6 +98,12 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         fb.ext_down_162_paisa,
         fb.ext_down_200_paisa,
         fb.ext_down_262_paisa,
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — the four appended-last ABI slots
+        # (bull23 → bit 69, bull78 → bit 70, up424/dn424 both → bit 71).
+        fb.retrace_bull_23_paisa,
+        fb.retrace_bull_78_paisa,
+        fb.ext_up_424_paisa,
+        fb.ext_down_424_paisa,
     ]
     proximity = case["proximity"]
     prior = case["prior"]
@@ -109,7 +115,10 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
-        case["vwap_paisa"],
+        # RETAINED-ACTIVE vwap slot at its pre-wipe position
+        # (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206) — the seeded cases
+        # carry it; the keyless express cases (ids >= 400) default to None.
+        case.get("vwap_paisa"),
         pivot_levels,
         fib_levels,
         case["day_high_paisa"],
@@ -124,6 +133,18 @@ def _rust_with_levels(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        # The vocab-66 SuperTrend column + the Group-15 gap-midpoint pair
+        # (appended-last FFI law, DEC-GAP-MIDPOINT-CONDITIONS-001) — the
+        # seeded cases carry them VERBATIM; the DETERMINISTIC express
+        # cases (ids >= 400) omit them, so readers default (None / 10).
+        case.get("supertrend_x2_paisa"),
+        case.get("gap_mid_paisa"),
+        case["proximity"].get("gap_mid_bps", 10),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — appended-last swing pair + band
+        # (absent on the frozen pre-express cases ⇒ None / the default 10).
+        case.get("last_swing_high_paisa"),
+        case.get("last_swing_low_paisa"),
+        case["proximity"].get("swing_bps", 10),
     )
     return result
 
@@ -142,7 +163,9 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
-        case["vwap_paisa"],
+        # RETAINED-ACTIVE vwap slot at its pre-wipe position
+        # (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206).
+        case.get("vwap_paisa"),
         case["prev_pdh_paisa"],
         case["prev_pdl_paisa"],
         case["prev_pdc_paisa"],
@@ -158,6 +181,18 @@ def _rust_from_raw(case: dict[str, Any]) -> int:
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        # The vocab-66 SuperTrend column + the Group-15 gap-midpoint pair
+        # (appended-last FFI law, DEC-GAP-MIDPOINT-CONDITIONS-001) — the
+        # seeded cases carry them VERBATIM; the DETERMINISTIC express
+        # cases (ids >= 400) omit them, so readers default (None / 10).
+        case.get("supertrend_x2_paisa"),
+        case.get("gap_mid_paisa"),
+        case["proximity"].get("gap_mid_bps", 10),
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — appended-last swing pair + band
+        # (absent on the frozen pre-express cases ⇒ None / the default 10).
+        case.get("last_swing_high_paisa"),
+        case.get("last_swing_low_paisa"),
+        case["proximity"].get("swing_bps", 10),
     )
     return result
 

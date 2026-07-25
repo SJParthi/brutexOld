@@ -252,30 +252,80 @@ def _sweep_all_argv(lake: Path) -> list[str]:
 class TestSweepAllEnvSetdefault:
     """The spawn-inheritance seam: the env write happens EAGERLY, before any
     lake I/O — proven by driving the REAL dispatch against a NONEXISTENT lake
-    root (the loud refusal fires AFTER the resolver + env write)."""
+    root (the loud refusal fires AFTER the resolver + env write).
+
+    TWO-WORLD split since the train (DEC-SUPERTREND-CONDITIONS-001 #2203):
+    the DEFAULT vocabulary now carries bits >= 64, so a bare default-k
+    invocation takes the resolver's u64-only frontier fallback
+    (``apriori=False`` — the env write is GATED off, nothing to arm) and the
+    plan/engine still agree: ``apriori_enabled()`` reads unset/blank/
+    whitespace all OFF, matching the plan's legacy k=1,2. The original
+    DEC-SWEEP-APRIORI-DEFAULT-001 (#1850) ARMING law keeps failing-capable
+    teeth through the SAME default-k token path over an explicit sub-64
+    ``--conditions`` pool (the real resolver path — no monkeypatching)."""
+
+    #: A sub-64 pool that keeps the extinction default ARMED on the 74-bit
+    #: head (the #1850 teeth carrier — the u64-only fallback needs a >= 64
+    #: bit to fire, DEC-SUPERTREND-CONDITIONS-001 #2203).
+    _SUB64 = ("--conditions", "0,1,2,3")
+
+    def test_default_k_on_the_74bit_default_pool_falls_back_and_never_arms(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Re-derived (#1850 pin -> the #2203 interim law): the DEFAULT 74-bit
+        # vocabulary carries bits >= 64, so the extinction default falls back
+        # to legacy k=1,2 with ONE loud WARN and the env is NOT written —
+        # plan and engine agree (both legacy: apriori_enabled() reads unset
+        # as OFF).
+        _delenv_recorded(monkeypatch)
+        rc = main(_sweep_all_argv(tmp_path / "no-such-lake"))
+        assert rc == EXIT_USER_ERROR  # the missing-lake refusal, not a sweep
+        err = capsys.readouterr().err
+        assert "u64-only" in err  # the fallback WARN fired (before lake I/O)
+        assert SWEEP_APRIORI_ENV not in os.environ  # nothing armed
 
     def test_default_k_sets_the_env_before_lake_io(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The #1850 arming law, teeth-preserved on a sub-64 pool (#2203): the
+        # SAME default-k token path writes the env BEFORE any lake I/O once
+        # no >= 64 bit forces the fallback.
         _delenv_recorded(monkeypatch)
-        rc = main(_sweep_all_argv(tmp_path / "no-such-lake"))
+        rc = main([*_sweep_all_argv(tmp_path / "no-such-lake"), *self._SUB64])
         assert rc == EXIT_USER_ERROR  # the missing-lake refusal, not a sweep
         assert os.environ[SWEEP_APRIORI_ENV] == "1"
+
+    def test_blank_env_on_the_74bit_default_pool_is_left_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Re-derived (#2203): on the fallback path there is NO disagreement
+        # window to close — the plan is legacy AND apriori_enabled() reads a
+        # blank env OFF — so the gated write correctly leaves "" alone.
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "")
+        main(_sweep_all_argv(tmp_path / "no-such-lake"))
+        assert os.environ[SWEEP_APRIORI_ENV] == ""
 
     def test_blank_env_is_overwritten_so_plan_and_engine_agree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A SET-but-BLANK value resolves like unset but apriori_enabled() would
-        # read it OFF — the overwrite closes the disagreement window.
+        # read it OFF — the overwrite closes the disagreement window (the
+        # #1850 m1 law, teeth-preserved on a sub-64 pool per #2203).
         monkeypatch.setenv(SWEEP_APRIORI_ENV, "")
-        main(_sweep_all_argv(tmp_path / "no-such-lake"))
+        main([*_sweep_all_argv(tmp_path / "no-such-lake"), *self._SUB64])
         assert os.environ[SWEEP_APRIORI_ENV] == "1"
 
     def test_truthy_operator_value_is_left_verbatim(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Sub-64 pool so the write path is ARMED (#2203) — the pin proves the
+        # setdefault semantics while the write can actually happen; on the
+        # 74-bit default pool the gate skips the write entirely.
         monkeypatch.setenv(SWEEP_APRIORI_ENV, "true")
-        main(_sweep_all_argv(tmp_path / "no-such-lake"))
+        main([*_sweep_all_argv(tmp_path / "no-such-lake"), *self._SUB64])
         assert os.environ[SWEEP_APRIORI_ENV] == "true"  # setdefault semantics
 
     def test_explicit_numeric_k_never_touches_the_env(
@@ -499,14 +549,32 @@ class TestWhitespaceEnvSetdefault:
     """Review fix round 1 m1: a WHITESPACE-ONLY env value is classified like
     unset by the resolver, so the setdefault write must overwrite it too —
     the bare truthiness guard treated "   " as set, leaving apriori_enabled()
-    OFF under an extinction banner (a plan↔engine split-brain)."""
+    OFF under an extinction banner (a plan↔engine split-brain). Sub-64 pool
+    on the sweep-all arm since #2203 (the 74-bit default pool takes the
+    fallback — the write is gated off, no split-brain to close there)."""
 
     def test_whitespace_env_is_overwritten_on_sweep_all(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The #1850 m1 law, teeth-preserved on a sub-64 --conditions pool
+        # (DEC-SUPERTREND-CONDITIONS-001 #2203).
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "   ")
+        main(
+            [
+                *_sweep_all_argv(tmp_path / "no-such-lake"),
+                *TestSweepAllEnvSetdefault._SUB64,
+            ]
+        )
+        assert os.environ[SWEEP_APRIORI_ENV] == "1"
+
+    def test_whitespace_env_on_the_74bit_default_pool_is_left_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Re-derived (#2203): the fallback plan is legacy and
+        # apriori_enabled() reads "   " OFF — agreement without a write.
         monkeypatch.setenv(SWEEP_APRIORI_ENV, "   ")
         main(_sweep_all_argv(tmp_path / "no-such-lake"))
-        assert os.environ[SWEEP_APRIORI_ENV] == "1"
+        assert os.environ[SWEEP_APRIORI_ENV] == "   "
 
     def test_whitespace_env_is_overwritten_on_sweep_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

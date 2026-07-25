@@ -22,6 +22,8 @@ from collections.abc import Sequence
 __all__ = [
     "ResidentBars",
     "ResidentBarsU128",
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -35,6 +37,14 @@ __all__ = [
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
+    "exec_apply_futures_fill",
+    "exec_apply_slippage",
+    "exec_futures_charge_stack",
+    "exec_futures_materialize",
+    "exec_option_charge_stack",
+    "exec_options_materialize",
+    "exec_round_to_paisa",
+    "exec_round_to_rupee",
     "metrics_fold_recency",
     "metrics_fold_trades",
     "optcost_atm_offset",
@@ -52,6 +62,15 @@ __all__ = [
     "rank_axis_topm",
     "rank_dd_band_indices",
     "rank_pareto_frontier",
+    "ranking_composite_scores",
+    "ranking_composite_term_inputs",
+    "ranking_cr_div_i64",
+    "ranking_dsr_z_contributions",
+    "ranking_gate_reasons",
+    "ranking_overfit_verdicts",
+    "ranking_passes_gates",
+    "ranking_rank_order",
+    "ranking_zscores",
     "stats_cpcv_pass_count",
     "stats_cvar_tail_fold",
     "stats_expected_max_sharpe",
@@ -342,6 +361,254 @@ def rank_dd_band_indices(max_dd_pct: list[float], band_pct: float) -> list[int]:
     """
     ...
 
+def ranking_passes_gates(
+    total_trades: list[int],
+    profit_factor: list[float | None],
+    max_drawdown_pct: list[float],
+    win_rate: list[float],
+    win_loss_ratio: list[float | None],
+    max_consecutive_losses: list[int],
+    streak_threshold: list[int],
+    loss_rate: Sequence[float | None],
+    sl_hit_rate: Sequence[float | None],
+    max_sl_hit_rate: float | None,
+) -> list[bool]:
+    """Batched `brutex.ranking.passes_gates` twin (slice-4 PR-1).
+
+    One verdict per candidate, positionally aligned. `None` metric values
+    cross as `None` (never NaN-encoded). Raises `ValueError` on unequal
+    column lengths.
+
+    Door-5/6 fold-in-Rust/combine-in-Python columns (DEC-METRICS-RUST-STATS-002,
+    the #1544 ranking seam): the transcendental ``streak_threshold`` is the
+    shared Python seam's per-row output (kernel does only host-invariant
+    integer/finite compares), ``loss_rate``/``sl_hit_rate`` feed Door 5/6, and
+    the scalar ``max_sl_hit_rate`` is the opt-in Door-6 knob (``None`` = inert).
+    """
+    ...
+
+def ranking_gate_reasons(
+    total_trades: list[int],
+    profit_factor: list[float | None],
+    max_drawdown_pct: list[float],
+    win_rate: list[float],
+    win_loss_ratio: list[float | None],
+    max_consecutive_losses: list[int],
+    streak_threshold: list[int],
+    loss_rate: Sequence[float | None],
+    sl_hit_rate: Sequence[float | None],
+    max_sl_hit_rate: float | None,
+) -> list[list[str]]:
+    """Batched `brutex.ranking.gate_reasons` twin — the exact wire tokens.
+
+    Door-5/6 columns mirror :func:`ranking_passes_gates` (the #1544 ranking
+    seam). Raises `ValueError` on unequal column lengths.
+    """
+    ...
+
+def ranking_zscores(values: list[float]) -> list[float]:
+    """`brutex.ranking._zscores` twin — population z-scores clamped [-3, +3].
+
+    Class (b*): always run under the Python-side per-call differential.
+    Raises `ValueError` on an empty input (Python raises ZeroDivisionError).
+    """
+    ...
+
+def ranking_composite_term_inputs(
+    sharpe_ratio: list[float | None],
+    sortino_ratio: list[float | None],
+    calmar_ratio: list[float | None],
+    profit_factor: list[float | None],
+    recovery_factor: list[float | None],
+    win_rate: list[float],
+    win_loss_ratio: list[float | None],
+    avg_mfe_paisa: list[int],
+    avg_mae_paisa: list[int],
+) -> list[list[float]]:
+    """Batched `brutex.ranking.composite_term_inputs` twin (7 columns each).
+
+    Returns one 7-element ROW per survivor as a `list[list[float]]` —
+    deliberately NOT list-of-tuples (the Rust wrapper is `Vec<Vec<f64>>`;
+    a 7-tuple return type was measured to explode the cargo-mutants
+    value-enumeration ~45× and was avoided — see `ranking.rs`). Raises
+    `ValueError` on unequal column lengths or a paisa magnitude beyond
+    the 2**53 correctly-rounded-division fast-path envelope.
+    """
+    ...
+
+def ranking_composite_scores(
+    term_columns: list[list[float]],
+    dsr_contrib: list[float],
+) -> list[float]:
+    """`brutex.ranking.composite_scores` twin — z-normalise + weighted fold.
+
+    Raises `ValueError` unless exactly 7 term columns, each at least as
+    long as `dsr_contrib` and non-empty.
+    """
+    ...
+
+def ranking_dsr_z_contributions(
+    dsr_by_survivor: list[float],
+    weight: float,
+) -> list[float]:
+    """ACTIVE-arm `brutex.ranking.dsr_z_contributions` twin (z-scores × weight).
+
+    Raises `ValueError` on an empty input.
+    """
+    ...
+
+def ranking_rank_order(composites: list[float], masks: list[int]) -> list[int]:
+    """`rank_combos` total-order sort twin — the INDEX PERMUTATION over
+    `(-composite_score, mask)` (score DESC, unique mask ASC tie-break;
+    `-0.0 == +0.0`).
+
+    Raises `ValueError` on a length mismatch or a non-finite composite.
+    """
+    ...
+
+def ranking_overfit_verdicts(dsrs: list[float | None], dsr_min: float) -> list[bool]:
+    """Batched `brutex.ranking.overfit.passes_overfit_gate` twin
+    (`dsr is not None and dsr >= dsr_min`, boundary inclusive)."""
+    ...
+
+def ranking_cr_div_i64(numerator: int, denominator: int) -> float:
+    """Correctly-rounded i64/i64 → f64 division — the M1 FAST path.
+
+    Raises `ValueError` on a zero denominator or an operand magnitude
+    beyond 2**53 (the exact-cast envelope; the slow path is PR-2).
+    """
+    ...
+
+# --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1960) ---
+# Options/futures execution integer cores (rust/fno-math/src/exec/). All
+# money values are int64 paisa; rates use the `rate_decimal × 10^7` encoding;
+# a charge stack crosses as the PINNED 17-slot list mirroring
+# `brutex.costs.types.ChargeStack`; out-of-envelope arithmetic raises
+# `ValueError` (the Python seam falls back to the Python oracle arm).
+
+def exec_round_to_paisa(amount_x_bps_x100: int) -> int:
+    """ADVERSE CEILING at scale 10^7 (`_round_levy_paisa` twin,
+    DEC-FILL-WORST-CASE-ONLY-001)."""
+    ...
+
+def exec_round_to_rupee(amount_paisa: int) -> int:
+    """ADVERSE CEILING to a multiple of 100 paise (`_round_levy_rupee` twin)."""
+    ...
+
+def exec_apply_slippage(
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    is_long: bool,
+) -> tuple[int, int, int]:
+    """Worst-case bar-extreme fill law →
+    `(buy_fill, sell_fill, realized_slip_per_share)`."""
+    ...
+
+def exec_apply_futures_fill(
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    is_long: bool,
+) -> tuple[int, int, int]:
+    """Futures worst-case fill law (numerically the reconciled
+    `exec_apply_slippage`)."""
+    ...
+
+def exec_option_charge_stack(
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    brokerage_round_trip_paisa: int,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> list[int]:
+    """CALCULATOR_SPEC §4 steps 1,3–13 → the pinned 17-slot wire list."""
+    ...
+
+def exec_futures_charge_stack(
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    cost_free: bool,
+    brokerage_flat_paisa: int,
+    brokerage_turnover_bps_x100: int | None,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> list[int]:
+    """Futures charge stack (cost-free short-circuit) → 17-slot wire list."""
+    ...
+
+def exec_options_materialize(
+    entry_open_paisa: int,
+    exit_open_paisa: int,
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    entry_volume: int,
+    exit_volume: int,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    brokerage_round_trip_paisa: int,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> tuple[str, list[int] | None]:
+    """Options post-I/O tail (UNCONDITIONAL stale gate) →
+    `("stale_bar"|"tick_floor", None)` or `("trade", wire)`."""
+    ...
+
+def exec_futures_materialize(
+    entry_high_paisa: int,
+    entry_low_paisa: int,
+    exit_high_paisa: int,
+    exit_low_paisa: int,
+    entry_volume: int,
+    exit_volume: int,
+    path_highs_paisa: list[int],
+    path_lows_paisa: list[int],
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    cost_free: bool,
+    brokerage_flat_paisa: int,
+    brokerage_turnover_bps_x100: int | None,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> tuple[str, list[int] | None]:
+    """Futures post-I/O tail (UNCONDITIONAL stale gate) →
+    `("stale_bar", None)` or `("trade", wire+[mae, mfe])`."""
+    ...
+
+# --- end exec (slice 7 / P8) ---
+
 def stats_cpcv_pass_count(
     counts: list[int],
     means: list[float],
@@ -519,6 +786,54 @@ def metrics_fold_trades(
     outside the validated envelope; the seam degrades to the Python oracle.
     """
     ...
+class ResidentSweepEnum:
+    """Resident u64-width sweep-enumeration substrate (DEC-SWEEP-ENUM-RUST-001).
+
+    Holds the tuple's `bar_bits` window as condition-major transposed
+    bitplanes (built once in `__init__` — the `O(n_bars)` Python→Rust copy +
+    transpose is paid per tuple). `enumerate_prefilter` serves RANGES of the
+    fused k-of-bits enumeration + conflict prune + Stage-1B min-hits count in
+    the exact `iter_masks_k_of_bits` lexicographic order, returning the
+    design sextuple `(enumerated_in_range, conflict_pruned_in_range,
+    next_rank, exhausted, hits_counted_in_range, kept_masks)`. Raises
+    `ValueError` outside the validated envelope (a condition-bit or pair
+    index >= 64, k > n_unique, malformed pairs, start_rank > C(n, k), a
+    total count past the u64 rank domain) and `MemoryError` when a buffer
+    cannot be reserved (the global-stop class — re-raised bare by the
+    wrapper).
+    """
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]: ...
+
+class ResidentSweepEnumU128:
+    """Resident u128-width sweep-enumeration substrate — the wide twin of
+    `ResidentSweepEnum` for condition bits in `[64, 128)` (legal per
+    `MAX_VOCAB_BITS = 128`; production-unreachable today,
+    `IMPLEMENTED_MASK < 2**60`)."""
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]: ...
 
 class ResidentBars:
     """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.

@@ -42,10 +42,14 @@ from brutex.engine.combo_mask import (
 
 
 def test_vocab_bits_matches_total_conditions() -> None:
-    """VOCAB_BITS tracks the codegen'd vocabulary size (grow-only)."""
+    """VOCAB_BITS tracks the codegen'd vocabulary size (grow-only).
+
+    66 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205) — the five
+    express bits 69-73 + the reserved gap placeholders 66-68.
+    """
     from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
-    assert VOCAB_BITS == TOTAL_CONDITIONS == 60
+    assert VOCAB_BITS == TOTAL_CONDITIONS == 74
 
 
 def test_max_vocab_bits_is_128() -> None:

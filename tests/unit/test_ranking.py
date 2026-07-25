@@ -1169,3 +1169,80 @@ class TestSharedRankInternals:
             cfg=cfg,
         )
         assert dsrs[0] == expected
+
+
+class TestRustDispatchSeam:
+    """The ONE flag-gated Rust dispatch seam in ``rank_combos`` (slice 4 PR-1).
+
+    These tests live in THIS file deliberately: the weekly Python mutation
+    math pass (DEC-MUTATION-GATE-RANKING-001, ``.github/workflows/mutation.yml``)
+    mutates ``brutex/ranking/__init__.py`` with exactly this file (+
+    ``test_deflated_sharpe.py``) as its runner, so every mutant on the
+    dispatch lines must be killable HERE — e.g. the ``is not None`` →
+    ``is None`` flip on the Rust-result check, which under
+    ``test_enabled_dispatch_returns_the_rust_result`` skips the ``return``
+    and falls through to the Python pipeline, failing the identity
+    assertion. The seam functions are monkeypatched on
+    :mod:`brutex.ranking.rust_ranking` (the in-function lazy import resolves
+    module attributes at call time), so the tests are WHEEL-INDEPENDENT and
+    never touch the env flag, burn-in state, or the compiled kernels.
+    """
+
+    def test_enabled_dispatch_returns_the_rust_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.ranking import rust_ranking
+
+        sentinel = [RankedCombo(mask=0b1, metrics=_m(), composite_score=1.25, deflated_sharpe=None)]
+        seen: list[tuple[Any, Any]] = []
+
+        def fake_rank(
+            candidates: Any, *, overfit: OverfitGateConfig | None = None
+        ) -> list[RankedCombo]:
+            seen.append((candidates, overfit))
+            return sentinel
+
+        monkeypatch.setattr(rust_ranking, "ranking_rust_enabled", lambda: True)
+        monkeypatch.setattr(rust_ranking, "rank_combos_via_rust", fake_rank)
+        pool = [(0b1, _m())]
+        cfg = OverfitGateConfig()
+        # IDENTITY, not equality: a mutant that skips the `return rust_ranked`
+        # arm runs the Python pipeline instead and cannot produce this object.
+        assert rank_combos(pool, overfit=cfg) is sentinel
+        # The seam threads the caller's exact candidates + overfit config.
+        assert seen == [(pool, cfg)]
+
+    def test_enabled_wheel_missing_none_falls_back_to_python(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.ranking import rust_ranking
+
+        pool = [(0b01, _m(sharpe_ratio=1.0)), (0b10, _m(sharpe_ratio=3.0))]
+        # OFF/oracle baseline (#2215: the seam default is ON — an unset flag
+        # would compute ``expected`` via the Rust path, not the Python oracle).
+        monkeypatch.setenv("BRUTEX_RANKING_RUST", "0")
+        expected = rank_combos(pool)
+        calls: list[int] = []
+
+        def fake_rank(candidates: Any, *, overfit: OverfitGateConfig | None = None) -> None:
+            calls.append(1)
+
+        monkeypatch.setattr(rust_ranking, "ranking_rust_enabled", lambda: True)
+        monkeypatch.setattr(rust_ranking, "rank_combos_via_rust", fake_rank)
+        got = rank_combos(pool)
+        assert calls == [1]
+        assert got == expected
+
+    def test_disabled_never_consults_the_rust_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.ranking import rust_ranking
+
+        # OFF is the explicit kill switch (#2215: the seam default is ON, so an
+        # unset flag would engage the seam and trip the _boom guard below).
+        monkeypatch.setenv("BRUTEX_RANKING_RUST", "0")
+
+        def _boom(candidates: Any, *, overfit: OverfitGateConfig | None = None) -> None:
+            raise AssertionError("rank_combos_via_rust must not run with the flag OFF")
+
+        monkeypatch.setattr(rust_ranking, "rank_combos_via_rust", _boom)
+        ranked = rank_combos([(0b1, _m())])
+        assert [rc.mask for rc in ranked] == [0b1]

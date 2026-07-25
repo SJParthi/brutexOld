@@ -42,7 +42,7 @@ inside; widen :data:`STRIKE_BAND_ENV` if a thin name needs more. Pure + O(chain)
 
 **Scope (CLAUDE.md §3).** Option/future bars are LAKE / REFERENCE_ONLY (DEC-P0-063) — this
 module bounds their reference-only ingest and NEVER touches the brute-force engine or the
-52-condition vocabulary.
+shared condition vocabulary.
 """
 
 from __future__ import annotations

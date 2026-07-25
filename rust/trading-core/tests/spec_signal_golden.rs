@@ -1,7 +1,7 @@
 //! The DEPLOY-CONTRACT golden: `evaluate(spec)` is bit-consistent with the FROZEN
-//! `evaluate_atoms` kernel + the 400-case answer-key (DEC-STRATEGYSPEC-CORE-001).
+//! `evaluate_atoms` kernel + the 408-case answer-key (DEC-STRATEGYSPEC-CORE-001).
 //!
-//! For EVERY one of the 400 `vocab_golden_vectors.json` cases we build a
+//! For EVERY one of the 408 `vocab_golden_vectors.json` cases we build a
 //! [`StrategySpec`] whose `condition_mask` IS that case's frozen `expected_mask`
 //! and prove:
 //!
@@ -38,6 +38,22 @@ struct Proximity {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// Group-15 gap-midpoint tolerance (DEC-GAP-MIDPOINT-CONDITIONS-001);
+    /// serde-defaulted (10 = the evaluator default) for pre-gap parses.
+    #[serde(default = "default_gap_mid_bps")]
+    gap_mid_bps: i64,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the swing band (bits 72/73). Defaulted
+    /// so the parser stays tolerant of the pre-express fixture shape.
+    #[serde(default = "default_swing_bps")]
+    swing_bps: i64,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
+}
+
+fn default_swing_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -64,6 +80,11 @@ struct Case {
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    /// Session-anchored intraday VWAP (Group 10, bits 52-53 — RETAINED per
+    /// DEC-VOCAB-VWAP-RETAIN-001; `None` = abstain, bits clear).
+    /// serde-defaulted: the RNG-free express cases (ids 400-407,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001) do not emit the key.
+    #[serde(default)]
     vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
@@ -74,6 +95,19 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// The SuperTrend line in the ×2-scaled paisa domain (fixture version 4 —
+    /// the vocab-66 implemented-flip; `None` = warm-up, bits 64/65 clear).
+    supertrend_x2_paisa: Option<i64>,
+    /// Group-15 gap-midpoint level, carried VERBATIM
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001); serde-defaulted for pre-gap parses.
+    #[serde(default)]
+    gap_mid_paisa: Option<i64>,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the confirmed-swing anchors (bits
+    /// 72/73). Defaulted (None = no confirmed swing) for pre-express shapes.
+    #[serde(default)]
+    last_swing_high_paisa: Option<i64>,
+    #[serde(default)]
+    last_swing_low_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -136,11 +170,19 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        // Fixture version 4 (the vocab-66 SuperTrend implemented-flip)
+        // carries the appended ST input per case — threaded verbatim.
+        supertrend_x2_paisa: c.supertrend_x2_paisa,
+        gap_mid_paisa: c.gap_mid_paisa,
+        last_swing_high_paisa: c.last_swing_high_paisa,
+        last_swing_low_paisa: c.last_swing_low_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
         pdh_pdl_proximity_bps: c.proximity.pdh_pdl_bps,
         fib_proximity_bps: c.proximity.fib_bps,
+        gap_mid_proximity_bps: c.proximity.gap_mid_bps,
+        swing_proximity_bps: c.proximity.swing_bps,
     };
     let prior = PriorBarHistory {
         prior_n: c.prior.prior_n,
@@ -152,7 +194,8 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
 #[test]
 fn spec_requiring_its_own_bits_fires_and_reproduces_the_oracle() {
     let fixture = load_fixture();
-    assert_eq!(fixture.cases.len(), 400, "deploy golden expects 400 cases");
+    // 400 seeded + the 8 DEC-FIB-TEMPLATE-EXPRESS-001 deterministic cases.
+    assert_eq!(fixture.cases.len(), 408, "deploy golden expects 408 cases");
     let mut failures: Vec<String> = Vec::new();
     for c in &fixture.cases {
         let (snapshot, proximity, prior) = rebuild(c);

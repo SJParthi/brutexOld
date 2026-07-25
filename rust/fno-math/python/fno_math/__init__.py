@@ -65,6 +65,11 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     # DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (fenced
     # additive entries; keep-both union seam with sibling fno-math lanes).
     "ResidentBarsU128",
+    # DEC-SWEEP-ENUM-RUST-001 (#1738) — the ranged sweep-enum kernel classes
+    # (fenced additive entries; unmerged sibling slices share this surface).
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
+    # end DEC-SWEEP-ENUM-RUST-001 entries
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -100,6 +105,25 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "rank_axis_topm",
     "rank_dd_band_indices",
     "rank_pareto_frontier",
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    "exec_apply_futures_fill",
+    "exec_apply_slippage",
+    "exec_futures_charge_stack",
+    "exec_futures_materialize",
+    "exec_option_charge_stack",
+    "exec_options_materialize",
+    "exec_round_to_paisa",
+    "exec_round_to_rupee",
+    # --- end exec (slice 7 / P8) ---
+    "ranking_composite_scores",
+    "ranking_composite_term_inputs",
+    "ranking_cr_div_i64",
+    "ranking_dsr_z_contributions",
+    "ranking_gate_reasons",
+    "ranking_overfit_verdicts",
+    "ranking_passes_gates",
+    "ranking_rank_order",
+    "ranking_zscores",
     "stats_cpcv_pass_count",
     "stats_cvar_tail_fold",
     # DEC-METRICS-RUST-STATS-002 — the slice-6 PR-2 stats-tail kernels
@@ -146,6 +170,10 @@ _assert_compiled_surface(_compiled)
 from ._fno_math import (  # noqa: E402
     ResidentBars,
     ResidentBarsU128,
+    # DEC-SWEEP-ENUM-RUST-001 (#1738) — fenced additive entries.
+    ResidentSweepEnum,
+    ResidentSweepEnumU128,
+    # end DEC-SWEEP-ENUM-RUST-001 entries
     ResidentSweepSim,
     ResidentSweepSimU128,
     __version__,
@@ -159,6 +187,15 @@ from ._fno_math import (  # noqa: E402
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
     count_supermasks_u128s,
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    exec_apply_futures_fill,
+    exec_apply_slippage,
+    exec_futures_charge_stack,
+    exec_futures_materialize,
+    exec_option_charge_stack,
+    exec_options_materialize,
+    exec_round_to_paisa,
+    exec_round_to_rupee,
     metrics_fold_recency,
     metrics_fold_trades,
     optcost_atm_offset,
@@ -176,6 +213,16 @@ from ._fno_math import (  # noqa: E402
     rank_axis_topm,
     rank_dd_band_indices,
     rank_pareto_frontier,
+    # --- end exec (slice 7 / P8) ---
+    ranking_composite_scores,
+    ranking_composite_term_inputs,
+    ranking_cr_div_i64,
+    ranking_dsr_z_contributions,
+    ranking_gate_reasons,
+    ranking_overfit_verdicts,
+    ranking_passes_gates,
+    ranking_rank_order,
+    ranking_zscores,
     stats_cpcv_pass_count,
     stats_cvar_tail_fold,
     stats_expected_max_sharpe,
@@ -203,6 +250,11 @@ __build_crate_version__: str = __version__
 __all__ = [
     "ResidentBars",
     "ResidentBarsU128",
+    # DEC-SWEEP-ENUM-RUST-001 (#1738) — the ranged sweep-enum kernel classes
+    # (fenced additive entries; unmerged sibling slices share this surface).
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
+    # end DEC-SWEEP-ENUM-RUST-001 entries
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -216,6 +268,15 @@ __all__ = [
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    "exec_apply_futures_fill",
+    "exec_apply_slippage",
+    "exec_futures_charge_stack",
+    "exec_futures_materialize",
+    "exec_option_charge_stack",
+    "exec_options_materialize",
+    "exec_round_to_paisa",
+    "exec_round_to_rupee",
     "metrics_fold_recency",
     "metrics_fold_trades",
     "optcost_atm_offset",
@@ -233,6 +294,16 @@ __all__ = [
     "rank_axis_topm",
     "rank_dd_band_indices",
     "rank_pareto_frontier",
+    # --- end exec (slice 7 / P8) ---
+    "ranking_composite_scores",
+    "ranking_composite_term_inputs",
+    "ranking_cr_div_i64",
+    "ranking_dsr_z_contributions",
+    "ranking_gate_reasons",
+    "ranking_overfit_verdicts",
+    "ranking_passes_gates",
+    "ranking_rank_order",
+    "ranking_zscores",
     "stats_cpcv_pass_count",
     "stats_cvar_tail_fold",
     "stats_expected_max_sharpe",

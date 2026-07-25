@@ -949,6 +949,19 @@ def rank_combos(
         wiring violation (missing/misaligned triples — see
         :func:`_temporal_survivors`).
     """
+    # ── The ONE flag-gated Rust dispatch seam (slice 4 PR-1;
+    # ``BRUTEX_RANKING_RUST``, default ON (#2215) — :mod:`brutex.ranking.rust_ranking`).
+    # Imported lazily so the arm costs one cached-module import
+    # + one env probe (OFF-cost bench-pinned) and the module graph stays
+    # cycle-free; a ``None`` return (wheel missing/stale) falls through to
+    # the verbatim Python pipeline below, byte-identical by construction.
+    # MERGE-DERIVED LAW (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 landed after the
+    # kernel slice): the seam is probed on the ``temporal is None`` arm ONLY —
+    # ``rank_combos_via_rust`` carries no temporal parameter (it predates the
+    # axis), so a temporal-gated leaderboard ALWAYS runs the Python pipeline
+    # below (the year gate must filter; a kernel serve would silently skip it).
+    from brutex.ranking.rust_ranking import rank_combos_via_rust, ranking_rust_enabled
+
     # Hard doors → temporal (survivors filter) → overfit (full candidate pool).
     # The temporal=None default arm is LITERALLY the pre-change line (plus the
     # opt-in Door-6 ceiling threading) — the temporal machinery is never
@@ -957,7 +970,20 @@ def rank_combos(
     # ``max_sl_hit_rate`` can never be silently skipped under an active
     # temporal gate (batch ≡ bounded verdict parity — the bounded arm's gate
     # bits were recorded with the ceiling at ``SurvivorColumns.append``).
+    #
+    # KEEP-BOTH WEAVE (#1544 club-r1-fnomath ranking Rust seam × the Door-6
+    # ceiling): the default-ON Rust fast-path engages ONLY when NO Door-6
+    # ceiling is active. ``rank_combos_via_rust`` carries neither a temporal
+    # NOR a ``max_sl_hit_rate`` parameter (the axis it predates, per the
+    # comment above), so — exactly like the temporal arm — an active ceiling
+    # MUST fall through to the Python ``passes_gates`` that honors it.
+    # Correctness (the ceiling can never be silently skipped) over the
+    # optional seam's speed.
     if temporal is None:
+        if max_sl_hit_rate is None and ranking_rust_enabled():
+            rust_ranked = rank_combos_via_rust(candidates, overfit=overfit)
+            if rust_ranked is not None:
+                return rust_ranked
         survivors = [
             (mask, m) for mask, m in candidates if passes_gates(m, max_sl_hit_rate=max_sl_hit_rate)
         ]

@@ -18,8 +18,10 @@ wheel is built by maturin and installed in every CI job that imports
   the backtest==live deploy contract (thin wrapper over ``evaluate_with_levels``,
   the frozen kernel untouched). ``SPEC_SCHEMA_VERSION`` / ``IMPLEMENTED_MASK`` are
   the companion constants.
-* ``compute_pivot_levels`` / ``compute_fib_levels`` — the single-source indicator
-  math BruteX's ``brutex.indicators`` wrappers pack into their dataclasses.
+* ``compute_pivot_levels`` / ``compute_fib_levels`` / ``compute_gap_mid`` — the
+  single-source indicator math BruteX's ``brutex.indicators`` wrappers pack into
+  their dataclasses (``compute_gap_mid`` is the session-edge gap-midpoint level
+  for the Group-15 bits 66-68, DEC-GAP-MIDPOINT-CONDITIONS-001).
 * ``compute_ema`` / ``ema_alpha`` / ``ema_seed`` / ``ema_step`` — the single-source
   EMA 20/200 recurrence BruteX's ``brutex.indicators.ema`` shim delegates to
   (``DEC-EMA-RUST-PORT-001``).
@@ -41,8 +43,21 @@ wheel is built by maturin and installed in every CI job that imports
 * ``VwapState`` / ``MarketStructureState`` — the stateful, look-ahead-clean
   session-anchored VWAP + BOS/CHoCH detectors BruteX's ``stage1a`` engine drives
   per bar so the per-bar compute runs in Rust (the bit-identical
-  backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-INDICATORS-001``
-  / ``DEC-NIFTY-BOS-CHOCH-001``).
+  backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-BOS-CHOCH-001``).
+  ``VwapState`` was deleted by the 0.4.0 vocabulary reshape's VWAP tombstone
+  and is RESTORED — bits 52/53 retained, evaluate-with-volume /
+  abstain-without — per the operator ruling ``DEC-VOCAB-VWAP-RETAIN-001``
+  (MIGRATION.md #2206); the 0.6.0 shim REFUSES a wipe-era wheel on the
+  missing symbol (the presence handshake below).
+* ``SupertrendState`` — the stateful SuperTrend (ATR-10 Wilder, factor 3, hl2)
+  line in the exact ×2-scaled integer-paisa domain (bits 64-65 — the vocab-66
+  PR-B implemented-flip). ``update(high, low, close)`` returns the value the
+  evaluate ABIs' appended ``supertrend_x2_paisa`` argument expects (``None``
+  during the 9-bar warm-up). The 0.5.0 shim REFUSES a stale wheel missing it
+  (the symbol joins ``_EXPECTED_COMPILED_SYMBOLS`` below — the
+  version-SENSITIVE presence handshake for this reshape).
+* ``NARROW_CPR_WIDTH_BPS`` — the Central Pivot Range narrow-day threshold
+  (bits 60-63; the ONE named constant, cross-pinnable from Python tests).
 * ``stage1a_bar_bits_batch`` — the batch Stage-1A bar-bits kernel
   (``DEC-STAGE1A-RUST-BATCH-001``): one call per ``(instrument, tf)`` build over
   prepass-resolved columns/day-tables, returning one u128 mask per bar. The
@@ -104,13 +119,16 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "GREEKS_VEGA_ADMISSION_FLOOR",
     "IMPLEMENTED_MASK",
     "MarketStructureState",
+    "NARROW_CPR_WIDTH_BPS",
     "PIVOT_LEVELS_LEN",
     "SPEC_SCHEMA_VERSION",
+    "SupertrendState",
     "TOTAL_CONDITIONS",
     "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",
+    "compute_gap_mid",
     "compute_pivot_levels",
     "derive_bar_metadata",
     "ema_alpha",
@@ -159,6 +177,15 @@ def _assert_compiled_surface(
 _compiled = importlib.import_module("._trading_core", __name__)
 _assert_compiled_surface(_compiled)
 
+# Version-SENSITIVE staleness teeth (the 0.6.0 vocab-train reconcile): the
+# VWAP retention (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206) restored the
+# ``VwapState`` pyclass the 0.4.0 reshape had deleted, and the train grew the
+# vocabulary through the SuperTrend flip / gap-midpoint / fib-express members
+# — so a wipe-era (0.4.x/0.5.x) wheel misses ``VwapState`` and/or
+# ``compute_gap_mid`` and ``_assert_compiled_surface`` above refuses it with
+# the actionable rebuild message. The former 0.4.0 DELETION-side handshake
+# (refuse a wheel that still EXPOSES ``VwapState``) is REMOVED with the
+# retention — the presence surface list is the whole handshake again.
 # The freshness handshake above MUST run before this re-export so a stale
 # wheel raises the actionable message, not a bare from-import failure.
 from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
@@ -169,14 +196,17 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     GREEKS_T_FLOOR_YEARS,
     GREEKS_VEGA_ADMISSION_FLOOR,
     IMPLEMENTED_MASK,
+    NARROW_CPR_WIDTH_BPS,
     PIVOT_LEVELS_LEN,
     SPEC_SCHEMA_VERSION,
     TOTAL_CONDITIONS,
     MarketStructureState,
+    SupertrendState,
     VwapState,
     __version__,
     compute_ema,
     compute_fib_levels,
+    compute_gap_mid,
     compute_pivot_levels,
     derive_bar_metadata,
     ema_alpha,
@@ -220,14 +250,17 @@ __all__ = [
     "GREEKS_T_FLOOR_YEARS",
     "GREEKS_VEGA_ADMISSION_FLOOR",
     "IMPLEMENTED_MASK",
+    "NARROW_CPR_WIDTH_BPS",
     "PIVOT_LEVELS_LEN",
     "SPEC_SCHEMA_VERSION",
     "TOTAL_CONDITIONS",
     "MarketStructureState",
+    "SupertrendState",
     "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",
+    "compute_gap_mid",
     "compute_pivot_levels",
     "derive_bar_metadata",
     "ema_alpha",

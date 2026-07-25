@@ -42,7 +42,14 @@ _DATA: dict[str, Any] = json.loads(_RAW)
 
 # Byte-freeze manifest (fixtures/README.md convention): any edit to the vectors
 # — accidental or a regeneration — must consciously update this digest.
-_EXPECTED_SHA256 = "85a0e57dbde7f2dcba91e71184f8c2c4bbf488a92e1d8104a9db92477f3dd08e"
+# DELIBERATE RE-LOCK (the vocab-train Regen, DEC-VOCAB-VWAP-RETAIN-001,
+# MIGRATION.md #2206): the wipe-era v2 (MS-only) fixture regains its VWAP
+# half. The regen run PROVED the MS half byte-identical to BOTH the v2
+# fixture AND the pre-wipe v1, and the VWAP half byte-identical to the
+# pre-wipe v1 (sha 85a0e57dbde7f2dcba91e71184f8c2c4bbf488a92e1d8104a9db92
+# 477f3dd08e) — the ONLY delta is `generated_with_crate_version`
+# 0.3.0 -> 0.6.0.
+_EXPECTED_SHA256 = "e069248fefd6b1f44723346918833273a58f87056b2675865762988db8b55b52"
 
 #: Golden streams frozen with NO confirmable swing (tied/flat/vetoed windows) —
 #: after their full replay both swing-level getters must still read ``None``.

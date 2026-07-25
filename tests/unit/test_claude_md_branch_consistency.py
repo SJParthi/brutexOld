@@ -206,7 +206,12 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # the ranking-pass rationale comment recording brutex/ranking/streaks.py
     # + tests/unit/test_ranking_streaks.py joining the pair (the #1750
     # pledge extension) cites THAT decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797, 1975}),
+    # 2212 = DEC-EXEC-RUST-CORE-001 (2026-07-24 club fold, renumbered from
+    # #1979): the slice-7 exec mutmut-pair + fno-math cargo-mutants scope
+    # rationale comments cite THAT decision's entry, not this one.
+    ".github/workflows/mutation.yml": frozenset(
+        {590, 615, 1597, 1685, 1750, 1774, 1797, 1975, 2212}
+    ),
     # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): render_shard's
     # docstring cites THAT decision's entry for its Rust-seam routing note,
     # not this one.

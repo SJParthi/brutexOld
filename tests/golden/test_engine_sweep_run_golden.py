@@ -657,6 +657,45 @@ def test_golden_rust_metrics_domain_valid_poison_moves_the_hash_past_burn_in(
     reset_self_check_for_tests()  # never leak the exhausted budget to siblings
 
 
+def test_golden_ranking_rust_on_arm_is_byte_identical_and_engages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice-4 PR-1: ``BRUTEX_RANKING_RUST=1`` reproduces the frozen
+    pre-conversion store hash byte-for-byte AND genuinely runs the ranking
+    kernels (exactly one ``engaged`` per pow-free family — the
+    vacuous-gate trap, Golden Rule #10). The hash equality is
+    UNCONDITIONAL on every host: the (b*) families' always-on differential
+    ships the Python oracle's bits on any libm divergence (such a
+    divergence is a LOUD ``ranking.composite``/``ranking.dsr_z``
+    autorevert, never a byte delta — asserted below)."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    from brutex.ranking.rust_ranking import reset_ranking_rust_for_tests
+
+    monkeypatch.setenv("BRUTEX_RANKING_RUST", "0")
+    wired = _run(tmp_path, "a")  # explicit OFF — the reference bytes
+    monkeypatch.setenv("BRUTEX_RANKING_RUST", "1")
+    reset_ranking_rust_for_tests()
+    with capture_logs() as logs:
+        rust_arm = _run(tmp_path, "b")
+    engaged = [e["family"] for e in logs if e["event"] == "rust_parity.engaged"]
+    assert engaged.count("ranking.gates") == 1  # the ranking kernels actually served
+    assert engaged.count("ranking.order") == 1
+    for event in (e for e in logs if e["event"] == "rust_parity.autoreverted"):
+        # Legal ONLY as the loud (b*) host-libm arm — never a wire delta.
+        assert event["family"] in {"ranking.composite", "ranking.dsr_z"}
+        assert event["reason"] == "divergence"
+    assert wired.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert rust_arm.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert (rust_arm.enumerated, rust_arm.evaluated, rust_arm.ranked, rust_arm.persisted) == (
+        wired.enumerated,
+        wired.evaluated,
+        wired.ranked,
+        wired.persisted,
+    )
+    assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+    reset_ranking_rust_for_tests()  # never leak burn-in/latch state to siblings
+
+
 def test_golden_rust_metrics_domain_valid_poison_in_burn_in_is_autoreverted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -687,3 +726,164 @@ def test_golden_rust_metrics_domain_valid_poison_in_burn_in_is_autoreverted(
     assert reverted[0]["reason"] == "self_check_mismatch"
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
     reset_self_check_for_tests()  # never leak the latch to sibling tests
+
+
+# ────── DEC-SWEEP-ENUM-RUST-001 — the DIGEST-PATH GOLDEN VARIANT ──────
+#
+# The design-of-record's §5 anti-vacuous bullet (round-3 MAJOR fix): the
+# ORIGINAL fixture above passes NO trial_stats_digest (the LEGACY dedup path)
+# and leaves top_k=None — the Rust enum/core arms can never engage on it, so
+# engagement-dependent goldens against it would be either unimplementable or
+# vacuous Python==Python compares. This VARIANT is the SAME synthetic grid
+# with a synthetic trial_stats_digest and a finite top_k >= the ranked count
+# (finalists == ranked, so the finalist SET matches the legacy fixture's).
+# Its literals were MINTED ON THE OFF ARM FIRST (BRUTEX_SWEEP_RUST_ENUM
+# unset, 2026-07-11 — SHIPPING-SPINE-authored, new-enum-kernel-free by
+# construction) and are now FROZEN; every engagement-dependent golden below
+# runs against the VARIANT, and the ORIGINAL fixture gains the LEGACY-REFUSAL
+# role (flag ON reproduces the original literals with zero engaged events +
+# one `legacy_dedup_path` warn).
+
+#: The variant's synthetic tuple digest (16 hex chars — the trial-stats law).
+_DIGEST_VARIANT = "d16e57e0d16e57e0"
+
+#: OFF-arm-minted store content hash for the digest variant. EQUAL to
+#: `_GOLDEN_CONTENT_HASH` by construction — top_k=8 >= the 5 ranked combos, so
+#: the persisted finalist rows are identical to the legacy fixture's; the
+#: digest path adds only the sidecar + sentinel artifacts, which do not enter
+#: the store bytes. Frozen as its OWN literal so a future divergence between
+#: the paths breaks THIS golden by name.
+# RE-PINNED at the 2026-07-24 club fold: the base's landed
+#: DEC-FILL-EXEC-GRID-1M-001 (#1989) re-locked the legacy fixture's
+#: `_GOLDEN_CONTENT_HASH` (the 1-minute execution grid moved the store bytes)
+#: but MISSED this digest-variant literal, which is EQUAL to it by the
+#: documented construction — so it moves in lockstep to the base's re-locked
+#: value (never a fresh mint; captured equal to `_GOLDEN_CONTENT_HASH` on the
+#: OFF/ENUM-ON/poisoned-OFF arms alike, all three agree by construction).
+_GOLDEN_CONTENT_HASH_DIGEST = "6e15a6540c0ef8997d71daa3342ebeefb60006e56fb005b16c02744b2e22f7f9"
+
+#: The variant's run-identity literal — identical to `_GOLDEN_RUN_ID` (the
+#: run identity is a pure BLAKE3 of its 9 canonical inputs; neither the
+#: digest nor top_k enters it — pinned so a future accidental coupling of
+#: run identity to either would break THIS golden by name).
+# RE-PINNED at the same fold: #1989 emits `execution_grid: "1m_next_bar"`
+#: unconditionally in `canonical_trade_params`, so the run identity moved to
+#: the base's re-locked `_GOLDEN_RUN_ID` (the retired value is the base's
+#: negative-pinned `_PRE_GRID_RUN_ID`). Verified via
+#: `mask_run_id(mask=0b101, params=_PARAMS, **_CTX)` in the OFF-arm test below.
+_GOLDEN_RUN_ID_DIGEST = "caf0cb630c4a1c74d71605f23140a9f35d3b3da2e41543b918723e4a9c9390ca"
+
+
+def _run_digest_variant(tmp_path: Path, tag: str) -> SweepRunSummary:
+    """The digest-path variant run: same grid, synthetic digest, top_k=8."""
+    bars = _bars()
+    store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+    dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+    with AuditWriter(path=tmp_path / f"{tag}.jsonl") as audit:
+        return run_persisted_sweep(
+            bars,
+            replace(_config(), top_k=8),
+            store=store,
+            dedup=dedup,
+            audit=audit,
+            trial_stats_digest=_DIGEST_VARIANT,
+            exec_bars_1m=bars,  # the §6 tf=1minute fixed point
+        )
+
+
+def _reset_enum_state() -> None:
+    from brutex.engine.rust_enum import (
+        reset_enum_self_check_for_tests,
+        reset_observability_memo_for_tests,
+    )
+
+    reset_enum_self_check_for_tests()
+    reset_observability_memo_for_tests()
+
+
+def test_digest_variant_off_arm_reproduces_the_frozen_literals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OFF arm (the explicit ``"0"`` kill switch): the frozen OFF-minted
+    literals reproduce, with ZERO `sweep_rust_enum.engaged` AND ZERO
+    `sweep_rust_core.engaged` events (the negative arm-discriminator pins —
+    bytes are arm-identical by construction, so the events are the ONLY
+    discriminator). Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the default is
+    ON, so OFF is armed ``"0"`` — an unset flag would engage the kernel."""
+    pytest.importorskip("polars")
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_ENUM", "0")
+    _reset_enum_state()
+    with capture_logs() as logs:
+        summary = _run_digest_variant(tmp_path, "off")
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH_DIGEST
+    assert mask_run_id(mask=0b101, params=_PARAMS, **_CTX) == _GOLDEN_RUN_ID_DIGEST
+    assert not [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+    assert not [e for e in logs if e["event"] == "sweep_rust_core.engaged"]
+    _reset_enum_state()
+
+
+def test_digest_variant_enum_on_reproduces_the_literals_and_engages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ENUM-only arm: byte-for-byte the OFF-minted literals WITH exactly one
+    `sweep_rust_enum.engaged` and ZERO `sweep_rust_core.engaged` (the
+    positive + negative engaged pins; the fold core does not exist in
+    Slice 1 — the zero-count assertion is structured so Slice 2 extends this
+    to the full 4-combo arm matrix), and zero autorevert events."""
+    pytest.importorskip("polars")
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_ENUM", "1")
+    _reset_enum_state()
+    with capture_logs() as logs:
+        summary = _run_digest_variant(tmp_path, "on")
+    engaged = [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+    assert len(engaged) == 1
+    assert not [e for e in logs if e["event"] == "sweep_rust_core.engaged"]
+    assert not [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH_DIGEST
+    _reset_enum_state()
+
+
+def test_legacy_refusal_golden_flag_on_reproduces_the_original_literals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The LEGACY-REFUSAL golden: the ORIGINAL fixture (no digest, top_k=None)
+    with the enum flag ON reproduces the ORIGINAL frozen literals with ZERO
+    engaged events and exactly one `legacy_dedup_path` fallback warn — the
+    engagement-condition teeth (the digest-path condition is named FIRST in
+    the design's listing order)."""
+    pytest.importorskip("polars")
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_ENUM", "1")
+    _reset_enum_state()
+    with capture_logs() as logs:
+        summary = _run(tmp_path, "legacy")
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert not [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+    warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+    assert [w["reason"] for w in warns] == ["legacy_dedup_path"]
+    _reset_enum_state()
+
+
+def test_digest_variant_disabled_arm_poison_reproduces_the_literals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disabled-arm POISON golden (the runbook's teeth): a poisoned
+    `fno_math.ResidentSweepEnum` with the enum flag OFF reproduces the
+    variant literals byte-for-byte with zero enum events — the flag ALONE
+    prevents kernel consumption (exactly the mid-incident configuration the
+    kill-switch runbook puts an operator in)."""
+    pytest.importorskip("polars")
+    import fno_math
+
+    class _Poisoned:
+        def __init__(self, bar_bits: list[int]) -> None:
+            raise AssertionError("the disabled arm must never construct the kernel")
+
+    monkeypatch.setenv("BRUTEX_SWEEP_RUST_ENUM", "0")
+    monkeypatch.setattr(fno_math, "ResidentSweepEnum", _Poisoned)
+    _reset_enum_state()
+    with capture_logs() as logs:
+        summary = _run_digest_variant(tmp_path, "poisoned_off")
+    assert summary.store_content_hash == _GOLDEN_CONTENT_HASH_DIGEST
+    assert not [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+    assert not [e for e in logs if e["event"] == "sweep_rust_enum.kernel_autoreverted"]
+    _reset_enum_state()

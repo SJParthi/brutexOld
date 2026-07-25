@@ -29,8 +29,11 @@ ratio (B-1) routes through :func:`tests.bench._o1_tiers.cache_tier_ceiling`
 (8.0 shared / strict **3.0**, NOT 1.1 — its 10× workload legitimately scans
 10× the columnar rows, so the strict 1.1 tier is physically unsatisfiable
 there, the DEC-O1-CACHE-TIER-001 discipline); the fresh-fold delta-file growth
-pin (B-4, ``< 20.0×``), the cold-scan bound (B-6, ``< 2 s`` mean) and the
-production-scale fresh-fold bound (B-9, ``< 8 s`` @ ≥500k base rows,
+pin (B-4, ``< 20.0×``), the cold-scan bound (B-6, ``< 2 s`` mean), the
+accumulation-regime bounds (B-8: ``< 100 ms`` absolute AND a marginal
+``< 250 µs`` per pending delta — a SLOPE, not a ratio, because the two
+fixtures' 8× spread caps any ratio from above; DEC-BENCH-SLOPE-BOUND-001) and
+the production-scale fresh-fold bound (B-9, ``< 8 s`` @ ≥500k base rows,
 DEC-DB-OPAGE-HONESTY-001) are ABSOLUTE measured-slack ceilings, deliberately
 not tier-routed; B-2/B-5/B-7 are deterministic spy/sentinel pins with no timing
 ratio at all.
@@ -78,6 +81,34 @@ from tests.bench._o1_tiers import cache_tier_ceiling, ratio_ceiling
 _SMALL = 1_000
 _LARGE = 10_000
 _NOW = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
+
+#: B-8's two accumulation fixtures. Their SPREAD (400/50 = 8.0) is the exact
+#: upper bound of the warm-poll wall-clock RATIO whenever the honest
+#: O(pending deltas) stamp-probe listing dominates the per-poll constant term —
+#: so a ratio ceiling AT 8.0 had ZERO margin by construction (it could only
+#: pass while some box's constant term happened to be large). Measured
+#: 2026-07-25 on the SAME code, no regression between them:
+#:   this container   t50=1.5 ms  t400=4.5 ms  → ratio 2.40-3.44× (8 trials)
+#:   shared CI runner t50=1.31 ms t400=10.46 ms → ratio 8.00×  (FAILED at 8.0)
+#: and the ratio is additionally NON-DISCRIMINATING: the pre-fix per-poll
+#: re-fold regime measures 76.9 ms @ 50 → 443.1 ms @ 400 = ratio 5.76×, which
+#: sits INSIDE the post-fix range — i.e. the old gate would have PASSED the very
+#: regression its own message names (the docstring already admitted "a RATIO
+#: cannot discriminate here"). It is replaced below by the per-delta SLOPE.
+_ACC_SMALL_DELTAS = 50
+_ACC_LARGE_DELTAS = 400
+
+#: Ceiling on the MARGINAL warm-poll cost per pending delta — the SLOPE of the
+#: O(pending deltas) stamp-probe directory listing, which is what the residual
+#: per-poll term actually is. Unlike the ratio this is NOT capped by the fixture
+#: spread, and it genuinely separates the regimes (measured 2026-07-25):
+#:   post-fix, this container   6.4-10.8 µs/delta (8 trials)
+#:   post-fix, shared CI runner 26.1 µs/delta
+#:   PRE-FIX per-poll re-fold  1046   µs/delta   ← 40× above the worst post-fix
+#: 250 µs/delta leaves ~9.6× headroom over the worst post-fix reading while the
+#: pre-fix regime still fails it by 4.2×. A regression to a per-poll re-fold —
+#: or any term that grows faster than the listing — blows it.
+_MAX_MARGINAL_US_PER_DELTA = 250.0
 
 
 def _key(i: int) -> WindowKey:
@@ -656,13 +687,18 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
          here because the pre-fix cost was also roughly linear in deltas):
          mean warm poll @ 400 pending deltas < 100 ms — measured 4.2 ms
          post-fix (~×24 slack) vs 158 ms pre-fix (fails the bound);
-    (iii) RATIO via :func:`cache_tier_ceiling` (8.0 shared): warm(400 deltas) /
-         warm(50 deltas) — the residual per-poll term is the honest O(pending
-         deltas) stamp-PROBE directory listing (how a flush is detected at
-         all), never a re-fold; measured 1.4 ms @ 50 vs 4.2 ms @ 400 → 3.0×
-         (a genuine O(deltas) probe over an 8× delta spread — the cache-tier
-         class, not an algorithmic regression; this file is not in
-         bench-m4pro.yml's strict list, and (ii) is the regression catcher).
+    (iii) MARGINAL per-delta SLOPE (``_MAX_MARGINAL_US_PER_DELTA``): the
+         residual per-poll term is the honest O(pending deltas) stamp-PROBE
+         directory listing (how a flush is detected at all), never a re-fold —
+         so the statistic that bounds it is its SLOPE, ``(t400 − t50) / 350``.
+         Measured 6.4-26.1 µs/delta post-fix across two boxes vs 1046 µs/delta
+         for the pre-fix re-fold — a 40× separation with no overlap.
+
+         This REPLACES a ``cache_tier_ceiling(8.0)`` ratio gate that was both
+         structurally impossible (8.0 IS the 400/50 fixture spread, i.e. the
+         ratio's own asymptote as the listing term dominates — zero margin) and
+         non-discriminating (the pre-fix regime measures 5.76×, INSIDE the
+         post-fix range). Full measured evidence on the module constants above.
     """
 
     def _warm_lake(deltas: int, tag: str) -> tuple[Path, _SentinelCountCache]:
@@ -687,8 +723,8 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
         t1 = time.perf_counter_ns()
         return (t1 - t0) / iterations
 
-    lake50, cache50 = _warm_lake(50, "acc50")
-    lake400, cache400 = _warm_lake(400, "acc400")
+    lake50, cache50 = _warm_lake(_ACC_SMALL_DELTAS, "acc50")
+    lake400, cache400 = _warm_lake(_ACC_LARGE_DELTAS, "acc400")
     t50 = _time(lake50, cache50)
     t400 = _time(lake400, cache400)
     # (i) the accumulation-scale no-recompute teeth: everything above was ONE
@@ -709,13 +745,18 @@ def test_accumulation_regime_warm_poll_bounded(tmp_path: Path) -> None:
         f"(ceiling 100 ms; measured 4.2 ms on 2026-07-09, pre-fix 158 ms) — the page query "
         f"may have regressed to a per-poll re-fold of the delta accumulation."
     )
-    # (iii) the probe-term growth ratio — cache-tier-routed, honest O(deltas)
-    # listing term stated above.
-    ratio = t400 / max(t50, 1.0)
-    assert ratio < cache_tier_ceiling(8.0), (
-        f"warm-poll ratio {ratio:.2f}× (400 vs 50 pending deltas) exceeds the ceiling — "
-        f"the within-stamp poll may have regressed past the O(deltas) stamp probe. "
-        f"t_50={t50 / 1e6:.2f}ms, t_400={t400 / 1e6:.2f}ms."
+    # (iii) the probe-term SLOPE — the marginal wall-clock the honest O(deltas)
+    # stamp-probe listing adds per pending delta. NOT a ratio: the ratio of the
+    # two fixtures is capped from above by their 8× spread, so a ratio ceiling
+    # can never carry margin once the listing dominates the constant term (and
+    # measured 5.76× for the pre-fix re-fold — inside the post-fix range, i.e.
+    # no teeth either). The slope is uncapped and separates the regimes 40×.
+    marginal_us_per_delta = (t400 - t50) / (_ACC_LARGE_DELTAS - _ACC_SMALL_DELTAS) / 1_000.0
+    assert marginal_us_per_delta < _MAX_MARGINAL_US_PER_DELTA, (
+        f"warm-poll marginal cost {marginal_us_per_delta:.1f} µs per pending delta exceeds the "
+        f"{_MAX_MARGINAL_US_PER_DELTA:.0f} µs ceiling — the within-stamp poll may have regressed "
+        f"past the O(deltas) stamp probe into a per-poll re-fold (measured 6.4-26.1 µs post-fix, "
+        f"1046 µs pre-fix). t_50={t50 / 1e6:.2f}ms, t_400={t400 / 1e6:.2f}ms."
     )
 
 

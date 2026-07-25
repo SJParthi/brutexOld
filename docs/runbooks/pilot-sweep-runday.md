@@ -115,7 +115,7 @@ non-empty.
 | `--intervals` | Comma-separated lake interval labels to sweep | `1minute,5minute,15minute` |
 | `--directions` | `BUY` / `SELL` | `BUY,SELL` |
 | `--k` | Conditions-per-combo values | `1,2` |
-| `--conditions` | Condition bit indices 0..51 to sweep | all 52 |
+| `--conditions` | IMPLEMENTED condition bit indices to sweep (0-51 and 54-65; the retired 52/53 are refused) | all 64 active |
 | `--sl` / `--tp` | Comma-separated stop-loss / take-profit paisa (`none` to disable a leg) | `none` |
 | `--top` | Persist top-N composite-ranked combos per tuple (spec Stage-4 sizing is 1000) | `20` |
 | `--max-tuples` / `--max-combos` | Honest opt-in guards — REFUSE a grid larger than this | (off) |

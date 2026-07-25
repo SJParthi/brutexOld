@@ -9790,7 +9790,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         and the full-precision Sharpe / profit-factor / win-rate — NEVER rounded).
 
         READ-ONLY (CLAUDE.md §3): ranks results the operator already produced; it
-        NEVER touches the brute-force engine or the 60-condition vocabulary (the
+        NEVER touches the brute-force engine or the condition vocabulary (the
         ENGINE stays NIFTY/BANKNIFTY/SENSEX).
 
         Query parameters

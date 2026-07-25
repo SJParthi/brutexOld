@@ -17,8 +17,9 @@ the Rust pyclass), and the frozen twin-state golden fixture
 (``tests/golden/fixtures/twin_state_golden_vectors.json`` — the TickVault
 contract, never regenerated) is now replayed Rust-only by
 ``tests/unit/test_twin_state_golden_parity.py``. The same decision deleted the
-sibling ``brutex.indicators.vwap`` module (``trading_core.VwapState`` is the
-single VWAP source).
+sibling ``brutex.indicators.vwap`` module; the Rust ``VwapState`` itself was
+later deleted with the bits-52/53 VWAP tombstone (crate 0.4.0 — the spot-only
+engine has no traded volume).
 
 This module keeps the one piece production Python imports: the FROZEN
 :class:`MarketStructureSignal` container the detector's four resolved booleans

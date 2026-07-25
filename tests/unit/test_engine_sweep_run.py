@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine import rust_enum
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
@@ -807,6 +808,73 @@ class TestCanonicalTradeParams:
         )
         assert params["proximity_bps"] == [5, 10, 25]
         assert params["sl_paisa"] is None and params["tp_paisa"] is None
+
+    def test_swing_band_default_omitted_exact_key_set(self) -> None:
+        """DEC-FIB-TEMPLATE-EXPRESS-001: the default swing band emits NO key —
+        the EXACT pre-express key-set (dict equality, not just absence), so
+        every pre-express run identity stays byte-stable; ``proximity_bps``
+        stays the FROZEN 3-list (never grows to 4)."""
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=ProximityParams(
+                pivot_proximity_bps=5,
+                pdh_pdl_proximity_bps=10,
+                fib_proximity_bps=25,
+                swing_proximity_bps=10,  # the default — omitted
+            ),
+            start_equity_paisa=10_000_000,
+        )
+        assert params == {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "proximity_bps": [5, 10, 25],
+            "fib_anchor": "prev_day",
+            "start_equity_paisa": 10_000_000,
+            # DEC-FILL-WORST-CASE-ONLY-001: the permanent unconditional key —
+            # part of the exact layout, not an express addition.
+            "fill_mode": "worst_case",
+            # DEC-FILL-EXEC-GRID-1M-001: likewise permanent + unconditional —
+            # part of the exact layout, not an express addition.
+            "execution_grid": "1m_next_bar",
+        }
+
+    def test_swing_band_non_default_adds_exactly_one_key(self) -> None:
+        """A swept ``swing_proximity_bps=25`` cell adds EXACTLY one top-level
+        key and re-keys the run identity (bits 72/73 evaluate differently)."""
+        common: dict[str, object] = {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "start_equity_paisa": 10_000_000,
+        }
+        default = canonical_trade_params(
+            proximity=ProximityParams(pivot_proximity_bps=5),
+            **common,  # type: ignore[arg-type]
+        )
+        swept = canonical_trade_params(
+            proximity=ProximityParams(pivot_proximity_bps=5, swing_proximity_bps=25),
+            **common,  # type: ignore[arg-type]
+        )
+        assert set(swept) - set(default) == {"swing_proximity_bps"}
+        assert swept["swing_proximity_bps"] == 25
+        assert swept["proximity_bps"] == default["proximity_bps"] == [5, 10, 10]
+        assert mask_run_id(mask=1, params=default, **_CTX) != mask_run_id(
+            mask=1, params=swept, **_CTX
+        )
+
+    def test_none_proximity_emits_no_swing_key(self) -> None:
+        # proximity=None means every band is defaulted — no swing key either.
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+        )
+        assert "swing_proximity_bps" not in params
 
     def test_sweep_config_identity_routes_through_it(self) -> None:
         # §11 COMMON: the sweep's run-identity params ARE this helper's output —
@@ -2621,9 +2689,10 @@ class TestResidentKernelRollScheduleMismatch:
     def test_kernel_built_with_other_1day_mask_flag_raises(self, tmp_path: Path) -> None:
         # The D12 twin (review round-1 finding 5): a hand-built kernel whose
         # ``apply_1day_mask`` flag disagrees with the tuple's derived flag
-        # carries bar_bits with the intraday-only bits (ToD 44-47 / VWAP
-        # 52-53) wrongly set/cleared — fail-fast, exactly like the schedule
-        # guard (unreachable via the production cache, whose key contains
+        # carries bar_bits with the intraday-only bits (ToD 44-47; the
+        # RETIRED VWAP tombstones 52/53 are always 0 regardless) wrongly
+        # set/cleared — fail-fast, exactly like the schedule guard
+        # (unreachable via the production cache, whose key contains
         # instrument+tf, the flag's only inputs).
         from brutex.engine.stage1a import apply_1day_mask_for
 
@@ -3160,30 +3229,52 @@ class TestU128EnvelopeThroughSweep:
     ) -> None:
         # Bit 1 FIRES on `_trending_bars` AND its mask passes the ranking
         # gates under the one worst-case law (bit 0's all-winner pool reads
-        # profit_factor=None → gate-rejected), bits 64/65 never fire — the
-        # wide masks now PROMOTE the batch to the u128 kernel (no call
-        # fallback), and the byte-equality below compares stores with REAL
-        # trade rows, never two degenerate zero-trade stores (the
-        # vacuous-equality trap).
+        # profit_factor=None → gate-rejected, DEC-FILL-WORST-CASE-ONLY-001),
+        # and — since the vocab-66 SuperTrend implemented-flip (crate 0.5.0)
+        # — the LIVE bits 64/65 fire too (the up-trend stream warms the
+        # ATR-10 state at bar 9), so the resident bar_bits are ALREADY
+        # u128-wide (and per DEC-GAP-MIDPOINT-CONDITIONS-001 the IMPLEMENTED
+        # gap-midpoint bits 66-68 fire on this fixture too — `_trending_bars`
+        # restarts every day at 100.0 while the prior day closes higher):
+        # the sim builds the u128 sibling kernel at CONSTRUCTION
+        # (`_rust_is_wide`), the per-call PROMOTION arm is structurally
+        # bypassed (zero `wide_kernel_promoted` events here — that arm keeps
+        # its dedicated coverage in test_engine_rust_trade_sim.py over
+        # hand-built u64-resident windows), and the byte-equality below
+        # compares stores with REAL trade rows, never two degenerate
+        # zero-trade stores (the vacuous-equality trap).
         bars = _trending_bars()
         cfg = _make_config(condition_bits=[1, 64, 65], k=1, min_hits=0)
+        # The premise made explicit: the bar_bits genuinely widen the window.
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
-        # NOT a fallback any more: the wide sibling kernel was promoted once.
+        # Never a fallback: the wide masks ride the construction-wide kernel.
         fallbacks = [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"]
         assert fallbacks == []
+        # DEC-FIB-TEMPLATE-EXPRESS-001 u128 pin: the express bull-fib bits
+        # (69/70) FIRE on this trending feed, so the bar_bits word already
+        # exceeds u64 and the u128 kernel is resident from CONSTRUCTION — the
+        # lazy wide PROMOTION never runs (0 events; the promotion path itself
+        # stays covered by test_engine_rust_trade_sim.py over synthetic
+        # ≤u64 bar_bits). Pre-express this feed promoted lazily (1 event).
+        assert any(b > (1 << 64) - 1 for b in build_bar_bits(bars))
         promotions = [e for e in logs if e["event"] == "rust_trade_sim.wide_kernel_promoted"]
-        assert len(promotions) == 1
+        assert promotions == []  # wide from construction — nothing to promote
         # The sweep-level path signal reads RUST for the wide-mask tuple.
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True
-        # Non-vacuous: the ranking gate drops the two zero-trade u128-bit
-        # masks, so EXACTLY the firing mask 0b10 persists — the byte-equality
-        # below compares stores carrying a real trade-bearing row, never two
-        # empty/degenerate stores. Its trades are pinned via the independent
+        # Non-vacuous: all THREE masks fire real trades on the trending
+        # stream, and TWO persist — bit 1 (pf ≈ 2.75) and bit 65 (28W/9L,
+        # pf ≈ 2.85) pass the gates, while bit 64's pool is ALL-WINNER under
+        # the worst-case fill law (36W/0L → profit_factor=None →
+        # gate-rejected, the same DEC-FILL-WORST-CASE-ONLY-001 class that
+        # rejects bit 0's pool). The byte-equality below compares stores
+        # carrying real trade-bearing rows, never two empty/degenerate
+        # stores. Mask 0b10's trades are pinned via the independent
         # metrics oracle.
         assert wired.evaluated == 3
-        assert wired.persisted == 1
+        assert wired.persisted == 2
         direct = metrics_for_mask(
             bars,
             build_bar_bits(bars),
@@ -3198,7 +3289,7 @@ class TestU128EnvelopeThroughSweep:
         assert direct.total_trades > 0
         monkeypatch.setattr("brutex.engine.sweep_run.ResidentTradeSim", _forced_fallback_sim)
         fallback = _run_sweep(tmp_path, "f", bars, cfg)
-        assert wired.persisted == fallback.persisted == 1
+        assert wired.persisted == fallback.persisted == 2
         assert wired.store_content_hash == fallback.store_content_hash
         assert (tmp_path / "w.parquet").read_bytes() == (tmp_path / "f.parquet").read_bytes()
 
@@ -4610,3 +4701,199 @@ class TestWorstCaseFinalistProjection:
         )
         assert anchors == (232, Decimal("150.49"), Decimal("152.84"))
         assert (row.total_trades, row.avg_entry_price, row.avg_exit_price) == anchors
+
+
+# ────── DEC-SWEEP-ENUM-RUST-001 — the ranged Rust enum+prune+Stage-1B seam ──────
+#
+# The flag-gated `enum_prefilter_via_kernel` probe inside `run_persisted_sweep`
+# engages on the DIGEST path only (a legacy no-digest tuple is refused with the
+# `legacy_dedup_path` warn — the design-of-record engagement-condition order);
+# the Apriori arm never probes (apriori WINS — the frozen contract), and every
+# fallback (`None`) runs the verbatim pre-existing loop. The kernel FUSES the
+# Stage-1B min-hits count, so the seam's counter BUCKETING (enumerated /
+# conflict_pruned / evaluated / minhits_dropped — the residual-(ix) sidecar
+# law) is pinned here across both min-hits arms. Byte-identity end-to-end is
+# the golden's job (tests/golden/test_engine_rust_enum_parity.py).
+
+
+class TestRustEnumSeam:
+    """Dispatch + parity pins for the DEC-SWEEP-ENUM-RUST-001 seam."""
+
+    _DIGEST = "abad1deaabad1dea"
+
+    @pytest.fixture(autouse=True)
+    def _fresh_rust_enum_state(self, monkeypatch: pytest.MonkeyPatch) -> Iterable[None]:
+        """Fresh warn-once memo / burn-in budget + the OFF/oracle arm per test.
+
+        Since DEC-RUST-DEFAULT-ON-WAVE-001 (#2215) the seam default is ON, so
+        the OFF baseline the ON-vs-OFF parity tests compare against is armed
+        ``"0"`` explicitly (an unset flag would engage the crate on the OFF
+        arm and collapse the parity)."""
+        rust_enum.reset_observability_memo_for_tests()
+        rust_enum.reset_enum_self_check_for_tests()
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "0")
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        yield
+        rust_enum.reset_observability_memo_for_tests()
+        rust_enum.reset_enum_self_check_for_tests()
+
+    def test_on_digest_tuple_equals_off_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ON+digest == OFF+digest: every summary counter, the store hash, the
+        parquet bytes AND the trial-stats sidecar bytes — with the anti-vacuous
+        proof that the kernel genuinely served the ON run."""
+        bars = _trending_bars()
+        # Bits {0,1,2,3,4} at k=2 carry the REAL (0,1) + (2,3) conflict pairs,
+        # so the prune genuinely fires (anti-vacuous conflict_pruned > 0).
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, cfg, digest=self._DIGEST)
+        assert [e for e in logs if e["event"] == "sweep_rust_enum.engaged"], (
+            "the ON run never engaged the kernel — a vacuous parity"
+        )
+        assert on.enumerated == off.enumerated == 10  # C(5, 2)
+        assert on.conflict_pruned == off.conflict_pruned == 2
+        assert on.skipped_dedup == off.skipped_dedup == 0
+        assert on.evaluated == off.evaluated == 8
+        assert on.persisted == off.persisted
+        assert on.ranked == off.ranked
+        assert on.backtested == off.backtested
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        on_sidecar = trial_stats_sidecar_path(tmp_path / "on.parquet")
+        off_sidecar = trial_stats_sidecar_path(tmp_path / "off.parquet")
+        assert on_sidecar.read_bytes() == off_sidecar.read_bytes()
+
+    def test_legacy_no_digest_refuses_with_the_named_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The legacy dedup arm stays pure Python even flag-ON: the wrapper is
+        probed but REFUSES with one `legacy_dedup_path` warn and zero engaged
+        events (the design's engagement-condition teeth), bytes unchanged."""
+        bars = _trending_bars()
+        cfg = _make_config()
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=None)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, cfg, digest=None)
+        warns = [e for e in logs if e["event"] == "sweep_rust_enum.fallback"]
+        assert [w["reason"] for w in warns] == ["legacy_dedup_path"]
+        assert not [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert on.enumerated == off.enumerated
+        assert on.conflict_pruned == off.conflict_pruned
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+
+    def test_apriori_wins_over_the_enum_kernel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FM-10: with BOTH flags on the Apriori generator is the mask source
+        and the enum-kernel probe is never reached (its probe lives only in
+        the else arm)."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2)
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+
+        def _must_not_probe(*args: object, **kwargs: object) -> NoReturn:
+            raise AssertionError("the Apriori arm must never probe the enum kernel")
+
+        monkeypatch.setattr("brutex.engine.sweep_run.enum_prefilter_via_kernel", _must_not_probe)
+        summary = _run_sweep(tmp_path, "ap", bars, cfg, digest=self._DIGEST)
+        # The Apriori arm ran (conflict-free candidates by construction).
+        assert summary.conflict_pruned == 0
+
+    def test_kernel_fallback_none_runs_the_python_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A kernel `None` (any ladder fallback) leaves the digest tuple on
+        the verbatim Python loop — probed exactly once, bytes unchanged."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        calls: list[tuple[tuple[int, ...], int, int, bool]] = []
+
+        def _always_none(
+            bits: Sequence[int],
+            k: int,
+            *,
+            min_hits: int,
+            bar_bits: Sequence[int],
+            count_hits: object,
+            digest_path: bool,
+        ) -> None:
+            calls.append((tuple(bits), k, min_hits, digest_path))
+
+        monkeypatch.setattr("brutex.engine.sweep_run.enum_prefilter_via_kernel", _always_none)
+        on = _run_sweep(tmp_path, "fb", bars, cfg, digest=self._DIGEST)
+        assert calls == [((0, 1, 2, 3, 4), 2, 0, True)]
+        assert on.enumerated == off.enumerated
+        assert on.conflict_pruned == off.conflict_pruned
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "fb.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+
+    def test_u128_bits_through_the_kernel_seam(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bits ≥ 64 flow through the kernel-served seam byte-identically —
+        the u128 twin of TestU128EnvelopeThroughSweep for the enum segment."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, cfg, digest=self._DIGEST)
+        assert [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert on.enumerated == off.enumerated == 3
+        assert on.evaluated == off.evaluated == 3
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+
+    @pytest.mark.parametrize("min_hits", [5, 10**6])
+    def test_min_hits_fused_counters_bucket_identically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, min_hits: int
+    ) -> None:
+        """min_hits > 0, ON+digest == OFF: the FUSED kernel count buckets into
+        evaluated / minhits_dropped / the trial-stats sidecar EXACTLY as the
+        Python batch filter (the design residual-(ix) tally-bucketing law) —
+        and past burn-in the Python Stage-1B batch count NEVER runs on the
+        kernel arm (the fusing is real, not a recompute)."""
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=min_hits)
+        off = _run_sweep(tmp_path, "off", bars, cfg, digest=self._DIGEST)
+        monkeypatch.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+        rust_enum.reset_enum_self_check_for_tests(masks_remaining=0)  # past burn-in
+        batch_calls: list[int] = []
+        from brutex.engine.combo_mask import count_supermasks as _real_count
+
+        def _spy(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]:
+            batch_calls.append(len(masks))
+            return _real_count(bar_bits, masks)
+
+        monkeypatch.setattr("brutex.engine.sweep_run.count_supermasks", _spy)
+        with capture_logs() as logs:
+            on = _run_sweep(tmp_path, "on", bars, cfg, digest=self._DIGEST)
+        assert [e for e in logs if e["event"] == "sweep_rust_enum.engaged"]
+        assert batch_calls == []  # fused in-kernel — zero Python batch counts
+        assert on.enumerated == off.enumerated == 10
+        assert on.conflict_pruned == off.conflict_pruned == 2
+        assert on.evaluated == off.evaluated == 8
+        assert on.minhits_dropped == off.minhits_dropped
+        if min_hits == 10**6:
+            # Anti-vacuous: an impossible floor drops EVERY survivor.
+            assert on.minhits_dropped == 8
+        assert on.backtested == off.backtested
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+        from brutex.engine.trial_stats import trial_stats_sidecar_path
+
+        assert (
+            trial_stats_sidecar_path(tmp_path / "on.parquet").read_bytes()
+            == trial_stats_sidecar_path(tmp_path / "off.parquet").read_bytes()
+        )

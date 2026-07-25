@@ -32,7 +32,7 @@ physical call goes through the injected ``pace`` hook — the SAME
 NOT reinvent pacing.
 
 **Scope (CLAUDE.md §3):** option bars are **LAKE / REFERENCE_ONLY** (DEC-P0-063)
-— never the brute-force engine or the 52-condition vocabulary.
+— never the brute-force engine or the shared condition vocabulary.
 
 **Parallel outer fan-out (DEC-GROWW-OPTION-POOL-001):** the multi-contract driver
 maps one job per ``(contract, interval)`` pair through an injected

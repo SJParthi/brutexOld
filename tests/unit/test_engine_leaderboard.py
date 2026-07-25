@@ -19,6 +19,7 @@ from brutex.ranking import RankedCombo
 from brutex.vocabulary.bits import (
     BIT_BAR_BULLISH,
     BIT_CLOSE_ABOVE_EMA20,
+    BIT_CLOSE_ABOVE_VWAP,
     BIT_NEAR_FIB_618,
 )
 
@@ -94,6 +95,21 @@ class TestExplainCombos:
 
     def test_empty_input_yields_empty(self) -> None:
         assert explain_combos([]) == []
+
+    def test_retained_vwap_bit_reads_plain(self) -> None:
+        # DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): bit 52 is LIVE
+        # again — it renders its PLAIN name on the CLI leaderboard and NO
+        # "(retired)" suffix renders anywhere (RETIRED_MASK == 0; the
+        # retired-arm teeth live at the ONE display authority's
+        # monkeypatched pin in test_vocabulary_describe.py).
+        mask = (1 << BIT_CLOSE_ABOVE_VWAP) | (1 << BIT_CLOSE_ABOVE_EMA20)
+        explained = explain_combos([_ranked(mask)])
+        groups = {g.group: g.conditions for g in explained[0].groups}
+        assert groups["VWAP Position"] == ("close_above_vwap",)
+        assert groups["EMA Position"] == ("close_above_ema20",)  # live bit plain
+        rendered = render_leaderboard(explained)
+        assert "close_above_vwap" in rendered
+        assert "(retired)" not in rendered
 
 
 class TestRenderLeaderboard:

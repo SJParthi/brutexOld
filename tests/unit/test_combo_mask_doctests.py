@@ -1,8 +1,8 @@
 """Doctest teeth for ``brutex.engine.combo_mask`` (DEC-CORP-ACTION-GATE-001 fold).
 
 The 2026-07-03 audit found the module's ``count_combos`` doctests still
-answered with the 52-condition vocabulary (52 / 1326 / 22100) after
-DEC-VOCAB-U128-CODEGEN-001 grew it to 60 — and NOTHING ran them, so the drift
+answered with the historical 52-condition vocabulary (52 / 1326 / 22100)
+after DEC-VOCAB-U128-CODEGEN-001 grew the layout — and NOTHING ran them, so the drift
 was invisible. This runs doctest over the WHOLE module so any future example
 drift (a vocab-size change, a renamed helper, a stale sample value) fails CI
 instead of rotting silently.
@@ -83,12 +83,13 @@ def test_doctest_capture_immune_to_background_structlog_leak() -> None:
     )
 
 
-def test_count_combos_examples_match_the_60_vocab() -> None:
+def test_count_combos_examples_match_the_74_vocab() -> None:
     # The exact examples the audit caught stale, pinned against the live
     # vocabulary size so a future vocab change forces BOTH updates together.
     from brutex.engine.combo_mask import VOCAB_BITS, count_combos
 
-    assert VOCAB_BITS == 60
-    assert count_combos(1) == 60
-    assert count_combos(2) == 1770
-    assert count_combos(3) == 34220
+    # 66 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #2205).
+    assert VOCAB_BITS == 74
+    assert count_combos(1) == 74
+    assert count_combos(2) == 2701
+    assert count_combos(3) == 64824

@@ -17,7 +17,7 @@ and the `collect_batch_inputs` prepass glue:
   raise IDENTICAL exceptions ON vs OFF;
 * the oracle-probe column parity pin: `collect_batch_inputs`' columns equal
   the per-bar values a REAL `Stage1AMatrixBuilder.build` marshals into
-  `evaluate_with_levels` / `VwapState.update`, field-for-field, over a
+  `evaluate_with_levels`, field-for-field, over a
   multi-day + multi-roll + Muhurat-boundary feed;
 * Muhurat WARN parity (same event/fields/count from the prepass, incl. the
   documented burn-in double-emission).
@@ -258,6 +258,10 @@ def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> No
     # pre-existing MarketStructureState PYCLASS keeps the identical abort
     # behaviour for a direct hostile construction (frozen TickVault-shared
     # surface — deliberately untouched, out of this slice's scope).
+    # Positional order mirrors the retention FFI signature — the five VWAP
+    # feed columns re-inserted at their pre-wipe positions
+    # (DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206); hostile_k rides the
+    # fractal_k slot exactly where the production call passes it.
     inputs = _inputs_for(_two_day_feed())
     with pytest.raises(ValueError, match="fractal_k"):
         trading_core.stage1a_bar_bits_batch(
@@ -282,6 +286,7 @@ def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> No
             inputs.pivot_bps,
             inputs.pdh_pdl_bps,
             inputs.fib_bps,
+            inputs.swing_bps,
             inputs.prior_n,
             inputs.anchor_dependent_mask,
             inputs.fib_dependent_mask,
@@ -540,36 +545,65 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
         result: int = real_eval(*args)
         return result
 
-    vwap_calls: list[tuple[Any, ...]] = []
     constructions: list[int] = [0]
-    real_vwap_cls = trading_core.VwapState
+    real_ms_cls = trading_core.MarketStructureState
 
-    class _RecordingVwap:
+    class _RecordingStructure:
         def __init__(self) -> None:
             constructions[0] += 1
-            self._inner = real_vwap_cls()
+            self._inner = real_ms_cls()
 
-        def update(self, *args: Any) -> int | None:
-            vwap_calls.append(args)
-            out: int | None = self._inner.update(*args)
+        def update(self, *args: Any) -> tuple[bool, bool, bool, bool]:
+            out: tuple[bool, bool, bool, bool] = self._inner.update(*args)
             return out
 
-    monkeypatch.setattr(trading_core, "evaluate_with_levels", _recording_eval)
-    monkeypatch.setattr(trading_core, "VwapState", _RecordingVwap)
+        # DEC-FIB-TEMPLATE-EXPRESS-001 — push() reads the confirmed-swing
+        # getters strictly POST-update for bits 72/73; delegate to the real
+        # pyclass so the spy stays behaviour-transparent.
+        @property
+        def last_swing_high(self) -> int | None:
+            value: int | None = self._inner.last_swing_high
+            return value
 
-    # The REAL builder walk records the per-bar marshalled values…
+        @property
+        def last_swing_low(self) -> int | None:
+            value: int | None = self._inner.last_swing_low
+            return value
+
+    monkeypatch.setattr(trading_core, "evaluate_with_levels", _recording_eval)
+    monkeypatch.setattr(trading_core, "MarketStructureState", _RecordingStructure)
+
+    # The REAL builder walk records the per-bar marshalled values… (the
+    # constructions counter rides MarketStructureState; VwapState is real —
+    # RETAINED per DEC-VOCAB-VWAP-RETAIN-001, MIGRATION.md #2206.)
     Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     push_constructions = constructions[0]
     assert len(eval_calls) == len(bars)
-    assert len(vwap_calls) == len(bars)
 
-    # …and the prepass columns must equal them field-for-field.
+    # …and the prepass columns must equal them field-for-field (the retention
+    # 28-arg ABI, DEC-VOCAB-VWAP-RETAIN-001 #2206: the LIVE vwap arg sits at
+    # index 7 again, pivot_levels at 8; the express swing pair + band ride
+    # appended-last, DEC-FIB-TEMPLATE-EXPRESS-001).
     constructions[0] = 0
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     assert push_constructions == 1 + sum(inputs.contract_reset)
-    assert constructions[0] == push_constructions  # same reset cursor
 
+    # Replay teeth for the five re-inserted VWAP feed columns: the push arm's
+    # marshalled vwap (args[7]) must equal a REAL trading_core.VwapState
+    # replay over the prepass columns (recreated at every contract reset —
+    # the batch kernel's own reset law), binding the columns to the marshal.
+    vwap_state = trading_core.VwapState()
     for i in range(len(bars)):
+        if inputs.contract_reset[i]:
+            vwap_state = trading_core.VwapState()
+        expected_vwap = vwap_state.update(
+            inputs.typical_paisa[i],
+            inputs.volume[i],
+            inputs.pre_open[i],
+            inputs.session_key[i],
+            inputs.session_day[i],
+            inputs.tod_seconds[i],
+        )
         args = eval_calls[i]
         assert args[0] == inputs.tod_seconds[i]
         assert args[1] == inputs.open_paisa[i]
@@ -578,28 +612,21 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
         assert args[4] == inputs.close_paisa[i]
         assert args[5] == inputs.ema20_paisa[i]
         assert args[6] == inputs.ema200_paisa[i]
+        assert args[7] == expected_vwap
         d = inputs.day_index[i]
         assert args[8] == inputs.day_pivot_levels[12 * d : 12 * (d + 1)]
-        assert args[9] == inputs.day_fib_levels[15 * d : 15 * (d + 1)]
+        assert args[9] == inputs.day_fib_levels[19 * d : 19 * (d + 1)]
         assert args[13] == inputs.pivot_bps
         assert args[14] == inputs.pdh_pdl_bps
         assert args[15] == inputs.fib_bps
         assert args[16] == inputs.prior_n
-
-        typical, volume, pre_open, session_key, session_day, tod = vwap_calls[i]
-        assert typical == inputs.typical_paisa[i]
-        assert volume == inputs.volume[i]
-        assert pre_open == inputs.pre_open[i]
-        assert session_key == inputs.session_key[i]
-        assert session_day == inputs.session_day[i]
-        assert tod == inputs.tod_seconds[i]
 
     # Day-table shape: one row per distinct builder day roll, all consumed.
     n_days = len(inputs.day_has_pivot)
     assert inputs.day_index[0] == 0
     assert inputs.day_index[-1] == n_days - 1
     assert len(inputs.day_pivot_levels) == 12 * n_days
-    assert len(inputs.day_fib_levels) == 15 * n_days
+    assert len(inputs.day_fib_levels) == 19 * n_days
     assert len(inputs.day_has_fib) == n_days
     # The roll fires exactly once, on the Muhurat day's first bar (bar 6).
     assert [i for i, r in enumerate(inputs.contract_reset) if r] == [6]

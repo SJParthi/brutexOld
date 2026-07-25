@@ -330,10 +330,14 @@ class TestKernelFfiContract:
         raw = trading_core.compute_fib_levels(2_431_300, 2_405_600)
         assert len(raw) == 19
 
-    def test_evaluator_abi_stays_15(self) -> None:
-        # The FROZEN evaluate_with_levels fib_levels ABI — the evaluator never
-        # reads the bullish fields, so its length constant must NOT grow.
-        assert trading_core.FIB_LEVELS_LEN == 15
+    def test_evaluator_abi_is_19_post_express(self) -> None:
+        # CONSCIOUS pin flip (DEC-FIB-TEMPLATE-EXPRESS-001, MIGRATION.md
+        # #2205): the evaluate_with_levels fib_levels ABI grew 15 -> 19 —
+        # bull23/bull78/up424/dn424 APPENDED last so every pre-existing slot
+        # keeps its meaning (the prefix pin below).  FIB_LEVELS_LEN stays
+        # DISTINCT from FIB_COMPUTE_LIST_LEN (both 19, different slot sets —
+        # the projection-distinctness pin in test_vocabulary.py).
+        assert trading_core.FIB_LEVELS_LEN == 19
 
     def test_appended_tail_matches_dataclass_bull_fields(self) -> None:
         raw = trading_core.compute_fib_levels(2_431_300, 2_405_600)

@@ -25,16 +25,30 @@ struct Columns {
     high_paisa: Vec<i64>,
     low_paisa: Vec<i64>,
     close_paisa: Vec<i64>,
+    /// The five VWAP feed columns (Group 10, bits 52-53 — RETAINED per
+    /// DEC-VOCAB-VWAP-RETAIN-001). serde-defaulted: the frozen v3 fixture
+    /// predates the retention — `load_fixture` materializes the ALL-ABSTAIN
+    /// shape (volume 0 ⇒ `VwapState` never accumulates ⇒ the bits stay
+    /// clear), so the frozen oracle masks replay byte-for-byte until the
+    /// Regen re-lock emits the real columns.
+    #[serde(default)]
     typical_paisa: Vec<i64>,
+    #[serde(default)]
     volume: Vec<i64>,
     tod_seconds: Vec<u32>,
+    #[serde(default)]
     pre_open: Vec<bool>,
+    #[serde(default)]
     session_key: Vec<u64>,
+    #[serde(default)]
     session_day: Vec<i64>,
     contract_reset: Vec<bool>,
     day_index: Vec<u32>,
     ema20_paisa: Vec<Option<i64>>,
     ema200_paisa: Vec<Option<i64>>,
+    /// The SuperTrend ×2-line column (fixture schema v3 — the vocab-66
+    /// implemented-flip; `None` over each roll segment's 9-bar warm-up).
+    supertrend_x2_paisa: Vec<Option<i64>>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +57,16 @@ struct DayTables {
     day_fib_levels: Vec<i64>,
     day_has_pivot: Vec<bool>,
     day_has_fib: Vec<bool>,
+    /// Group-15 X1 day tables (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    /// serde-defaulted: the frozen pre-gap fixture carries none — `load_fixture`
+    /// materializes the ALL-COLD shape (the legacy-identical build), so the
+    /// frozen oracle masks replay byte-for-byte.
+    #[serde(default)]
+    day_x1_hi_paisa: Vec<i64>,
+    #[serde(default)]
+    day_x1_lo_paisa: Vec<i64>,
+    #[serde(default)]
+    day_has_x1: Vec<bool>,
 }
 
 #[derive(Deserialize)]
@@ -50,12 +74,23 @@ struct Config {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// Group-15 `near_gap_mid` band (DEC-GAP-MIDPOINT-CONDITIONS-001). The
+    /// generator now EMITS it (DEC-VOCAB-VWAP-RETAIN-001 refuter N2a — the
+    /// reader previously hardcoded 10); serde-defaulted to the production
+    /// default so a pre-emit fixture still parses to the same build.
+    #[serde(default = "default_gap_mid_bps")]
+    gap_mid_bps: i64,
+    swing_bps: i64,
     prior_n: usize,
     fractal_k: usize,
     apply_1day_mask: bool,
     anchor_dependent_mask_hex: String,
     fib_dependent_mask_hex: String,
     applies_to_1day_mask_hex: String,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -77,8 +112,29 @@ fn load_fixture() -> Fixture {
         .join("fixtures")
         .join("stage1a_batch_golden.json");
     let text = fs::read_to_string(&path).expect("fixture readable");
-    let fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
-    assert_eq!(fixture.schema, "stage1a-batch-golden-v1");
+    let mut fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
+    assert_eq!(fixture.schema, "stage1a-batch-golden-v3");
+    // Materialize the ALL-COLD Group-15 X1 shape for a pre-gap fixture (no
+    // level ever exists ⇒ bits 66-68 stay 0 ⇒ the frozen masks replay
+    // byte-for-byte; DEC-GAP-MIDPOINT-CONDITIONS-001).
+    let d = fixture.day_tables.day_has_pivot.len();
+    if fixture.day_tables.day_has_x1.is_empty() {
+        fixture.day_tables.day_x1_hi_paisa = vec![0; d];
+        fixture.day_tables.day_x1_lo_paisa = vec![0; d];
+        fixture.day_tables.day_has_x1 = vec![false; d];
+    }
+    // Materialize the ALL-ABSTAIN VWAP shape for a pre-retention fixture
+    // (volume 0 on every bar ⇒ the state never accumulates ⇒ bits 52/53
+    // stay 0 ⇒ the frozen masks replay byte-for-byte;
+    // DEC-VOCAB-VWAP-RETAIN-001).
+    let n = fixture.columns.open_paisa.len();
+    if fixture.columns.volume.is_empty() {
+        fixture.columns.typical_paisa = vec![0; n];
+        fixture.columns.volume = vec![0; n];
+        fixture.columns.pre_open = vec![false; n];
+        fixture.columns.session_key = vec![0; n];
+        fixture.columns.session_day = vec![0; n];
+    }
     fixture
 }
 
@@ -102,15 +158,21 @@ fn inputs<'a>(f: &'a Fixture) -> Stage1aBatchInputs<'a> {
         day_fib_levels: &f.day_tables.day_fib_levels,
         day_has_pivot: &f.day_tables.day_has_pivot,
         day_has_fib: &f.day_tables.day_has_fib,
+        supertrend_x2_paisa: Some(&f.columns.supertrend_x2_paisa),
         pivot_bps: f.config.pivot_bps,
         pdh_pdl_bps: f.config.pdh_pdl_bps,
         fib_bps: f.config.fib_bps,
+        swing_bps: f.config.swing_bps,
         prior_n: f.config.prior_n,
         fractal_k: f.config.fractal_k,
         apply_1day_mask: f.config.apply_1day_mask,
         anchor_dependent_mask: parse_mask_hex(&f.config.anchor_dependent_mask_hex),
         fib_dependent_mask: parse_mask_hex(&f.config.fib_dependent_mask_hex),
         applies_to_1day_mask: parse_mask_hex(&f.config.applies_to_1day_mask_hex),
+        day_x1_hi_paisa: &f.day_tables.day_x1_hi_paisa,
+        day_x1_lo_paisa: &f.day_tables.day_x1_lo_paisa,
+        day_has_x1: &f.day_tables.day_has_x1,
+        gap_mid_bps: f.config.gap_mid_bps,
     }
 }
 
@@ -197,10 +259,14 @@ fn golden_prefix_replay_is_suffix_independent() {
             day_index: &f.columns.day_index[..k],
             ema20_paisa: &f.columns.ema20_paisa[..k],
             ema200_paisa: &f.columns.ema200_paisa[..k],
+            supertrend_x2_paisa: Some(&f.columns.supertrend_x2_paisa[..k]),
             day_pivot_levels: &f.day_tables.day_pivot_levels[..PIVOT_ROW_LEN * n_days],
             day_fib_levels: &f.day_tables.day_fib_levels[..FIB_ROW_LEN * n_days],
             day_has_pivot: &f.day_tables.day_has_pivot[..n_days],
             day_has_fib: &f.day_tables.day_has_fib[..n_days],
+            day_x1_hi_paisa: &f.day_tables.day_x1_hi_paisa[..n_days],
+            day_x1_lo_paisa: &f.day_tables.day_x1_lo_paisa[..n_days],
+            day_has_x1: &f.day_tables.day_has_x1[..n_days],
             ..inputs(f)
         };
         let prefix = stage1a_bar_bits_batch_impl(&prefix_inputs).unwrap();
@@ -229,7 +295,7 @@ struct StreamSpec {
     days: Vec<DaySpec>,
     bars: Vec<BarSpec>,
     prior_n: usize,
-    bps: (i64, i64, i64),
+    bps: (i64, i64, i64, i64),
     apply_1day: bool,
 }
 
@@ -241,7 +307,7 @@ fn stream_spec() -> impl Strategy<Value = StreamSpec> {
         any::<bool>(), // has_pivot
         any::<bool>(), // has_fib
         proptest::array::uniform12(level.clone()),
-        proptest::array::uniform15(level),
+        proptest::array::uniform19(level),
     );
     let bar = (
         price.clone(),   // open
@@ -257,7 +323,7 @@ fn stream_spec() -> impl Strategy<Value = StreamSpec> {
         proptest::collection::vec(day, 1..4),
         proptest::collection::vec(bar, 12),
         1usize..=4,
-        (0i64..200, 0i64..200, 0i64..200),
+        (0i64..200, 0i64..200, 0i64..200, 0i64..200),
         any::<bool>(),
     )
         .prop_map(|(days, bars, prior_n, bps, apply_1day)| StreamSpec {
@@ -340,15 +406,24 @@ proptest! {
             day_fib_levels: &day_fibs,
             day_has_pivot: &day_has_pivot,
             day_has_fib: &day_has_fib,
+            // The proptest fuzzes the REQUIRED columns; the optional ST
+            // column stays absent here (its per-bar drive is pinned by the
+            // in-crate unit tests + the fixture replay above).
+            supertrend_x2_paisa: None,
             pivot_bps: spec.bps.0,
             pdh_pdl_bps: spec.bps.1,
             fib_bps: spec.bps.2,
+            swing_bps: spec.bps.3,
             prior_n: spec.prior_n,
             fractal_k: 2,
             apply_1day_mask: spec.apply_1day,
             anchor_dependent_mask: (1u128 << 60) - 1,
             fib_dependent_mask: 0x3FF8_0000,
             applies_to_1day_mask: u128::MAX,
+            day_x1_hi_paisa: &vec![0; day_has_pivot.len()],
+            day_x1_lo_paisa: &vec![0; day_has_pivot.len()],
+            day_has_x1: &vec![false; day_has_pivot.len()],
+            gap_mid_bps: spec.bps.2,
         };
         let got = stage1a_bar_bits_batch_impl(&inputs).expect("valid envelope is total");
         prop_assert_eq!(got.len(), open.len());

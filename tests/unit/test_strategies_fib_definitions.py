@@ -19,7 +19,7 @@ from brutex.indicators.prev_day_ohlc import DailyCandle
 from brutex.strategies import fib_definitions as F
 from brutex.strategies.errors import StrategyRegistrationError
 from brutex.vocabulary.bits import (
-    BIT_CLOSE_ABOVE_VWAP,
+    BIT_ABOVE_CPR_TC,
     BIT_EMA20_ABOVE_EMA200,
     BIT_NEAR_FIB_50,
     IMPLEMENTED_MASK,
@@ -122,6 +122,78 @@ def test_definition_rejects_unknown_condition_scope() -> None:
 def test_definition_accepts_known_condition_scope() -> None:
     d = _defn(condition_scope=frozenset({"near_fib_50", "ema20_above_ema200"}))
     assert d.condition_scope == frozenset({"near_fib_50", "ema20_above_ema200"})
+
+
+def test_definition_accepts_live_vwap_scope() -> None:
+    """DEC-VOCAB-VWAP-RETAIN-001 (MIGRATION.md #2206): the bits-52/53 wipe is
+    REVERSED — ``close_above_vwap`` is a LIVE member of ``IMPLEMENTED_MASK``
+    again, so a scope naming it constructs (the wipe-era RETIRED refusal pin
+    is consciously flipped; the refusal ARM keeps its teeth in the
+    monkeypatched future-tombstone test below)."""
+    d = _defn(condition_scope=frozenset({"close_above_vwap", "near_fib_50"}))
+    assert d.candidate_mask == (1 << NAME_TO_BIT["close_above_vwap"]) | (1 << BIT_NEAR_FIB_50)
+    assert d.candidate_mask & ~IMPLEMENTED_MASK == 0
+
+
+def test_definition_refuses_a_retired_scope_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Teeth preserved for the RETIRED wording arm (``RETIRED_MASK == 0`` on
+    the 74/74 retention layout — DEC-VOCAB-VWAP-RETAIN-001 #2206): simulate a
+    future manifest where bit 52 is tombstoned again, so the exact refusal
+    wording + branch stay covered (the layout-only monkeypatch precedent
+    below). The refusal names the entry, its bit and its RETIRED status (the
+    ``parse_condition_ids`` wording family)."""
+    monkeypatch.setattr(F, "IMPLEMENTED_MASK", IMPLEMENTED_MASK & ~(1 << 52))
+    monkeypatch.setattr(F, "RETIRED_MASK", 1 << 52)
+    with pytest.raises(ValueError, match=r"'close_above_vwap' \(bit 52\) is RETIRED"):
+        _defn(condition_scope=frozenset({"close_above_vwap", "near_fib_50"}))
+
+
+def test_definition_accepts_live_supertrend_scope() -> None:
+    """The SuperTrend names construct — the vocab-66 implemented-flip
+    ACCEPTANCE pin (crate 0.5.0; the former declared-only refusal for bits
+    64/65 is consciously retired — the declared-but-NOT-YET-implemented
+    refusal ARM keeps its own teeth in the monkeypatched layout-only test
+    below)."""
+    d = _defn(condition_scope=frozenset({"close_above_supertrend", "close_below_supertrend"}))
+    assert d.candidate_mask == (1 << 64) | (1 << 65)
+    assert d.candidate_mask & ~IMPLEMENTED_MASK == 0
+
+
+def test_definition_refuses_a_declared_unimplemented_scope_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared-but-NOT-YET-implemented (LAYOUT-ONLY) refusal arm keeps
+    its exact wording covered.
+
+    No LAYOUT-ONLY bit exists on today's 66-bit layout (the SuperTrend pair
+    left that class at the vocab-66 implemented-flip), so the arm is kept
+    honest by simulating a future manifest where an implemented, non-retired
+    bit (64) is layout-only — the
+    ``test_parse_condition_ids_refuses_a_declared_unimplemented_bit``
+    monkeypatch precedent (tests/unit/test_cli_user_error_hygiene.py).
+    """
+    monkeypatch.setattr(F, "IMPLEMENTED_MASK", IMPLEMENTED_MASK & ~(1 << 64))
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"'close_above_supertrend' \(bit 64\) is declared but "
+            r"NOT YET implemented \(LAYOUT-ONLY\)"
+        ),
+    ) as excinfo:
+        _defn(condition_scope=frozenset({"close_above_supertrend", "near_fib_50"}))
+    assert "RETIRED" not in str(excinfo.value)
+
+
+def test_definition_accepts_live_cpr_scope_and_mask_stays_implemented_subset() -> None:
+    """Live names (incl. sign-bit narrow_cpr_day 63 + above_cpr_tc 60) construct,
+
+    and the explicit-scope ``candidate_mask`` honours its documented
+    IMPLEMENTED_MASK-subset invariant.
+    """
+    d = _defn(condition_scope=frozenset({"narrow_cpr_day", "above_cpr_tc", "near_fib_50"}))
+    mask = d.candidate_mask
+    assert mask == (1 << 63) | (1 << BIT_ABOVE_CPR_TC) | (1 << BIT_NEAR_FIB_50)
+    assert mask & ~IMPLEMENTED_MASK == 0
 
 
 # ─────────────────────────── directions (swept dimension) ───────────────────────────
@@ -403,7 +475,7 @@ def test_weekly_static_cold_start_returns_none() -> None:
 
 # ─────────────────────────── decoder bridge (Simple + Pro) ───────────────────────────
 def test_render_definition_default_timeframe_long() -> None:
-    mask = (1 << BIT_NEAR_FIB_50) | (1 << BIT_EMA20_ABOVE_EMA200) | (1 << BIT_CLOSE_ABOVE_VWAP)
+    mask = (1 << BIT_NEAR_FIB_50) | (1 << BIT_EMA20_ABOVE_EMA200) | (1 << BIT_ABOVE_CPR_TC)
     exp = F.render_definition(F.PREV_DAY, mask, F.Direction.LONG)
     assert exp.direction_label == "Buy"
     assert exp.simple_sentence  # non-empty

@@ -7,8 +7,9 @@ Covers the three dedicated :class:`RejectReason` members:
   (2021-01-01; the data pull floor is 2020-01-01) rejects THAT trade only
   instead of crashing the whole sim with the ``get_lot_size`` ValueError.
 - ``STALE_BAR`` — an entry OR exit bar with ``volume == 0`` is a stale/
-  carried price no real order could fill at; rejected by default, opt-out
-  via ``reject_stale_bars=False``.
+  carried price no real order could fill at; rejected UNCONDITIONALLY —
+  the ``reject_stale_bars`` opt-out was DELETED by
+  DEC-FILL-WORST-CASE-ONLY-001 (MIGRATION.md #1825).
 - ``COST_REGIME_UNVERIFIED`` — a signal whose entry date falls in the
   pre-2024-10-01 UNVERIFIED ETC refusal window rejects per-trade instead
   of pricing at a fabricated rate (DEC-ETC-REGIME-HISTORY-001).
@@ -515,3 +516,52 @@ def test_generic_valueerror_from_probe_still_propagates(
     monkeypatch.setattr(costs_constants, "exchange_charge_bps_x100", _boom)
     with pytest.raises(ValueError, match="boom — a generic programmer error"):
         materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=_VolumeSource())
+
+
+# ── DEC-EXEC-RUST-CORE-001 — ON-arm stale verdict (slice 7 / P8) ─────────────
+
+
+class TestExecRustStaleDispatch:
+    """The kernel-served STALE_BAR verdict maps onto the SAME reject + the
+    SAME single ``options.reject.stale_bar`` WARN (identical event name /
+    keys / one-WARN-per-reject cardinality). The reject is UNCONDITIONAL on
+    both arms — the ``reject_stale_bars`` opt-out was DELETED by
+    DEC-FILL-WORST-CASE-ONLY-001 (MIGRATION.md #1825)."""
+
+    @pytest.mark.parametrize(("entry_volume", "exit_volume"), [(0, 10), (10, 0)])
+    def test_on_arm_stale_bar_matches_off_arm_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch, entry_volume: int, exit_volume: int
+    ) -> None:
+        from brutex import exec_rust
+
+        source = _VolumeSource(entry_volume=entry_volume, exit_volume=exit_volume)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=source)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        with structlog.testing.capture_logs() as logs:
+            on = materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=source)
+        assert isinstance(on, RejectedTrade)
+        assert on.reason is RejectReason.STALE_BAR
+        assert on == off
+        events = [x for x in logs if x["event"] == "options.reject.stale_bar"]
+        assert len(events) == 1
+        assert events[0]["entry_volume"] == source.entry_volume
+        assert events[0]["exit_volume"] == source.exit_volume
+
+    def test_both_volumes_zero_rejects_unconditionally_both_arms(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both legs volume-0 rejects on BOTH arms — no opt-out exists
+        (DEC-FILL-WORST-CASE-ONLY-001 deleted ``reject_stale_bars``)."""
+        from brutex import exec_rust
+
+        source = _VolumeSource(entry_volume=0, exit_volume=0)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=source)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=source)
+        assert isinstance(off, RejectedTrade)
+        assert off.reason is RejectReason.STALE_BAR
+        assert isinstance(on, RejectedTrade)
+        assert on.reason is RejectReason.STALE_BAR
+        assert on == off

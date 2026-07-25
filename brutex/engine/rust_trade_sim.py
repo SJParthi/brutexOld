@@ -56,15 +56,18 @@ the compiled wheel produces the exact same trades, never a silent divergence).
 
 TWO compiled kernels share one width-generic Rust core
 (``rust/fno-math/src/trade_sim.rs`` over ``rust/fno-math/src/mask_word.rs``
-``MaskWord``): the u64-native ``ResidentSweepSim`` (today's 60-bit production
-vocabulary) and the u128 ``ResidentSweepSimU128`` (the ``MAX_VOCAB_BITS =
-128`` headroom). Both validate every paisa input against the overflow-safe
-ceiling ``MAX_PRICE_PAISA = i64::MAX / 8`` (#1090). An input outside the
-WIDEST kernel's envelope must still NEVER surface as a PyO3 ``OverflowError``
-/ kernel ``ValueError`` where the pure-Python oracle would simply simulate (a
-wheel-present vs wheel-absent behaviour asymmetry), so every such input routes
-to the bit-exact Python oracle instead, LOUDLY (one structlog WARNING, never
-silent):
+``MaskWord``): the u64-native ``ResidentSweepSim`` (serves today's production
+masks — every IMPLEMENTED bit is <= 63, so a u64 word still holds the full
+active vocabulary; flipping bit 64+ live — the declared SuperTrend pair —
+moves production onto the u128 kernel) and the u128 ``ResidentSweepSimU128``
+(the ``MAX_VOCAB_BITS = 128`` headroom — >64-bit masks/bar_bits are now
+Rust-served instead of oracle-served). Both validate every paisa input against
+the overflow-safe ceiling ``MAX_PRICE_PAISA = i64::MAX / 8`` (#1090). An input
+outside the WIDEST kernel's envelope must still NEVER surface as a PyO3
+``OverflowError`` / kernel ``ValueError`` where the pure-Python oracle would
+simply simulate (a wheel-present vs wheel-absent behaviour asymmetry), so every
+such input routes to the bit-exact Python oracle instead, LOUDLY (one structlog
+WARNING, never silent):
 
 * at CONSTRUCTION: ``bar_bits`` all inside ``[0, U64_MASK]``
   (:data:`~brutex.engine.combo_mask.U64_MASK`) build the u64 kernel; any value
@@ -472,8 +475,8 @@ def _width_offender_fields(values: Sequence[int]) -> dict[str, str | int | None]
     width fallback WARNING must NAME the offending word — ``offending_value``
     (hex) + ``offending_bit`` — so the operator sees exactly which value could
     not cross even the ``Vec<u128>`` FFI edge and at which bit (the first
-    width that cannot fit u128 is bit 128; today's 60-bit vocabulary never
-    triggers this). ``offending_bit`` is the word's highest set bit for the
+    width that cannot fit u128 is bit 128; today's vocabulary — implemented
+    bits <= 63, declared layout <= 65 — never triggers this). ``offending_bit`` is the word's highest set bit for the
     oversize direction; ``None`` for the negative API-misuse direction, where
     a "bit" has no meaning. One ``O(N)`` scan paid ONLY on the already-warned
     fallback path — the kernel fast path never runs this.

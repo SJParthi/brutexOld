@@ -1265,6 +1265,10 @@ def plan_expected_stores(
                     pivot_proximity_bps=cell.proximity_bps[0],
                     pdh_pdl_proximity_bps=cell.proximity_bps[1],
                     fib_proximity_bps=cell.proximity_bps[2],
+                    # DEC-FIB-TEMPLATE-EXPRESS-001: an absent manifest key
+                    # round-trips the default-10 fourth field, so a swung
+                    # cell's run_id re-derives at its ORIGINATING band.
+                    swing_proximity_bps=cell.swing_proximity_bps,
                 )
             ),
             # The refined cell's Fib anchor (DEC-NIFTY-FIB-AXIS-001) — round-tripped
@@ -1459,7 +1463,14 @@ def verify_identity(
                 detail=(
                     f"none of the {len(found)} store(s) matches any of the "
                     f"{len(plan)} expected path(s) — wrong grid flags, wrong "
-                    f"recorded context, or wrong root; per-file verdicts withheld"
+                    f"recorded context, wrong root, OR a condition-vocabulary "
+                    f"flip since the tree was swept (the DEFAULT swept-bit set "
+                    f"tracks IMPLEMENTED_MASK, so a reshape — e.g. the VWAP "
+                    f"bits 52/53 retiring — moves every default-grid store "
+                    f"address); re-run sweep-verify with the tree's RECORDED "
+                    f"--conditions list, or use --recount (it reads the "
+                    f"recorded context from the tree's audit chain); per-file "
+                    f"verdicts withheld"
                 ),
             )
         )

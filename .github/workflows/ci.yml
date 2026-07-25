@@ -365,7 +365,17 @@ jobs:
     # 75 → 90 (TRAIN A, red-team mandate): the diff-scoped coverage gate
     # wall-kills at 75 on a ~35-PR integration diff; W2's on-record raise
     # (living in #1699 as a cherry of the same edit) authorizes 90.
-    timeout-minutes: 90
+    # 90 → 130 (#1751 club — DEC-VOCAB-U128-CODEGEN-001 74-bit vocab):
+    # the 60→74-condition u128 mask makes the sweep/mask compute tests
+    # meaningfully heavier under --cov=brutex --cov-branch. Measured on a
+    # single-process, all-263-shard-3-files local reproduction: 28 min
+    # WITHOUT coverage; under coverage the heaviest shard lands in the
+    # ~85–100 min band, brushing the 90 cap — an INTERMITTENT boundary
+    # TIMEOUT (all tests PASS; every faithful local reproduction is green,
+    # no-cov 7891 passed / 0 failed and all four --cov chunks green), not a
+    # test defect. 130 clears the band with ~30–45 min margin; a genuine
+    # hang still trips it (each test keeps its own deadline guards).
+    timeout-minutes: 130
     strategy:
       fail-fast: false
       matrix:
@@ -1590,10 +1600,12 @@ jobs:
           else
             echo "(brutex.optcost_rust test file not present yet — gate inactive)"
           fi
-          # 19d · brutex.costs.types (95 stmts, 14 branches, 75 tests —
-          #       incl. the DEC-ETC-REGIME-HISTORY-001 UnverifiedCostRegimeError
-          #       direct-construction tests, REQUIRED here because this gate
-          #       collects test_costs_calculator.py ONLY)
+          # 19d · brutex.costs.types (113 stmts, 14 branches after the
+          #       ChargeStack leaf-homing — the CodeQL py/cyclic-import fix,
+          #       DEC-EXEC-RUST-CORE-001; incl. the DEC-ETC-REGIME-HISTORY-001
+          #       UnverifiedCostRegimeError direct-construction tests,
+          #       REQUIRED here because this gate collects
+          #       test_costs_calculator.py ONLY)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else
@@ -1609,12 +1621,27 @@ jobs:
           else
             echo "(brutex.costs.constants test file not present yet — gate inactive)"
           fi
-          # 19f · brutex.costs.calculator (63 stmts, 10 branches; same test)
+          # 19f · brutex.costs.calculator (72 stmts, 14 branches after the
+          #       DEC-EXEC-RUST-CORE-001 _charge_stack_py extraction + the
+          #       ChargeStack leaf-homing into brutex.costs.types — the
+          #       CodeQL py/cyclic-import fix; same test)
           if compgen -G "tests/unit/test_costs_calculator.py" > /dev/null; then
             pytest --cov=brutex.costs.calculator --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_costs_calculator.py
           else
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
+          # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+          # 19f1 · brutex.exec_rust (200 stmts, 70 branches — re-measured at
+          #        the round-2 NIT-polish HEAD after the i64 wire-element
+          #        range guard; history: 146/38 round 1 → 198/68 round 2) — the
+          #        BRUTEX_EXEC_RUST default-OFF seam over the fno-math exec
+          #        cores; standalone 100% gate (the rust_metrics precedent).
+          if compgen -G "tests/unit/test_exec_rust_seam.py" > /dev/null; then
+            pytest --cov=brutex.exec_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_exec_rust_seam.py
+          else
+            echo "(brutex.exec_rust test file not present yet — gate inactive)"
+          fi
+          # --- end slice-7 exec ---
           # 19g · brutex.execution.costs gate removed with the deleted module
           #       (DEC-EXECUTION-TRIO-DELETE-001).
           # 19h · brutex.data.models (54 stmts, 24 branches, 21 tests)
@@ -1655,6 +1682,18 @@ jobs:
             pytest --cov=brutex.engine.sweep_apriori --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_apriori.py
           else
             echo "(brutex.engine.sweep_apriori test file not present yet — gate inactive)"
+          fi
+          # 19i1a2 · brutex.engine.rust_enum — the flag-gated Rust sweep-enum
+          # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-OFF behind
+          # BRUTEX_SWEEP_RUST_ENUM; no size figure here on purpose — the
+          # gate enforces 100%, counts drift). 100% line+branch from the
+          # dedicated unit suite (the
+          # byte-identical-leaderboard parity gate lives in
+          # tests/golden/test_engine_rust_enum_parity.py).
+          if compgen -G "tests/unit/test_engine_rust_enum.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_enum --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_enum.py
+          else
+            echo "(brutex.engine.rust_enum test file not present yet — gate inactive)"
           fi
           # 19i1b · brutex.engine.stage3_refine — Stage-3 restarted-CMA-ES refinement
           # runner (DEC-STAGE3-REFINE-001 / DEC-RUST-STAGE3-REFINE-001; the A/B
@@ -3171,6 +3210,19 @@ jobs:
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
+          # DEC-RANKING-RUST-001 slice-4 PR-1 (review round 7, R7.3): the ONE
+          # COMMON parity wrapper core ships with its OWN dedicated standalone
+          # gate (the slice-4 design's "100% line+branch, standalone ci.yml
+          # gate" clause — the oneclick_artifacts.py precedent), not only the broad
+          # brutex.engine package gate. Its sibling binding
+          # brutex/ranking/rust_ranking.py rides the brutex.ranking PACKAGE
+          # gate at 19i2 above (a dotted --cov=brutex.ranking.<module> spec
+          # trips the numpy double-import documented there).
+          if compgen -G "tests/unit/test_engine_rust_parity_core.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_parity_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_parity_core.py
+          else
+            echo "(brutex.engine.rust_parity_core test file not present yet — gate inactive)"
+          fi
           # DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1958): the
           # brutex/acceptance/ package — the operator acceptance verifier —
           # ships every module at 100% line+branch from the start (design
@@ -3243,6 +3295,40 @@ jobs:
             echo "(brutex.engine.resilience_streaks test file not present yet — gate inactive)"
           fi
 
+      # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+      - name: Dual-arm exec-rust parity (BRUTEX_EXEC_RUST=1, covering set)
+        # The flag is default-OFF, so every step above exercised the Python
+        # oracle arm; this step re-runs the BOUNDED exec covering set with
+        # the kernel arm FORCED ON. Engagement is ASSERTED inside the suites
+        # (counting-proxy spies in the seam/gate files + the golden's
+        # engaged-assert fixture), so a silently-fallen-back kernel FAILS —
+        # the ON arm can never go vacuous (spec §5's dedicated red-gate
+        # step; never a matrix footnote). Zero fixture edits: the frozen
+        # goldens must pass IDENTICALLY under both arms.
+        env:
+          BRUTEX_EXEC_RUST: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_exec_rust_seam.py \
+            tests/unit/test_costs_calculator.py \
+            tests/unit/test_costs_regime_table.py \
+            tests/unit/test_costs_scope.py \
+            tests/unit/test_futures_costs.py \
+            tests/unit/test_options_executor.py \
+            tests/unit/test_options_executor_rejects.py \
+            tests/unit/test_options_lake_source.py \
+            tests/unit/test_futures_executor.py \
+            tests/unit/test_futures_executor_rejects.py \
+            tests/unit/test_futures_reference_sim.py \
+            tests/golden/test_costs_verified_examples.py \
+            tests/golden/test_options_executor_golden.py \
+            tests/golden/test_futures_executor_golden.py \
+            tests/golden/test_exec_rust_golden.py \
+            tests/property/test_cost_calculator_properties.py \
+            tests/property/test_options_executor_properties.py \
+            tests/property/test_futures_suffix_independence.py \
+            tests/property/test_exec_rust_differential.py
+      # --- end slice-7 exec ---
   # ─────────────────────────────────────────────────────────────────
   # TOUCHED-MODULE COVERAGE GATE (auto-discovered) — moved VERBATIM out
   # of the `test` job so it runs in PARALLEL with the coverage shards
@@ -3803,13 +3889,37 @@ jobs:
             # filterwarnings for the bench session so third-party
             # deprecation warnings (pytest-benchmark, pkg_resources)
             # on Python 3.12 don't fail the run.
+            #
+            # FAILURE OBSERVABILITY (DEC-BENCH-SLOPE-BOUND-001): this is the
+            # one required gate whose failures are pure wall-clock ratios, so
+            # the failing test id + its measured numbers must reach the run
+            # summary WITHOUT a maintainer downloading the raw log. The
+            # `::error` annotations below surface exactly the `FAILED …` short
+            # summary lines pytest already prints (`-rfE` pins that summary on
+            # rather than relying on the default).
+            #
+            # The gate is NEVER weakened: `set -o pipefail` + the captured `rc`
+            # + the explicit `exit "$rc"` re-raise pytest's own exit code
+            # verbatim, so this block can only ever ADD annotations — it can
+            # never turn a red run green.
+            set -o pipefail
+            rc=0
             pytest tests/bench \
               -W default::DeprecationWarning \
               -W default::PendingDeprecationWarning \
+              -rfE \
               --benchmark-min-rounds=3 \
               --benchmark-disable-gc \
               --benchmark-columns=min,mean,median,stddev,ops \
-              --benchmark-json=bench-results.json
+              --benchmark-json=bench-results.json \
+              2>&1 | tee bench-output.txt || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              grep -E '^(FAILED|ERROR) ' bench-output.txt | while IFS= read -r line; do
+                echo "::error title=bench-failure::${line}"
+              done
+              echo "::error title=bench-gate::pytest tests/bench exited ${rc} — see the bench-failure annotations above. Ratio ceilings live in tests/bench/_o1_tiers.py; never widen one to make a run green (Golden Rule #10)."
+            fi
+            exit "$rc"
           else
             echo "⏸  tests/bench does not exist yet — skipping"
           fi

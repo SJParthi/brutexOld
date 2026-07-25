@@ -147,7 +147,7 @@ def _seconds_of_day(hour: int, minute: int, second: int) -> int:
 
     Delegates to the shared Rust ``trading_core.seconds_of_day``
     (DEC-TOD-SECONDS-RUST-SEAM-001) — the SAME derivation the vocabulary
-    evaluator + Stage-1A VWAP feed consume, so the eval path holds NO inline
+    evaluator + Stage-1A batch prepass consume, so the eval path holds NO inline
     ``h*3600`` arithmetic and the value is bit-identical to the
     TickVault-native path by construction.
     """

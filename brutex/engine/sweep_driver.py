@@ -96,10 +96,12 @@ _MINUTES_PER_YEAR: Final[float] = 365.25 * 24.0 * 60.0
 
 #: Hard ceiling on the masks a single :func:`rank_sweep_over_bits` will enumerate
 #: without an explicit opt-in — the honest "this is a BIG sweep, raise the cap on
-#: purpose" guardrail (Golden Rule #10, no-illusion limits). For scale:
-#: ``C(60,3)=34,220``; ``C(60,4)=487,635``; ``C(60,5)=5,461,512`` — so the default
-#: admits a full-vocab K≤3 sweep and forces a conscious choice beyond that (K=4
-#: over the full 60 already exceeds the cap and is loudly REFUSED — pinned by
+#: purpose" guardrail (Golden Rule #10, no-illusion limits). For scale (over the
+#: 64 active bits — DEC-SUPERTREND-CONDITIONS-001): ``C(64,3)=41,664``;
+#: ``C(64,4)=635,376``;
+#: ``C(64,5)=7,624,512`` — so the default admits a full-vocab K≤3 sweep and
+#: forces a conscious choice beyond that (K=4
+#: over the full 64 already exceeds the cap and is loudly REFUSED — pinned by
 #: ``test_default_bits_k4_hits_loud_refusal_cap``), rather than silently
 #: launching a multi-100k-combo run.
 DEFAULT_MAX_COMBOS: Final[int] = 100_000
@@ -216,7 +218,7 @@ def evaluate_combo(
     bars
         Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
     required_mask
-        The strategy mask (which of the 60 conditions must fire). ``0`` enters
+        The strategy mask (which vocabulary conditions must fire). ``0`` enters
         on every bar.
     direction
         :data:`~brutex.strategies.types.Side.BUY` (long) or ``Side.SELL`` (short).
@@ -888,7 +890,7 @@ def rank_sweep_over_bits(
     bars
         Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
     condition_bits
-        The condition bit positions (of the 60-condition vocabulary) to
+        The condition bit positions (of the declared condition vocabulary) to
         brute-force over, each in ``[0, 64)``. Duplicates are ignored.
     k
         How many of the chosen conditions each combo requires (``0 <= k <= n``,

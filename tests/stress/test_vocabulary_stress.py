@@ -1,4 +1,4 @@
-"""Sustained-load determinism soak for the 52-condition vocabulary.
+"""Sustained-load determinism soak for the shared condition vocabulary.
 
 The brute-force engine calls :func:`brutex.vocabulary.evaluator.evaluate_atoms`
 and the mask operations (:func:`~brutex.vocabulary.conflicts.has_conflict`,

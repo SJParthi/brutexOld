@@ -10,8 +10,9 @@
 //! that fails when that operator is perturbed):
 //!
 //! 1. **Universal invariants** — hold for ALL bounded inputs: determinism,
-//!    reserved bits 52-63 always clear, mutually-exclusive bit pairs, at most
-//!    one time-of-day bucket, the pivot/fib level ladders are monotonic.
+//!    non-implemented bits (the reserved u128 headroom >= 74) always clear,
+//!    mutually-exclusive bit pairs, at most one time-of-day bucket, the CPR
+//!    partition, the pivot/fib level ladders are monotonic.
 //! 2. **Independent oracle parity** — a deliberately separate re-implementation
 //!    of the 52 predicates (this file is in `tests/`, which `cargo-mutants`
 //!    never mutates, so a mutant in `src/` diverges from this oracle and dies).
@@ -28,8 +29,9 @@
 
 use proptest::prelude::*;
 use trading_core::{
-    FibLevels, IndicatorSnapshot, MarketStructureSignal, PivotLevels, PriorBarHistory,
-    ProximityParams, bits, compute_fib_levels, compute_pivot_levels, evaluate_atoms,
+    FibLevels, GapDirection, IndicatorSnapshot, MarketStructureSignal, PivotLevels,
+    PriorBarHistory, ProximityParams, bits, compute_fib_levels, compute_gap_mid,
+    compute_pivot_levels, evaluate_atoms,
 };
 
 /// Upper bound for generated paisa magnitudes (₹10 billion). See module docs:
@@ -44,8 +46,10 @@ const MID_MORNING_END: u32 = 11 * 3600 + 30 * 60;
 const MIDDAY_END: u32 = 13 * 3600;
 const AFTERNOON_END: u32 = 15 * 3600;
 
-/// All IMPLEMENTED condition bits set — the union the evaluator can ever produce
-/// (all 60 bits, incl. the VWAP/R5-S5/BOS/CHoCH groups, are implemented now).
+/// All IMPLEMENTED condition bits set — the union the evaluator can ever
+/// produce (all 74 bits, incl. the VWAP/R5-S5/BOS/CHoCH/CPR/Supertrend/
+/// gap-mid/fib-express groups, are implemented now — VWAP retained per
+/// DEC-VOCAB-VWAP-RETAIN-001).
 const FULL_MASK: u128 = bits::IMPLEMENTED_MASK;
 
 // ───────────────────────────── strategies ──────────────────────────────────
@@ -62,11 +66,25 @@ fn arb_prev_day() -> impl Strategy<Value = (i64, i64, i64)> {
 
 /// Proximity tolerances spanning 0 bps (degenerate, only exact hits) … 2 %.
 fn arb_proximity() -> impl Strategy<Value = ProximityParams> {
-    (0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c)| ProximityParams {
+    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c, d)| ProximityParams {
         pivot_proximity_bps: a,
         pdh_pdl_proximity_bps: b,
         fib_proximity_bps: c,
+        gap_mid_proximity_bps: d,
+        swing_proximity_bps: d,
     })
+}
+
+/// One confirmed-swing anchor (bits 72/73, DEC-FIB-TEMPLATE-EXPRESS-001):
+/// None (no confirmed swing yet — the abstain arm), a value clustered tightly
+/// around `close` (so the `is_near` band edges are exercised both ways under
+/// the drawn `swing_proximity_bps`), or anywhere in range.
+fn arb_swing_side(close: i64) -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        2 => Just(None),
+        3 => (close.saturating_sub(5).max(1)..=close.saturating_add(5)).prop_map(Some),
+        2 => (1i64..=2 * MAX_PAISA).prop_map(Some),
+    ]
 }
 
 /// Prior-bar window: `prior_n` in 1..=6 with a flag vector whose length is
@@ -201,7 +219,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 Just((pdc - gap_thr - 1).max(1)),
                 1i64..=2 * MAX_PAISA,
             ];
-            // Nine elements (nested tuples keep us inside proptest's 12-tuple cap).
+            // Twelve elements (nested tuples keep us inside proptest's 12-tuple cap).
             (
                 Just(pivots),
                 Just(fib),
@@ -222,6 +240,20 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 // by the `MarketStructureState` unit + property tests; here the
                 // evaluator's job is only to copy each flag onto its bit).
                 arb_market_structure(),
+                // The resolved SuperTrend ×2 line (Group 14, boundary-aware —
+                // see `arb_supertrend`) NESTED with the resolved Group-15
+                // gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001 —
+                // around/at/absent like the EMAs; the stateful X1/X2
+                // RESOLUTION is proven by the stage1a_batch tests, the
+                // evaluator's job here is the pure above/below/near verdict,
+                // so bits 66-68 are exercised both ways) — one pair to stay
+                // inside the tuple cap.
+                (arb_supertrend(close), arb_ema(close)),
+                // The confirmed-swing anchors (bits 72/73,
+                // DEC-FIB-TEMPLATE-EXPRESS-001) — None / around-close / far,
+                // each side independent, so the Option-abstain arm AND both
+                // near/far outcomes are exercised under the drawn swing band.
+                (arb_swing_side(close), arb_swing_side(close)),
             )
         })
         .prop_map(
@@ -236,10 +268,14 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 proximity,
                 prior,
                 market_structure,
+                st_gap,
+                swings,
             )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
                 let (ema20, ema200, vwap) = emas;
+                let (supertrend_x2_paisa, gap_mid) = st_gap;
+                let (swing_high, swing_low) = swings;
                 let snapshot = IndicatorSnapshot {
                     tod_seconds,
                     open_paisa: open,
@@ -255,10 +291,30 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     day_low_paisa: day_low,
                     open_of_day_paisa: open_of_day,
                     market_structure,
+                    supertrend_x2_paisa,
+                    gap_mid_paisa: gap_mid,
+                    last_swing_high_paisa: swing_high,
+                    last_swing_low_paisa: swing_low,
                 };
                 (snapshot, proximity, prior)
             },
         )
+}
+
+/// Strategy: a resolved SuperTrend line (×2-scaled paisa) around the bar's
+/// close so the two STRICT Group-14 comparisons see their equality boundary
+/// both ways, plus `None` (warm-up / unwired) and a uniform in-domain value.
+/// The streaming derivation of the line is owned + proven by
+/// `SupertrendState`'s own unit/property suite; the evaluator's job here is
+/// only the exact `close·2` vs line compare.
+fn arb_supertrend(close: i64) -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        Just(None),
+        Just(Some(close * 2)),     // the exact equality edge (both bits clear)
+        Just(Some(close * 2 - 1)), // half a paisa below ⇒ above-bit fires
+        Just(Some(close * 2 + 1)), // half a paisa above ⇒ below-bit fires
+        (1i64..=4 * MAX_PAISA).prop_map(Some),
+    ]
 }
 
 /// Strategy: an arbitrary `MarketStructureSignal` (each of the four resolved
@@ -288,7 +344,7 @@ fn oracle_is_near(close: i64, level: i64, bps: i64) -> bool {
     (close - level).abs() <= tolerance
 }
 
-/// A second, deliberately independent implementation of all 52 conditions, used
+/// A second, deliberately independent implementation of every implemented condition, used
 /// only as a test oracle. `cargo-mutants` mutates `src/` but never `tests/`, so
 /// any mutant in `evaluate_atoms` diverges from this reference and is killed
 /// (provided the generators reach the mutated line — they are boundary-aware).
@@ -400,6 +456,32 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         if oracle_is_near(c, up, bf) || oracle_is_near(c, down, bf) {
             m |= 1 << bit;
         }
+    }
+
+    // DEC-FIB-TEMPLATE-EXPRESS-001 — the express template bits (69-73):
+    // the asymmetric BULL retracement pair, the 4.24 extension (both
+    // directions, the ext-family OR law) and the confirmed-swing anchors
+    // (Option-abstain: no confirmed swing ⇒ the bit can never fire).
+    if oracle_is_near(c, fib.retrace_bull_23_paisa, bf) {
+        m |= 1u128 << bits::BIT_NEAR_FIB_BULL_236;
+    }
+    if oracle_is_near(c, fib.retrace_bull_78_paisa, bf) {
+        m |= 1u128 << bits::BIT_NEAR_FIB_BULL_786;
+    }
+    if oracle_is_near(c, fib.ext_up_424_paisa, bf) || oracle_is_near(c, fib.ext_down_424_paisa, bf)
+    {
+        m |= 1u128 << bits::BIT_NEAR_FIB_424;
+    }
+    let bs = p.swing_proximity_bps;
+    if let Some(sh) = s.last_swing_high_paisa
+        && oracle_is_near(c, sh, bs)
+    {
+        m |= 1u128 << bits::BIT_NEAR_SWING_HIGH;
+    }
+    if let Some(sl) = s.last_swing_low_paisa
+        && oracle_is_near(c, sl, bs)
+    {
+        m |= 1u128 << bits::BIT_NEAR_SWING_LOW;
     }
 
     // Group 5: candle shape.
@@ -523,6 +605,52 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_CHOCH_BEARISH;
     }
 
+    // Group 14: Supertrend (bits 64-65) — independent re-derivation of the
+    // strict ×2-domain compare (`None` ⇒ neither bit; equality ⇒ neither).
+    if let Some(st) = s.supertrend_x2_paisa {
+        let close_x2 = i128::from(c) * 2;
+        let st = i128::from(st);
+        if close_x2 > st {
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_SUPERTREND;
+        }
+        if close_x2 < st {
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_SUPERTREND;
+        }
+    }
+
+    // Group 13: Central Pivot Range (bits 60-63) — an independent re-derivation
+    // of the Ochoa/PivotBoss formulas (BC = round-half-even midpoint of the raw
+    // prev-day H/L; TC = 2·P − BC on the rounded pivot P; canonical tc >= bc).
+    let bc_raw = ((pv.pdh_paisa + pv.pdl_paisa) as f64 / 2.0).round_ties_even() as i64;
+    let tc_raw = 2 * pv.p_paisa - bc_raw;
+    let (tc, bc) = (tc_raw.max(bc_raw), tc_raw.min(bc_raw));
+    if c > tc {
+        m |= 1u128 << bits::BIT_ABOVE_CPR_TC;
+    }
+    if c < bc {
+        m |= 1u128 << bits::BIT_BELOW_CPR_BC;
+    }
+    if c >= bc && c <= tc {
+        m |= 1u128 << bits::BIT_INSIDE_CPR;
+    }
+    if pv.p_paisa > 0 && (i128::from(tc) - i128::from(bc)) * 10_000 <= i128::from(pv.p_paisa) * 30 {
+        m |= 1u128 << bits::BIT_NARROW_CPR_DAY;
+    }
+
+    // Group 15: gap midpoint (bits 66-68) — the resolved optional level
+    // (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    if let Some(gm) = s.gap_mid_paisa {
+        if c > gm {
+            m |= 1u128 << bits::BIT_CLOSE_ABOVE_GAP_MID;
+        }
+        if c < gm {
+            m |= 1u128 << bits::BIT_CLOSE_BELOW_GAP_MID;
+        }
+        if oracle_is_near(c, gm, p.gap_mid_proximity_bps) {
+            m |= 1u128 << bits::BIT_NEAR_GAP_MID;
+        }
+    }
+
     m
 }
 
@@ -553,8 +681,8 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 
-    /// Every bit outside IMPLEMENTED_MASK (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH
-    /// bits + the reserved u128 headroom) must always be clear.
+    /// Every bit outside IMPLEMENTED_MASK must always be clear: the reserved
+    /// u128 headroom (>= 74).
     #[test]
     fn non_implemented_bits_are_always_clear((s, p, prior) in arb_scenario()) {
         let mask = evaluate_atoms(&s, &p, &prior);
@@ -562,8 +690,9 @@ proptest! {
     }
 
     /// The evaluator must equal the independent oracle on every scenario. This
-    /// is the workhorse mutation-killer: it pins the exact predicate of all 52
-    /// bits, and the boundary-aware generators reach each comparison's edge.
+    /// is the workhorse mutation-killer: it pins the exact predicate of every
+    /// implemented bit, and the boundary-aware generators reach each
+    /// comparison's edge.
     #[test]
     fn evaluator_matches_independent_oracle((s, p, prior) in arb_scenario()) {
         prop_assert_eq!(evaluate_atoms(&s, &p, &prior), oracle(&s, &p, &prior));
@@ -583,6 +712,47 @@ proptest! {
         prop_assert_eq!(pair(bits::BIT_CLOSE_IN_UPPER_THIRD, bits::BIT_CLOSE_IN_LOWER_THIRD), 0);
         prop_assert_eq!(pair(bits::BIT_GAP_UP_DAY, bits::BIT_GAP_DOWN_DAY), 0);
         prop_assert_eq!(pair(bits::BIT_INSIDE_DAY, bits::BIT_OUTSIDE_DAY), 0);
+        prop_assert_eq!(
+            pair(bits::BIT_CLOSE_ABOVE_SUPERTREND, bits::BIT_CLOSE_BELOW_SUPERTREND),
+            0
+        );
+        prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_BELOW_CPR_BC), 0);
+        prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_INSIDE_CPR), 0);
+        prop_assert_eq!(pair(bits::BIT_BELOW_CPR_BC, bits::BIT_INSIDE_CPR), 0);
+        prop_assert_eq!(
+            pair(bits::BIT_CLOSE_ABOVE_GAP_MID, bits::BIT_CLOSE_BELOW_GAP_MID),
+            0
+        );
+    }
+
+    /// The three CPR position bits (60-62) form an EXACT PARTITION: with the
+    /// canonicalized band (tc >= bc), any close is strictly above TC, strictly
+    /// below BC, or inside the inclusive band — exactly one of the three fires
+    /// on EVERY scenario (never zero, never two).
+    #[test]
+    fn cpr_position_bits_form_an_exact_partition((s, p, prior) in arb_scenario()) {
+        let m = evaluate_atoms(&s, &p, &prior);
+        let cpr_pos = (m >> bits::BIT_ABOVE_CPR_TC) & 0b111;
+        prop_assert_eq!(cpr_pos.count_ones(), 1, "CPR position bits = {:#05b}", cpr_pos);
+    }
+
+    /// The CPR band is ORDERED post-canonicalization (G-CPRCOR-07): for ANY
+    /// prev-day anchor triple — including the roughly-half of real days whose
+    /// RAW pair inverts (tc_raw < bc_raw) — `compute_cpr_levels` returns
+    /// tc >= bc, the precondition the 60/61/62 trichotomy above stands on.
+    #[test]
+    fn cpr_band_is_ordered(
+        p in 1i64..=1_000_000_000_000i64,
+        pdh in 1i64..=1_000_000_000_000i64,
+        pdl in 1i64..=1_000_000_000_000i64,
+    ) {
+        let cpr = trading_core::compute_cpr_levels(p, pdh, pdl);
+        prop_assert!(
+            cpr.tc_paisa >= cpr.bc_paisa,
+            "canonicalized CPR must satisfy tc >= bc, got tc={} bc={}",
+            cpr.tc_paisa,
+            cpr.bc_paisa
+        );
     }
 
     /// At most one Group-8 time-of-day bucket fires (the `else if` chain).
@@ -689,13 +859,14 @@ proptest! {
 
 // ──────────────────── deterministic per-bit reachability ─────────────────────
 
-/// Every one of the 52 bits is *individually* reachable: a hand-built scenario
+/// Every IMPLEMENTED bit is *individually* reachable: a hand-built scenario
 /// forces exactly that condition true and the bit fires. This is non-flaky
-/// (no RNG), proves reachability for all 52 (complementing the golden union
-/// test), and is a sharp mutation-killer — a deleted `mask |= 1 << BIT_X`
-/// statement, or a flipped comparison for that bit, makes its case fail.
+/// (no RNG), proves reachability for the whole implemented set (complementing
+/// the golden union test), and is a sharp mutation-killer — a deleted
+/// `mask |= 1 << BIT_X` statement, or a flipped comparison for that bit,
+/// makes its case fail.
 #[test]
-fn every_one_of_the_52_bits_is_individually_reachable() {
+fn every_implemented_bit_is_individually_reachable() {
     // Anchor chosen so ALL pivot + fib levels are strictly positive (so the
     // `close <= 0` short-circuit in `is_near` never masks a proximity case).
     let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
@@ -715,11 +886,17 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 10,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 10,
+        gap_mid_proximity_bps: 10,
+        swing_proximity_bps: 10,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1293,9 +1470,257 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         &no_prior,
     );
 
+    // Group 13: Central Pivot Range (bits 60-63). For the base anchor
+    // (1_100_000 / 1_000_000 / 1_060_000): P = round(3_160_000/3) = 1_053_333,
+    // BC = round(2_100_000/2) = 1_050_000, TC = 2·P − BC = 1_056_666.
+    check(
+        bits::BIT_ABOVE_CPR_TC,
+        IndicatorSnapshot {
+            close_paisa: 1_060_000, // > TC 1_056_666
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BELOW_CPR_BC,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000, // < BC 1_050_000
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_INSIDE_CPR,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000, // == BC — the INCLUSIVE lower edge
+            ..base
+        },
+        &no_prior,
+    );
+    // Narrow CPR: pdc exactly at the (pdh+pdl)/2 midpoint collapses the band
+    // to width 0 (P == BC == TC = 1_050_000) — trivially <= 30 bps of P.
+    check(
+        bits::BIT_NARROW_CPR_DAY,
+        IndicatorSnapshot {
+            pivots: compute_pivot_levels(1_100_000, 1_000_000, 1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+
+    // Group 14: Supertrend (bits 64-65). close_x2 = 2_100_000; a line one
+    // half-paisa unit below fires ABOVE, one above fires BELOW — strict, exact.
+    check(
+        bits::BIT_CLOSE_ABOVE_SUPERTREND,
+        IndicatorSnapshot {
+            supertrend_x2_paisa: Some(2_099_999),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_SUPERTREND,
+        IndicatorSnapshot {
+            supertrend_x2_paisa: Some(2_100_001),
+            ..base
+        },
+        &no_prior,
+    );
+    // Group 15: gap midpoint (bits 66-68, DEC-GAP-MIDPOINT-CONDITIONS-001) —
+    // a resolved level below / above / exactly at the close.
+    check(
+        bits::BIT_CLOSE_ABOVE_GAP_MID,
+        IndicatorSnapshot {
+            gap_mid_paisa: Some(1_049_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_CLOSE_BELOW_GAP_MID,
+        IndicatorSnapshot {
+            gap_mid_paisa: Some(1_051_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_GAP_MID,
+        IndicatorSnapshot {
+            gap_mid_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+    // DEC-FIB-TEMPLATE-EXPRESS-001 — the express template bits (69-73).
+    // Anchor levels (pdh 1_100_000 / pdl 1_000_000, r = 100_000):
+    // bull_23 = 1_023_600 · bull_78 = 1_078_600 · ext_up_424 = 1_423_600.
+    check(
+        bits::BIT_NEAR_FIB_BULL_236,
+        IndicatorSnapshot {
+            close_paisa: 1_023_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_BULL_786,
+        IndicatorSnapshot {
+            close_paisa: 1_078_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_FIB_424,
+        IndicatorSnapshot {
+            close_paisa: 1_423_600,
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_SWING_HIGH,
+        IndicatorSnapshot {
+            last_swing_high_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_NEAR_SWING_LOW,
+        IndicatorSnapshot {
+            last_swing_low_paisa: Some(1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (incl. VWAP/R5-S5/BOS/CHoCH) were exercised"
+        "not all implemented bits (incl. VWAP/R5-S5/BOS/CHoCH/CPR/Supertrend/gap-mid/fib-express) were exercised"
+    );
+}
+
+/// Deterministic CPR boundary pins: at close == TC the strict above-bit stays
+/// CLEAR while the inclusive inside-bit is SET (and symmetrically at BC) — the
+/// `>`↔`>=` / `<`↔`<=` mutant killers for the Group-13 comparisons. Plus the
+/// exact narrow-CPR threshold edge in both directions.
+#[test]
+fn cpr_equality_boundaries_are_pinned() {
+    // Base anchor: BC = 1_050_000, TC = 1_056_666 (see the reachability test).
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let prox = ProximityParams {
+        pivot_proximity_bps: 0,
+        pdh_pdl_proximity_bps: 0,
+        fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
+        swing_proximity_bps: 0,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    let eval = |close: i64| {
+        let s = IndicatorSnapshot {
+            tod_seconds: 0,
+            open_paisa: close,
+            high_paisa: close,
+            low_paisa: close,
+            close_paisa: close,
+            ema20_paisa: None,
+            ema200_paisa: None,
+            vwap_paisa: None,
+            pivots,
+            fib,
+            day_high_paisa: close,
+            day_low_paisa: close,
+            open_of_day_paisa: close,
+            market_structure: MarketStructureSignal::default(),
+            supertrend_x2_paisa: None,
+            gap_mid_paisa: None,
+            last_swing_high_paisa: None,
+            last_swing_low_paisa: None,
+        };
+        evaluate_atoms(&s, &prox, &no_prior)
+    };
+    let bit = |m: u128, b: u32| (m >> b) & 1;
+
+    // close == TC: above CLEAR (strict), inside SET (inclusive upper edge).
+    let at_tc = eval(1_056_666);
+    assert_eq!(bit(at_tc, bits::BIT_ABOVE_CPR_TC), 0);
+    assert_eq!(bit(at_tc, bits::BIT_INSIDE_CPR), 1);
+    assert_eq!(bit(at_tc, bits::BIT_BELOW_CPR_BC), 0);
+    // one paisa above TC: above SET, inside CLEAR.
+    let over_tc = eval(1_056_667);
+    assert_eq!(bit(over_tc, bits::BIT_ABOVE_CPR_TC), 1);
+    assert_eq!(bit(over_tc, bits::BIT_INSIDE_CPR), 0);
+    // close == BC: below CLEAR (strict), inside SET (inclusive lower edge).
+    let at_bc = eval(1_050_000);
+    assert_eq!(bit(at_bc, bits::BIT_BELOW_CPR_BC), 0);
+    assert_eq!(bit(at_bc, bits::BIT_INSIDE_CPR), 1);
+    assert_eq!(bit(at_bc, bits::BIT_ABOVE_CPR_TC), 0);
+    // one paisa below BC: below SET, inside CLEAR.
+    let under_bc = eval(1_049_999);
+    assert_eq!(bit(under_bc, bits::BIT_BELOW_CPR_BC), 1);
+    assert_eq!(bit(under_bc, bits::BIT_INSIDE_CPR), 0);
+
+    // Narrow threshold edge: the law is (tc − bc)·10_000 <= p·30, i.e. at
+    // p = 1_000_000 the tie width is EXACTLY 3_000 paisa. Hand-built anchor:
+    //   pdh = 1_048_500, pdl = 948_500 ⇒ BC = round(1_997_000/2) = 998_500;
+    //   pdc = 1_003_000 ⇒ sum = 3_000_000 ⇒ P = 1_000_000;
+    //   TC = 2_000_000 − 998_500 = 1_001_500 ⇒ width = 3_000 — the EXACT tie,
+    //   so narrow FIRES (the `<=` law; a `<` mutant dies here).
+    let tie = compute_pivot_levels(1_048_500, 948_500, 1_003_000);
+    assert_eq!(tie.p_paisa, 1_000_000);
+    let cpr = trading_core::compute_cpr_levels(tie.p_paisa, 1_048_500, 948_500);
+    assert_eq!((cpr.bc_paisa, cpr.tc_paisa), (998_500, 1_001_500));
+    let s_tie = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_000_000,
+        high_paisa: 1_000_000,
+        low_paisa: 1_000_000,
+        close_paisa: 1_000_000,
+        ema20_paisa: None,
+        ema200_paisa: None,
+        vwap_paisa: None,
+        pivots: tie,
+        fib,
+        day_high_paisa: 1_000_000,
+        day_low_paisa: 1_000_000,
+        open_of_day_paisa: 1_000_000,
+        market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
+    };
+    let m_tie = evaluate_atoms(&s_tie, &prox, &no_prior);
+    assert_eq!(
+        bit(m_tie, bits::BIT_NARROW_CPR_DAY),
+        1,
+        "an exact 30 bps width is narrow (<= law)"
+    );
+    // One paisa wider than the tie (p unchanged): NOT narrow. Widen the band
+    // by lowering bc_raw one paisa: pdh + pdl one LOWER halves oddly — use
+    // pdl − 2 so bc drops exactly 1 ⇒ width 3_002 > 3_000 ⇒ clear.
+    let wider = compute_pivot_levels(1_048_500, 948_498, 1_003_002);
+    assert_eq!(wider.p_paisa, 1_000_000);
+    let cpr_w = trading_core::compute_cpr_levels(wider.p_paisa, 1_048_500, 948_498);
+    assert_eq!(cpr_w.tc_paisa - cpr_w.bc_paisa, 3_002);
+    let m_wide = evaluate_atoms(
+        &IndicatorSnapshot {
+            pivots: wider,
+            ..s_tie
+        },
+        &prox,
+        &no_prior,
+    );
+    assert_eq!(
+        bit(m_wide, bits::BIT_NARROW_CPR_DAY),
+        0,
+        "a width past 30 bps of P must not be narrow"
     );
 }
 
@@ -1325,11 +1750,17 @@ fn equality_boundaries_keep_strict_bits_clear() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
+        swing_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1555,6 +1986,87 @@ fn equality_boundaries_keep_strict_bits_clear() {
     );
 }
 
+// ─────────────── Supertrend deterministic pins (bits 64-65) ─────────────────
+
+/// The newly-IMPLEMENTED Supertrend bits genuinely FIRE both ways — the
+/// deterministic companion of the reachability battery (a flipped comparison,
+/// a dropped `mask |=`, or an accidental un-implement makes a case fail) —
+/// and the strict-equality / absent-line edges keep BOTH bits clear.
+#[test]
+fn supertrend_bits_fire_both_ways_and_equality_clears_both() {
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let base = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_050_000,
+        high_paisa: 1_050_000,
+        low_paisa: 1_050_000,
+        close_paisa: 1_050_000, // close_x2 = 2_100_000
+        ema20_paisa: None,
+        ema200_paisa: None,
+        vwap_paisa: None,
+        pivots,
+        fib,
+        day_high_paisa: 1_050_000,
+        day_low_paisa: 1_050_000,
+        open_of_day_paisa: 1_050_000,
+        market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
+    };
+    let prox = ProximityParams {
+        pivot_proximity_bps: 0,
+        pdh_pdl_proximity_bps: 0,
+        fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
+        swing_proximity_bps: 0,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    let st_bits = |st: Option<i64>| {
+        let m = evaluate_atoms(
+            &IndicatorSnapshot {
+                supertrend_x2_paisa: st,
+                ..base
+            },
+            &prox,
+            &no_prior,
+        );
+        (
+            (m >> bits::BIT_CLOSE_ABOVE_SUPERTREND) & 1,
+            (m >> bits::BIT_CLOSE_BELOW_SUPERTREND) & 1,
+        )
+    };
+    // Fires both ways (the implemented-flip teeth): one ×2 unit (half a
+    // paisa) either side of the close flips exactly one bit on.
+    assert_eq!(
+        st_bits(Some(2_099_999)),
+        (1, 0),
+        "line below close ⇒ ABOVE fires"
+    );
+    assert_eq!(
+        st_bits(Some(2_100_001)),
+        (0, 1),
+        "line above close ⇒ BELOW fires"
+    );
+    // STRICT equality edge: close_x2 == line ⇒ NEITHER bit (the `>`↔`>=` /
+    // `<`↔`<=` mutant killers for the Group-14 comparisons).
+    assert_eq!(
+        st_bits(Some(2_100_000)),
+        (0, 0),
+        "equality sets neither bit"
+    );
+    // Absent line (warm-up / unwired) ⇒ neither bit.
+    assert_eq!(st_bits(None), (0, 0), "None sets neither bit");
+    // Far-domain sanity: the compare is exact ×2 (no truncation): a line at
+    // 2_099_998 (one full paisa below) also reads ABOVE.
+    assert_eq!(st_bits(Some(2_099_998)), (1, 0));
+}
+
 // ──────────────── degenerate-input guards (zero-range / zero pdc) ────────────
 
 /// The Group-5/7/9 `total_range > 0` / `day_range > 0` / `pdc > 0` guards are
@@ -1582,11 +2094,17 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         day_low_paisa: 1_050_000,
         open_of_day_paisa: 1_050_000,
         market_structure: MarketStructureSignal::default(),
+        supertrend_x2_paisa: None,
+        gap_mid_paisa: None,
+        last_swing_high_paisa: None,
+        last_swing_low_paisa: None,
     };
     let prox = ProximityParams {
         pivot_proximity_bps: 0,
         pdh_pdl_proximity_bps: 0,
         fib_proximity_bps: 0,
+        gap_mid_proximity_bps: 0,
+        swing_proximity_bps: 0,
     };
     let no_prior = PriorBarHistory {
         prior_n: 3,
@@ -1658,4 +2176,88 @@ fn pivots_panic_on_pdc_out_of_range() {
 #[should_panic(expected = "PDH must be >= PDL")]
 fn fib_panics_on_pdh_below_pdl() {
     let _ = compute_fib_levels(1_000_000, 1_100_000);
+}
+
+// ───────────────────── gap-midpoint level properties ────────────────────────
+// DEC-GAP-MIDPOINT-CONDITIONS-001: the pure session-edge level law.
+
+/// Two ordered candles (X1, X2) plus an open/pdc pair inside the paisa domain.
+fn arb_gap_inputs() -> impl Strategy<Value = (i64, i64, i64, i64, i64, i64)> {
+    (
+        (1i64..=MAX_PAISA, 0i64..=100_000),
+        (1i64..=MAX_PAISA, 0i64..=100_000),
+        1i64..=MAX_PAISA,
+        1i64..=MAX_PAISA,
+    )
+        .prop_map(|((x1_lo, r1), (x2_lo, r2), open, pdc)| {
+            (x1_lo + r1, x1_lo, x2_lo + r2, x2_lo, open, pdc)
+        })
+}
+
+proptest! {
+    /// The minted level lies INCLUSIVELY between its two source extremes, with
+    /// equality only when the two extremes are equal (the midpoint law).
+    #[test]
+    fn gap_mid_lies_between_its_source_extremes(
+        (x1_hi, x1_lo, x2_hi, x2_lo, open, pdc) in arb_gap_inputs()
+    ) {
+        if let Some((level, direction)) = compute_gap_mid(x1_hi, x1_lo, x2_hi, x2_lo, open, pdc) {
+            let (a, b) = match direction {
+                GapDirection::Up => (x1_hi, x2_hi),
+                GapDirection::Down => (x1_lo, x2_lo),
+            };
+            prop_assert!(a.min(b) <= level && level <= a.max(b),
+                "level {level} outside [{}, {}]", a.min(b), a.max(b));
+            if a != b {
+                // Strictly interior unless the pair degenerates … except the
+                // 1-paisa-apart pair, whose half-even midpoint legally lands
+                // ON the even endpoint. For gaps >= 2 paisa it is interior.
+                if (a - b).abs() >= 2 {
+                    prop_assert!(a.min(b) < level && level < a.max(b));
+                }
+            } else {
+                prop_assert_eq!(level, a, "equal extremes yield the shared value");
+            }
+        }
+    }
+
+    /// The direction law: gap-up (`open > pdc`) selects the HIGH pair, gap-down
+    /// the LOW pair, and flipping the gap sign flips the pair; a zero gap
+    /// yields None.
+    #[test]
+    fn gap_mid_direction_law(
+        (x1_hi, x1_lo, x2_hi, x2_lo, open, pdc) in arb_gap_inputs()
+    ) {
+        let got = compute_gap_mid(x1_hi, x1_lo, x2_hi, x2_lo, open, pdc);
+        if open == pdc {
+            prop_assert_eq!(got, None, "zero gap must yield no level");
+        } else {
+            let (level, direction) = got.expect("nonzero gap always mints a level");
+            let expected_dir = if open > pdc { GapDirection::Up } else { GapDirection::Down };
+            prop_assert_eq!(direction, expected_dir);
+            // The level equals the midpoint of the SELECTED pair — recomputed
+            // independently with integer arithmetic + explicit half-even.
+            let (a, b) = match direction {
+                GapDirection::Up => (x1_hi, x2_hi),
+                GapDirection::Down => (x1_lo, x2_lo),
+            };
+            let sum = a + b;
+            let expected_level = if sum.rem_euclid(2) == 0 {
+                sum / 2
+            } else {
+                // .5 tie → nearest EVEN integer.
+                let floor = sum.div_euclid(2);
+                if floor % 2 == 0 { floor } else { floor + 1 }
+            };
+            prop_assert_eq!(level, expected_level);
+        }
+    }
+
+    /// Zero gap yields None for ANY candle shape (the dedicated zero-gap law).
+    #[test]
+    fn gap_mid_zero_gap_is_always_none(
+        (x1_hi, x1_lo, x2_hi, x2_lo, open, _pdc) in arb_gap_inputs()
+    ) {
+        prop_assert_eq!(compute_gap_mid(x1_hi, x1_lo, x2_hi, x2_lo, open, open), None);
+    }
 }

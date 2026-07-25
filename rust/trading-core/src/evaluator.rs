@@ -4,19 +4,28 @@
 //! Pure function of its inputs (int64 paisa), no state, no allocation: the same
 //! code path serves the BruteX backtest (via PyO3, Phase 2) and the TickVault
 //! live tick path (native). Returns a `u128` mask (the mask is u128 for headroom
-//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); all 60 IMPLEMENTED bits
-//! (0..=59) can now fire. PR-2 added the VWAP position (bits 52-53) and pivot
+//! per DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4); every IMPLEMENTED bit
+//! (0..=73) can fire. PR-2 added the VWAP position (bits 52-53 — RETAINED per
+//! the operator ruling DEC-VOCAB-VWAP-RETAIN-001: evaluate when traded volume
+//! exists, abstain (`None` → bits clear) when it doesn't) and the pivot
 //! R5/S5 proximity (bits 54-55) branches; DEC-NIFTY-BOS-CHOCH-001 added the
 //! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
 //! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
 //! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
-//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. A u128 AND is
+//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. The Supertrend
+//! bits 64-65 read the resolved ×2-scaled line the stateful
+//! `indicators::supertrend::SupertrendState` produces upstream (threaded in via
+//! the snapshot exactly like the EMA values);
+//! DEC-GAP-MIDPOINT-CONDITIONS-001 added the session-edge gap-midpoint branch
+//! (bits 66-68) — the level is resolved upstream (stateful Stage-1A X1/X2
+//! capture + `indicators::gap_mid::compute_gap_mid`) and threaded in as an
+//! optional level. A u128 AND is
 //! two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
 use crate::indicators::fib::FibLevels;
 use crate::indicators::market_structure::MarketStructureSignal;
-use crate::indicators::pivots::PivotLevels;
+use crate::indicators::pivots::{NARROW_CPR_WIDTH_BPS, PivotLevels, compute_cpr_levels};
 
 // Time-of-day cutoffs, in seconds since IST midnight (mirrors evaluator.py:116-120).
 const EARLY_MORNING_START: u32 = 9 * 3600 + 16 * 60; // 09:16
@@ -66,6 +75,35 @@ pub struct IndicatorSnapshot {
     /// resolved `PriorBarHistory` flags. `default()` (all false) during warm-up
     /// (before any confirmed swing) so the Group-12 bits simply do not fire.
     pub market_structure: MarketStructureSignal,
+    /// The bar's resolved SuperTrend line (Group 14, bits 64-65) in the
+    /// **×2-scaled paisa domain** (= line value × 2 exactly — the hl2 source is
+    /// a half-paisa quantity, see [`crate::indicators::supertrend`]), produced
+    /// by the stateful [`crate::indicators::supertrend::SupertrendState`] the
+    /// engine holds per (instrument, timeframe, contract). `None` during the
+    /// 9-bar warm-up (or when no state is wired) — the Group-14 bits simply do
+    /// not fire. The evaluator's comparison is a pure i128 compare of
+    /// `close × 2` against this value, total for ANY i64 inputs — so this field
+    /// needs NO boundary magnitude bound.
+    pub supertrend_x2_paisa: Option<i64>,
+    /// Session-edge gap-midpoint level (paisa) for the Group-15 bits 66-68
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001), resolved upstream by the stateful
+    /// Stage-1A X1/X2 capture + [`crate::indicators::gap_mid::compute_gap_mid`]
+    /// and threaded in as an OPTIONAL level. `None` on a zero-gap day, when
+    /// X1/X2 are not captured (first stream day / post-roll / Muhurat-skipped
+    /// prior session), on the session's FIRST TF bar (the arm-from-bar-2 law)
+    /// and on the 1day timeframe — the Group-15 bits then simply do not fire.
+    /// APPENDED LAST (the grow-only FFI law; never reorder existing fields).
+    pub gap_mid_paisa: Option<i64>,
+    /// The last k-confirmed swing HIGH level (int64 paisa), read from the SAME
+    /// look-ahead-clean `MarketStructureState` AFTER its per-bar `update` (a
+    /// swing is confirmed only k bars later, all at index <= N —
+    /// DEC-FIB-TEMPLATE-EXPRESS-001, Swing Proximity bit 72). `None` until the
+    /// first confirmed swing high exists (warm-up, or after a contract-roll
+    /// hard reset) — bit 72 then simply does not fire (never fabricated).
+    pub last_swing_high_paisa: Option<i64>,
+    /// The last k-confirmed swing LOW level — the bit-73 twin of
+    /// [`IndicatorSnapshot::last_swing_high_paisa`].
+    pub last_swing_low_paisa: Option<i64>,
 }
 
 /// Proximity tolerances (basis points) for the `near_*` conditions.
@@ -79,6 +117,61 @@ pub struct ProximityParams {
     pub pivot_proximity_bps: i64,
     pub pdh_pdl_proximity_bps: i64,
     pub fib_proximity_bps: i64,
+    /// Tolerance for the Group-15 `near_gap_mid` bit
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001), matching the sibling 10-bps
+    /// defaults. APPENDED LAST; a serialized pre-gap spec (no field) loads the
+    /// default so old TickVault spec JSON stays readable. Deliberately NOT
+    /// encoded by `StrategySpec::canonical_bytes` (frozen at
+    /// `SPEC_SCHEMA_VERSION = 1`, exactly three bps) — BruteX carries a swept
+    /// non-default value in run identity via the default-omit
+    /// `canonical_trade_params` key instead (the
+    /// DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern).
+    #[cfg_attr(feature = "serde", serde(default = "default_gap_mid_proximity_bps"))]
+    pub gap_mid_proximity_bps: i64,
+    /// Swing-proximity tolerance for the near-swing bits 72/73
+    /// (DEC-FIB-TEMPLATE-EXPRESS-001). Appended-last with a serde default so a
+    /// pre-existing serialized `StrategySpec` (which never carried the field)
+    /// deserializes to the production default 10 — the same family-scoped
+    /// default the three sibling knobs use. NOT part of the FROZEN 57-byte
+    /// `StrategySpec::canonical_bytes` encode (the spec axis carries no swing
+    /// knob; a spec-axis swing sweep would need its own DEC).
+    #[cfg_attr(feature = "serde", serde(default = "default_swing_proximity_bps"))]
+    pub swing_proximity_bps: i64,
+}
+
+/// The default `gap_mid_proximity_bps` (10 bps — the sibling knobs' default;
+/// DEC-GAP-MIDPOINT-CONDITIONS-001). Also the serde default so a pre-gap
+/// serialized spec deserializes to the SAME evaluation it always had.
+pub const DEFAULT_GAP_MID_PROXIMITY_BPS: i64 = 10;
+
+/// serde default fn for [`ProximityParams::gap_mid_proximity_bps`] (serde
+/// requires a fn path, not a const).
+#[cfg(feature = "serde")]
+fn default_gap_mid_proximity_bps() -> i64 {
+    DEFAULT_GAP_MID_PROXIMITY_BPS
+}
+
+/// The production default for [`ProximityParams::swing_proximity_bps`] (10 bps —
+/// the sibling knobs' default; the serde-default + `Default` source of truth).
+#[must_use]
+pub const fn default_swing_proximity_bps() -> i64 {
+    10
+}
+
+impl Default for ProximityParams {
+    /// The production defaults (10 bps per family) — mirrors the Python
+    /// `ProximityParams()` dataclass defaults, so a TickVault consumer that
+    /// constructed the pre-DEC-FIB-TEMPLATE-EXPRESS-001 triple can migrate
+    /// mechanically via `ProximityParams { swing_proximity_bps: …, ..Default::default() }`.
+    fn default() -> Self {
+        ProximityParams {
+            pivot_proximity_bps: 10,
+            pdh_pdl_proximity_bps: 10,
+            fib_proximity_bps: 10,
+            gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
+            swing_proximity_bps: default_swing_proximity_bps(),
+        }
+    }
 }
 
 /// Rolling history of the last N bars' bullish (`true`) / bearish (`false`)
@@ -127,8 +220,19 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// All 60 IMPLEMENTED bits (0..=59) can fire; the BOS/CHoCH bits (56..=59) read
-/// the resolved `snapshot.market_structure` flags (DEC-NIFTY-BOS-CHOCH-001).
+/// Every IMPLEMENTED bit (0..=73) can fire. The VWAP bits (52..=53) read the
+/// resolved `snapshot.vwap_paisa` level (`None` = abstain — no volume yet /
+/// volumeless instrument / 1day; DEC-VOCAB-VWAP-RETAIN-001). The
+/// BOS/CHoCH bits (56..=59) read the resolved `snapshot.market_structure`
+/// flags (DEC-NIFTY-BOS-CHOCH-001); the CPR bits (60..=63) derive from the
+/// SAME prev-day pivot anchor as Groups 2/3/9; the Supertrend bits (64..=65)
+/// compare the close against the resolved ×2-scaled `supertrend_x2_paisa`
+/// line (strict, exact — `None` clears both); the Gap-Midpoint bits (66..=68)
+/// read the resolved `snapshot.gap_mid_paisa` level
+/// (DEC-GAP-MIDPOINT-CONDITIONS-001); the Fibonacci-Extended bits (69..=71)
+/// read the bullish/424 `FibLevels` fields and the Swing-Proximity bits
+/// (72..=73) read the snapshot's resolved swing levels
+/// (DEC-FIB-TEMPLATE-EXPRESS-001).
 #[must_use]
 pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
     let mut mask: u128 = 0;
@@ -368,13 +472,17 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     }
 
     // ── Group 10: VWAP Position (bits 52-53) ──
-    // Session-anchored intraday futures VWAP (ADR-0012 D12). `None` during the
-    // warm-up bar (no post-09:15 volume yet) AND on the 1day timeframe (a session
-    // VWAP is degenerate with one bar/session) — so the bit simply does not fire,
-    // mirroring the EMA warm-up `if let Some(..)` pattern. The running VWAP math
-    // (cum(price·vol)/cum(vol), reset at 09:15 IST, auction-volume excluded, i128
-    // accumulators, reset on contract roll) lives in the stateful
-    // `indicators::vwap::VwapState`; the evaluator only reads the resolved level.
+    // Session-anchored intraday futures VWAP (ADR-0012 D12; RETAINED per the
+    // operator ruling DEC-VOCAB-VWAP-RETAIN-001 — evaluate when volume exists,
+    // abstain when it doesn't). `None` during the warm-up bar (no post-09:15
+    // volume yet), on any volumeless instrument (a spot index stores volume=0
+    // by construction — MIGRATION #394 — so the state never warms) AND on the
+    // 1day timeframe (a session VWAP is degenerate with one bar/session) — so
+    // the bit simply does not fire, mirroring the EMA warm-up `if let Some(..)`
+    // pattern. The running VWAP math (cum(price·vol)/cum(vol), reset at 09:15
+    // IST, auction-volume excluded, i128 accumulators, reset on contract roll)
+    // lives in the stateful `indicators::vwap::VwapState`; the evaluator only
+    // reads the resolved level.
     if let Some(vwap) = s.vwap_paisa {
         if close > vwap {
             mask |= bit(bits::BIT_CLOSE_ABOVE_VWAP);
@@ -414,6 +522,116 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
     }
     if ms.choch_bearish {
         mask |= bit(bits::BIT_CHOCH_BEARISH);
+    }
+
+    // ── Group 13: Central Pivot Range (bits 60-63) ──
+    // CPR from the SAME prev-day OHLC anchor the pivots use (the Muhurat-safe
+    // #1616 anchor carries through automatically): BC = round_half_even((PDH +
+    // PDL)/2), TC = 2·P − BC on the ALREADY-ROUNDED pivot P (never re-derived
+    // from rounded R/S rungs), canonicalized tc >= bc — `compute_cpr_levels`.
+    // Bits 60/61 are strict, 62 is the inclusive band: with tc >= bc the three
+    // form an EXACT PARTITION of any close (property-pinned). Bit 63 fires iff
+    // the band is at or under NARROW_CPR_WIDTH_BPS of P — evaluated in i128 so
+    // the products are total for ANY i64 inputs (the from_raw anchor ceiling
+    // `i64::MAX / 8` would overflow the i64 `width * 10_000` product). A cold
+    // (no-prev-day) anchor is handled UPSTREAM by the anchor-dependent clear —
+    // exactly like the Group-3/9 comparison bits (never fabricated to output).
+    let cpr = compute_cpr_levels(pv.p_paisa, pv.pdh_paisa, pv.pdl_paisa);
+    if close > cpr.tc_paisa {
+        mask |= bit(bits::BIT_ABOVE_CPR_TC);
+    }
+    if close < cpr.bc_paisa {
+        mask |= bit(bits::BIT_BELOW_CPR_BC);
+    }
+    if close >= cpr.bc_paisa && close <= cpr.tc_paisa {
+        mask |= bit(bits::BIT_INSIDE_CPR);
+    }
+    if pv.p_paisa > 0
+        && (i128::from(cpr.tc_paisa) - i128::from(cpr.bc_paisa)) * 10_000
+            <= i128::from(pv.p_paisa) * i128::from(NARROW_CPR_WIDTH_BPS)
+    {
+        mask |= bit(bits::BIT_NARROW_CPR_DAY);
+    }
+
+    // ── Group 14: Supertrend (bits 64-65) ──
+    // The ×2-scaled line is RESOLVED upstream by the stateful
+    // `indicators::supertrend::SupertrendState` (ATR-10 Wilder, factor 3, hl2
+    // source — all in exact half-paisa integers) and threaded in via the
+    // snapshot like the EMA values. Both comparisons are STRICT in the exact
+    // ×2 domain (`close × 2` vs the line): equality sets NEITHER bit, `None`
+    // (warm-up / no state wired) sets neither — so the two bits are mutually
+    // exclusive by construction (the (64, 65) conflict pair). i128 keeps the
+    // ×2 product total for ANY i64 close — no overflow, no boundary bound.
+    if let Some(st_x2) = s.supertrend_x2_paisa {
+        let close_x2 = i128::from(close) * 2;
+        let st_x2 = i128::from(st_x2);
+        if close_x2 > st_x2 {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_SUPERTREND);
+        }
+        if close_x2 < st_x2 {
+            mask |= bit(bits::BIT_CLOSE_BELOW_SUPERTREND);
+        }
+    }
+
+    // ── Group 15: Gap Midpoint (bits 66-68) ──
+    // The session-edge gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) is
+    // RESOLVED upstream (stateful Stage-1A X1/X2 capture + the pure
+    // `indicators::gap_mid::compute_gap_mid`) and threaded in as an OPTIONAL
+    // level: `None` (zero gap / missing X1/X2 / the session's first TF bar /
+    // 1day) ⇒ no bit fires. Strict-above and strict-below are mutually
+    // exclusive by construction; `near` uses the ONE `is_near` primitive with
+    // its own bps knob and may legally co-fire with either strict bit (the
+    // PDH/PDL family convention).
+    if let Some(gap_mid) = s.gap_mid_paisa {
+        if close > gap_mid {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_GAP_MID);
+        }
+        if close < gap_mid {
+            mask |= bit(bits::BIT_CLOSE_BELOW_GAP_MID);
+        }
+        if is_near(close, gap_mid, p.gap_mid_proximity_bps) {
+            mask |= bit(bits::BIT_NEAR_GAP_MID);
+        }
+    }
+
+    // ── Group: Fibonacci Extended (bits 69-71) — DEC-FIB-TEMPLATE-EXPRESS-001 ──
+    // Bits 69/70 read the PDL-anchored BULLISH retracement ladder
+    // (DEC-FIB-BULLISH-RETRACE-001 fields — the asymmetric 23.6/78.6 pair only;
+    // bull 38/62 numerically coincide with bearish 62/38). Bit 71 reads the
+    // 424% extensions with the EXACT up-OR-down convention of bits 26-29. All
+    // three share the swept Group-4 `fib_proximity_bps` (family-scoped band
+    // law) and are cleared upstream with the Group-4 bits on anchor-cold /
+    // fib-cold days (the stage1a `_NON_ANCHOR_MASK` / `_NON_FIB_MASK` clears).
+    if is_near(close, fib.retrace_bull_23_paisa, bps_fib) {
+        mask |= bit(bits::BIT_NEAR_FIB_BULL_236);
+    }
+    if is_near(close, fib.retrace_bull_78_paisa, bps_fib) {
+        mask |= bit(bits::BIT_NEAR_FIB_BULL_786);
+    }
+    if is_near(close, fib.ext_up_424_paisa, bps_fib)
+        || is_near(close, fib.ext_down_424_paisa, bps_fib)
+    {
+        mask |= bit(bits::BIT_NEAR_FIB_424);
+    }
+
+    // ── Group: Swing Proximity (bits 72-73) — DEC-FIB-TEMPLATE-EXPRESS-001 ──
+    // "Is price AT the structure level" — the retest/approach half the
+    // break-EVENT bits 56-59 cannot express. The levels are resolved upstream
+    // by the SAME look-ahead-clean `MarketStructureState` that feeds the
+    // Group-12 flags (a swing is confirmed only k bars LATER, all at index
+    // <= N), threaded in via the snapshot's two `Option<i64>` fields. `None`
+    // (no confirmed swing yet, or a contract-roll hard reset) ⇒ the bit does
+    // not fire — never fabricated. Band: the swept `swing_proximity_bps`.
+    let bps_swing = p.swing_proximity_bps;
+    if let Some(sh) = s.last_swing_high_paisa
+        && is_near(close, sh, bps_swing)
+    {
+        mask |= bit(bits::BIT_NEAR_SWING_HIGH);
+    }
+    if let Some(sl) = s.last_swing_low_paisa
+        && is_near(close, sl, bps_swing)
+    {
+        mask |= bit(bits::BIT_NEAR_SWING_LOW);
     }
 
     mask

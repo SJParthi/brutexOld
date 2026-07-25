@@ -1,7 +1,7 @@
 //! The cross-language bit-identity proof (Phase 1 of DEC-SHARED-CORE-001).
 //!
 //! Reads the SAME language-neutral oracle the Python test reads
-//! (`tests/golden/fixtures/vocab_golden_vectors.json`, 400 cases) and asserts
+//! (`tests/golden/fixtures/vocab_golden_vectors.json`, 400 seeded + 8 express cases) and asserts
 //! this Rust crate reproduces every frozen `u64` bit-for-bit. Both engines
 //! reading the same vectors is what makes the backtest = live guarantee real.
 
@@ -26,6 +26,23 @@ struct Proximity {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// Group-15 gap-midpoint tolerance (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    /// serde-defaulted so a pre-gap fixture snapshot still parses (10 = the
+    /// evaluator default).
+    #[serde(default = "default_gap_mid_bps")]
+    gap_mid_bps: i64,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the swing band (bits 72/73). Defaulted
+    /// so the parser stays tolerant of the pre-express fixture shape.
+    #[serde(default = "default_swing_bps")]
+    swing_bps: i64,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
+}
+
+fn default_swing_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -56,6 +73,11 @@ struct Case {
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
+    /// Session-anchored intraday VWAP (Group 10, bits 52-53 — RETAINED per
+    /// DEC-VOCAB-VWAP-RETAIN-001; `None` = abstain, bits clear).
+    /// serde-defaulted: the RNG-free express cases (ids 400-407,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001) do not emit the key.
+    #[serde(default)]
     vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
@@ -66,6 +88,21 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// The SuperTrend line in the ×2-scaled paisa domain (fixture version 4 —
+    /// the vocab-66 implemented-flip; `None` = warm-up, bits 64/65 clear).
+    supertrend_x2_paisa: Option<i64>,
+    /// Session-edge gap-midpoint level (Group 15, bits 66-68) — resolved
+    /// upstream and carried VERBATIM like the VWAP
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001). serde-defaulted (`None`) so a
+    /// pre-gap fixture snapshot still parses.
+    #[serde(default)]
+    gap_mid_paisa: Option<i64>,
+    /// DEC-FIB-TEMPLATE-EXPRESS-001 — the confirmed-swing anchors (bits
+    /// 72/73). Defaulted (None = no confirmed swing) for pre-express shapes.
+    #[serde(default)]
+    last_swing_high_paisa: Option<i64>,
+    #[serde(default)]
+    last_swing_low_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -131,11 +168,19 @@ fn eval_case(c: &Case) -> u128 {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        // Fixture version 4 (the vocab-66 SuperTrend implemented-flip)
+        // carries the appended ST input per case — threaded verbatim.
+        supertrend_x2_paisa: c.supertrend_x2_paisa,
+        gap_mid_paisa: c.gap_mid_paisa,
+        last_swing_high_paisa: c.last_swing_high_paisa,
+        last_swing_low_paisa: c.last_swing_low_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
         pdh_pdl_proximity_bps: c.proximity.pdh_pdl_bps,
         fib_proximity_bps: c.proximity.fib_bps,
+        gap_mid_proximity_bps: c.proximity.gap_mid_bps,
+        swing_proximity_bps: c.proximity.swing_bps,
     };
     let prior = PriorBarHistory {
         prior_n: c.prior.prior_n,
@@ -175,11 +220,12 @@ fn rust_reproduces_every_golden_vector() {
 
 #[test]
 fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
-    // The both-ways gate is partitioned over the IMPLEMENTED bits — now all 60
-    // (VWAP/R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001). The
-    // separate `layout_only_bits_are_always_clear` test below proves the only
-    // remaining non-implemented bits — the reserved u128 headroom (60..127) — stay
-    // provably inert.
+    // The both-ways gate spans the FULL IMPLEMENTED_MASK — 0..=51 and
+    // 54..=65 (R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001,
+    // CPR 60-63 since the 66-bit reshape, SuperTrend 64-65 since the
+    // vocab-66 implemented-flip's version-4 fixture regen — the interim
+    // FIXTURE_COVERABLE scope-down is retired; the VWAP pair 52-53 stays
+    // TOMBSTONED outside the mask).
     let fixture = load_fixture();
     let mut set_any: u128 = 0;
     let mut clear_any: u128 = 0;
@@ -200,9 +246,10 @@ fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
 
 #[test]
 fn layout_only_bits_are_always_clear() {
-    // Every bit OUTSIDE IMPLEMENTED_MASK — now only the reserved u128 headroom
-    // (bits 60..127), since all 60 declared conditions are implemented — must be 0
-    // in EVERY evaluated case.
+    // Every bit OUTSIDE IMPLEMENTED_MASK — the tombstoned VWAP pair (52-53)
+    // and the reserved u128 headroom (bits 66..127) — must be 0 in EVERY
+    // evaluated case. (The Supertrend pair 64-65 left this set at the PR-B
+    // implemented-flip.)
     let fixture = load_fixture();
     let full: u128 = (1u128 << TOTAL_CONDITIONS) - 1;
     let layout_only = full & !IMPLEMENTED_MASK;
