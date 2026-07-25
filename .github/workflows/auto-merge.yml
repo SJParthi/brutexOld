@@ -281,14 +281,31 @@ jobs:
           #
           # FIX (no green = no merge): read EVERY check run on the head, then
           #   (1) refuse if ANY check is failing (failure / cancelled / timed_out
-          #       / action_required / stale) — excluding this workflow's OWN check;
+          #       / action_required / stale) — excluding this workflow's OWN check
+          #       and the NON-BLOCKING self-hosted bench check (see below);
           #   (2) require "CI OK (aggregate gate)" to EXIST and EVERY instance of
           #       it to be success (so a green push run can't mask a red PR run).
+          #
+          # NON-BLOCKING EXEMPTION (DEC-AUTOMERGE-M4PRO-NONBLOCK-002, MIGRATION.md
+          # #2254): "m4pro-absolute-throughput" is the self-hosted M4-Pro bench
+          # check. It is NOT in ci.yml's `ci-ok` aggregate-gate needs and NOT among
+          # branch protection's 22 required contexts (branch-protection-drift.yml),
+          # so a bench regression is caught POST-merge as a red run + issue, never
+          # as a merge blocker (MIGRATION.md #382 + #1534). DEC-PREMERGE-M4PRO-
+          # NONBLOCK-001 (#1753) made pre-merge-check.sh tolerate it but left THIS
+          # scan matching — so a FAILED / CANCELLED / TIMED_OUT m4pro (the reachable
+          # shape: an operator cancelling a stuck bench run, or the runner going red)
+          # still refused auto-merge here, upstream of that gate. The two gates now
+          # AGREE. The exemption is exactly one hardcoded name: every required check
+          # still blocks, and the sibling `bless-baseline` job stays NON-exempt
+          # (the operator authorization covers exactly m4pro-absolute-throughput).
           runs=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --paginate \
             --jq '.check_runs[] | [(.conclusion // "pending"), .name] | @tsv')
           printf 'check runs on %s:\n%s\n' "${HEAD_SHA}" "${runs}"
           failing=$(printf '%s\n' "${runs}" | awk -F'\t' \
-            '$1 ~ /^(failure|cancelled|timed_out|action_required|stale)$/ && $2 != "Auto-merge on green CI" {print $2" = "$1}')
+            '$1 ~ /^(failure|cancelled|timed_out|action_required|stale)$/ &&
+             $2 != "Auto-merge on green CI" &&
+             $2 != "m4pro-absolute-throughput" {print $2" = "$1}')
           if [[ -n "${failing}" ]]; then
             echo "::notice::refusing merge — these checks are NOT green on ${HEAD_SHA}:"
             printf '%s\n' "${failing}"
