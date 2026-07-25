@@ -77,10 +77,35 @@ OFF path of a costs/moneyness read must never require it (the
 4. **Degrade + panic belts** — kernel raises in the COMMON degrade set
    (:func:`brutex.data.lake_rust_render.degrade_errors`) → one
    ``kernel_error`` WARN + the oracle; anything the COMMON panic belt
-   catches (incl. a ``pyo3_runtime.PanicException`` leaking a pyo3
-   boundary) → latch ``kernel_panic`` + the oracle.
+   catches (a ``pyo3_runtime.PanicException`` surfacing at a pyo3
+   boundary) → latch ``kernel_panic`` + the oracle. That belt is a
+   DEV-BUILD + defence-in-depth path, NOT a shipped-wheel rail — see
+   "Panic-belt honesty" below.
    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` re-raise RAW
    (the ``errors.py`` escape-set doctrine — OOM is never a fallback).
+
+## Panic-belt honesty (``panic = "abort"``; CLAUDE.md Golden Rule #10)
+
+The ``fno_math`` release wheel is built with ``panic = "abort"``
+(``rust/fno-math/Cargo.toml`` — a deliberate finance-safety choice made in
+DEC-RUST-CRATES-HARDEN-001 #965 so a paisa overflow is a LOUD abort, never a
+silent wrap), so a Rust panic in the SHIPPED wheel ABORTS the host process
+(SIGABRT) before any Python handler can run: layer 4's ``_panic_belt_errors()``
+/ ``kernel_panic`` arm is therefore a DEV-BUILD (``cargo test`` / any
+default-``unwind`` build, where pyo3's ``catch_unwind`` surfaces a
+``pyo3_runtime.PanicException``) + defence-in-depth path, NOT a shipped-wheel
+rail. ``rust/fno-math`` carries NO ``catch_unwind`` FFI wrapper of its own
+(grep-verified) — distinct from ``brutex-lake``, which builds WITHOUT
+``panic = "abort"`` and maps panics to ``RuntimeError`` at its own boundary.
+It is retained, not removed, because the ``optcost`` kernels are TOTAL by
+construction — ``overflow-checks = true``, a ``(code, value)`` ints-only
+return on every arm, and the exactness / band / type gates in this facade
+running BEFORE the crossing — so the practical panic risk is ≈ nil and the
+belt guards only a doubly-broken future contract (a non-abort build, or a
+panic surfacing through an out-of-band pyo3 runtime). The panic profile is
+NOT flipped here: doing so would change the crate's release semantics for
+every other ``fno_math`` consumer, so honesty about the belt's reach is the
+correct fix, not a profile change.
 
 ## Refusal law (VERIFIED-RATES-ONLY — hard rule 3)
 
@@ -486,6 +511,12 @@ def _route(
         # The COMMON belt over pyo3's own boundary: a PanicException is a
         # BaseException no `except Exception` sees — latch + oracle, never
         # a new crash class into a costs/read path (fail-closed).
+        #
+        # HONEST REACH (module docstring, "Panic-belt honesty"): the SHIPPED
+        # `fno_math` wheel is built `panic = "abort"`, so a real Rust panic
+        # aborts the process before this clause can run. This is a DEV-BUILD
+        # (unwind `cargo test`) + defence-in-depth arm, not a shipped-wheel
+        # rail; fno-math carries no `catch_unwind` wrapper of its own.
         _disable("kernel_panic", seam=seam, error_detail=repr(exc))
         return oracle()
     if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
