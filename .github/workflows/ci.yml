@@ -1630,11 +1630,11 @@ jobs:
           else
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
-          # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+          # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
           # 19f1 · brutex.exec_rust (200 stmts, 70 branches — re-measured at
           #        the round-2 NIT-polish HEAD after the i64 wire-element
           #        range guard; history: 146/38 round 1 → 198/68 round 2) — the
-          #        BRUTEX_EXEC_RUST default-OFF seam over the fno-math exec
+          #        BRUTEX_EXEC_RUST default-ON seam over the fno-math exec
           #        cores; standalone 100% gate (the rust_metrics precedent).
           if compgen -G "tests/unit/test_exec_rust_seam.py" > /dev/null; then
             pytest --cov=brutex.exec_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_exec_rust_seam.py
@@ -1684,8 +1684,9 @@ jobs:
             echo "(brutex.engine.sweep_apriori test file not present yet — gate inactive)"
           fi
           # 19i1a2 · brutex.engine.rust_enum — the flag-gated Rust sweep-enum
-          # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-OFF behind
-          # BRUTEX_SWEEP_RUST_ENUM; no size figure here on purpose — the
+          # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-ON behind
+          # BRUTEX_SWEEP_RUST_ENUM since DEC-RUST-DEFAULT-ON-WAVE-001 #2215 —
+          # `=0` is the kill switch; no size figure here on purpose — the
           # gate enforces 100%, counts drift). 100% line+branch from the
           # dedicated unit suite (the
           # byte-identical-leaderboard parity gate lives in
@@ -3295,11 +3296,16 @@ jobs:
             echo "(brutex.engine.resilience_streaks test file not present yet — gate inactive)"
           fi
 
-      # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+      # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
       - name: Dual-arm exec-rust parity (BRUTEX_EXEC_RUST=1, covering set)
-        # The flag is default-OFF, so every step above exercised the Python
+        # `tests/conftest.py`'s suite-wide `os.environ.setdefault` hermeticity
+        # belt pins BRUTEX_EXEC_RUST="0" for the test process (the flag itself
+        # is default-ON in PRODUCTION since DEC-RUST-DEFAULT-ON-WAVE-001,
+        # MIGRATION.md #2215 — the belt is hermeticity vs the AMBIENT env,
+        # never the tested law), so every step above exercised the Python
         # oracle arm; this step re-runs the BOUNDED exec covering set with
-        # the kernel arm FORCED ON. Engagement is ASSERTED inside the suites
+        # the kernel arm FORCED ON — it is the ONLY forced-ON exec arm in main
+        # CI, so it must never be deleted. Engagement is ASSERTED inside the suites
         # (counting-proxy spies in the seam/gate files + the golden's
         # engaged-assert fixture), so a silently-fallen-back kernel FAILS —
         # the ON arm can never go vacuous (spec §5's dedicated red-gate

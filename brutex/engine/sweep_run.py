@@ -2333,7 +2333,8 @@ def run_persisted_sweep(
     # module tops the other — no import cycle).
     mask_source: Iterable[int]
     # Ranged Rust enum+prune+Stage-1B kernel probe (DEC-SWEEP-ENUM-RUST-001,
-    # default-OFF behind BRUTEX_SWEEP_RUST_ENUM; design-of-record §1.4 seam
+    # default-ON behind BRUTEX_SWEEP_RUST_ENUM since #2215, `=0` kills;
+    # design-of-record §1.4 seam
     # shape): the wrapper is probed on the brute-force arm ONLY (the Apriori
     # arm WINS over the kernel — its probe lives only in the else arm, per
     # the frozen DEC-SWEEP-APRIORI-TUPLE-001 contract) and engages on the

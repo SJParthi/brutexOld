@@ -1,8 +1,11 @@
 """OFF-mode cost gate + measured A/B for the Rust enum+prune kernel seam.
 
 DEC-SWEEP-ENUM-RUST-001's hard constraint: with ``BRUTEX_SWEEP_RUST_ENUM``
-OFF (the shipped default) the sweep's enumeration path must be byte-identical
-AND cost-unchanged. Three complementary proofs + one honest measurement:
+OFF the sweep's enumeration path must be byte-identical AND cost-unchanged.
+Since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215) the seam default is
+ON, so OFF is the EXPLICIT ``"0"`` kill switch these tests monkeypatch — the
+unset arm now engages the kernel. Three complementary proofs + one honest
+measurement:
 
 1. **Structural (the load-bearing one):** flag OFF, the seam probe
    (:func:`enum_prefilter_via_kernel`) returns ``None`` BEFORE any kernel
@@ -18,9 +21,11 @@ AND cost-unchanged. Three complementary proofs + one honest measurement:
    deterministic twin of the wall-clock A/B, immune to CI timer noise.
 4. **A/B segment measurement (REPORTED, not ratio-gated):** the enum+prune
    segment ON vs OFF at k=3 over the 60-bit vocabulary — printed as MEASURED
-   context per Golden Rule #10 (the default-OFF slice ships inert, so a
-   speedup GATE would gate nothing; the honest numbers live in the PR body /
-   MIGRATION.md #1738 tagged with the machine they were measured on).
+   context per Golden Rule #10 (no speedup GATE exists: the #1738 slice
+   shipped inert and the #2215 flip carried NO measured speedup claim with
+   it, so gating one here would gate a number nobody has committed to; the
+   honest numbers live in the PR body / MIGRATION.md #1738 tagged with the
+   machine they were measured on).
 """
 
 from __future__ import annotations

@@ -206,7 +206,7 @@ def _charge_stack_py(
     """CALCULATOR_SPEC §4 Steps 1, 3–13 as ONE pure integer function.
 
     The dispatchable options charge-stack core (DEC-EXEC-RUST-CORE-001,
-    MIGRATION.md #1979): everything from the moment prices are integer paisa —
+    MIGRATION.md #2212): everything from the moment prices are integer paisa —
     the worst-case bar-extreme fills (DEC-FILL-WORST-CASE-ONLY-001), notionals,
     the full charge stack under the permanent ADVERSE (ceiling) levy rounding,
     gross/net — with every RATE resolved by the caller and passed as an
@@ -447,7 +447,8 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # fix), so this import is DEFERRAL, not cycle-avoidance: it keeps the
     # seam's engine-package + one-time fno_math import cost off plain
     # `import brutex.costs`, landing it on the first dispatch instead.
-    # Default-OFF (`BRUTEX_EXEC_RUST`): the seam returns None unless the
+    # Default-ON (`BRUTEX_EXEC_RUST` — DEC-RUST-DEFAULT-ON-WAVE-001 #2215
+    # flipped it; `=0` is the kill switch): the seam returns None unless the
     # kernel actually serves; the Python core below stays the permanent
     # oracle arm (DEC-EXEC-PY-BODY-DELETE-001 owns any later deletion
     # decision).

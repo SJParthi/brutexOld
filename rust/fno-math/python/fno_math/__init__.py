@@ -105,7 +105,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "rank_axis_topm",
     "rank_dd_band_indices",
     "rank_pareto_frontier",
-    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
     "exec_apply_futures_fill",
     "exec_apply_slippage",
     "exec_futures_charge_stack",
@@ -187,7 +187,7 @@ from ._fno_math import (  # noqa: E402
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
     count_supermasks_u128s,
-    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
     exec_apply_futures_fill,
     exec_apply_slippage,
     exec_futures_charge_stack,
@@ -268,7 +268,7 @@ __all__ = [
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
     "count_supermasks_u128s",
-    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    # --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
     "exec_apply_futures_fill",
     "exec_apply_slippage",
     "exec_futures_charge_stack",

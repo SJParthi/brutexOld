@@ -1188,8 +1188,15 @@ this design.
   per `run_persisted_sweep` invocation (a structural loop-shape decision;
   parallel workers read their own env; the documented, results-identical
   delta vs rust_metrics' per-call read is stated in the module docstring and
-  test-pinned). Both default OFF; each flips default-ON in its own later ADR
-  (the #1186→#1532 two-step). A third escape hatch
+  test-pinned). Both default OFF **as designed here**; each flips default-ON
+  in its own later ADR (the #1186→#1532 two-step). **RESOLVED (2026-07-24 —
+  the design's prediction, settled):** the per-slice two-step never ran;
+  `BRUTEX_SWEEP_RUST_ENUM` was flipped default-ON wholesale by
+  DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215), the operator
+  RUST-O(1)-EVERYWHERE directive, with `=0` as the explicit kill switch and
+  every safety layer named below untouched. This document is the
+  design-of-record and keeps its as-designed statements; the LIVE default is
+  #2215's. A third escape hatch
   `BRUTEX_SWEEP_RUST_CORE_BELT` (default ON) governs the finalist belt +
   the sampled population spot-check. **Its parse policy is the INVERSE fail
   direction, stated explicitly (round-1 fix — the uniform "unrecognised ⇒
@@ -2327,7 +2334,9 @@ this design.
   because that is the one granted compute-zone-adjacent Python-only
   commit before any Rust lands.
 - **Slice 1 — Rust enumeration+prefilter (integer-only), default-OFF
-  `BRUTEX_SWEEP_RUST_ENUM`.** `enumerate_prefilter` + CNS unranking +
+  `BRUTEX_SWEEP_RUST_ENUM`** (as SHIPPED by #1738; the LIVE default is now ON
+  per DEC-RUST-DEFAULT-ON-WAVE-001 #2215 — see the §-above RESOLVED note)**.**
+  `enumerate_prefilter` + CNS unranking +
   `sweep_core.py` seam + work-bounded enum burn-in + the round-4
   TOTAL-RECONCILIATION belt (`enum_total_mismatch` vs the driver's own
   `count_combos` total) + dual-knob invariance

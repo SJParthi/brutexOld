@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the cross-language golden answer-key for the exec integer cores.
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1979), the ``vocab_golden_vectors``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #2212), the ``vocab_golden_vectors``
 discipline: freeze the *current* Python charge-stack / fill / money /
 materialize outputs over a diverse, deterministic case set into ONE
 language-neutral JSON fixture (``tests/golden/fixtures/
@@ -631,7 +631,7 @@ def build_payload() -> dict[str, Any]:
     payload: dict[str, Any] = {
         "_comment": (
             "FROZEN cross-language oracle for the exec integer cores "
-            "(DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979). Generated from "
+            "(DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212). Generated from "
             "the Python bodies by scripts/gen_exec_costs_golden.py; "
             f"regeneration refused without {REGEN_ENV}=1. Schema v2 = the "
             "DEC-FILL-WORST-CASE-ONLY-001 (#1825) reconcile: bar-extreme "

@@ -592,7 +592,7 @@ def _brokerage_leg_paisa(
     (§11 COMMON; the turnover arm rounds ADVERSELY per the permanent
     adverse-levy rule, DEC-FILL-WORST-CASE-ONLY-001) in the integer parameter
     shape the charge stack — and its Rust twin (DEC-EXEC-RUST-CORE-001,
-    MIGRATION.md #1979) — consumes: ``turnover_bps_x100 = None`` means a
+    MIGRATION.md #2212) — consumes: ``turnover_bps_x100 = None`` means a
     flat-only broker (Zerodha); a rate means the Groww min() arm.
     :func:`futures_brokerage_leg_paisa` stays the public broker-keyed API and
     delegates here byte-identically.
@@ -830,7 +830,7 @@ def _futures_charge_stack_py(
     """The futures charge stack as ONE pure integer function.
 
     The dispatchable futures core (DEC-EXEC-RUST-CORE-001, MIGRATION.md
-    #1979), the futures twin of
+    #2212), the futures twin of
     :func:`brutex.costs.calculator._charge_stack_py`: the worst-case
     bar-extreme fills (DEC-FILL-WORST-CASE-ONLY-001) → notionals → gross,
     then the ``cost_free`` short-circuit (an INDEX future returns the
@@ -1020,7 +1020,8 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
 
     # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
     # Lazy import (the calculator-site cycle law; see compute_trade_cost).
-    # Default-OFF (`BRUTEX_EXEC_RUST`): the seam returns None unless the
+    # Default-ON (`BRUTEX_EXEC_RUST` — DEC-RUST-DEFAULT-ON-WAVE-001 #2215
+    # flipped it; `=0` is the kill switch): the seam returns None unless the
     # kernel serves; the Python core below stays the permanent oracle arm.
     from brutex import exec_rust
 

@@ -1,4 +1,4 @@
-//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1979).
+//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #2212).
 //!
 //! Slice 7 / P8 of the Rust conversion program: everything from the moment
 //! prices are **integer paisa** — the worst-case fill law
@@ -8,9 +8,11 @@
 //! in `brutex.costs.calculator` / `brutex.costs.futures_costs` /
 //! `brutex.options.executor` / `brutex.futures.executor`. The Python bodies
 //! stay the permanent oracles (deletion is a distinct later decision,
-//! DEC-EXEC-PY-BODY-DELETE-001); dispatch is default-OFF behind
-//! `BRUTEX_EXEC_RUST` (the flip is its own later decision,
-//! DEC-EXEC-RUST-FLIP-001).
+//! DEC-EXEC-PY-BODY-DELETE-001); dispatch is default-ON behind
+//! `BRUTEX_EXEC_RUST` — DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215)
+//! flipped it and SUBSUMED the named follow-up DEC-EXEC-RUST-FLIP-001, which
+//! was therefore never separately minted. `BRUTEX_EXEC_RUST=0` is the
+//! explicit kill switch; an unrecognised value fails SAFE to OFF.
 //!
 //! ## ⚠ TWO money laws live in this repo — do not confuse them
 //!
