@@ -5536,13 +5536,31 @@ jobs:
           set -euo pipefail
           echo "author=$PR_AUTHOR" >> "$GITHUB_OUTPUT"
       - name: Run Z+ PR guard
+        # DEC-DOR-LIVE-BODY-001 idiom (extended to this sibling gate): evaluate
+        # the LIVE PR body at run-time, not the `github.event.pull_request.body`
+        # event snapshot. `on: pull_request:` carries no `types:`, so it defaults
+        # to [opened, synchronize, reopened] — an `edited` body NEVER re-fires
+        # CI, and a `rerun_failed_jobs` replays the ORIGINAL event payload. A
+        # snapshot-bound gate therefore stays red forever on a corrected body.
+        # Fetching live makes the gate STRICTER in both directions: a body that
+        # LOSES a marker after dispatch now goes red on the next run, where the
+        # snapshot would have kept it green. Fall back to the snapshot only if
+        # the live fetch fails (fail-SAFE — the guard still runs and can still
+        # block; it never fail-opens to a silent pass).
         env:
           PR_AUTHOR: ${{ steps.pr-meta.outputs.author }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
-          printf '%s\n' "$PR_BODY" > "$tmp"
+          if live_body=$(gh pr view "$PR_NUMBER" --json body -q .body 2>/dev/null); then
+            printf '%s\n' "$live_body" > "$tmp"
+          else
+            echo "::warning::Z+ guard: live PR-body fetch failed; falling back to the event snapshot" >&2
+            printf '%s\n' "$PR_BODY_FALLBACK" > "$tmp"
+          fi
           bash scripts/ci/zplus-pr-guard.sh "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
@@ -5613,8 +5631,23 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate DEC-IDs cited in PR body against MIGRATION.md
+        # DEC-DOR-LIVE-BODY-001 idiom (extended to this sibling gate): the
+        # CITED-DEC-ID scan reads the LIVE body, not the event snapshot — see
+        # the Z+ guard above for the full rationale (an `edited` body never
+        # re-fires CI and a re-run replays the original payload, so a
+        # snapshot-bound gate can never see a corrected citation). Fail-SAFE
+        # fallback to the snapshot; never fail-open.
+        #
+        # HONEST residual: PR_TITLE stays the event snapshot. The title feeds
+        # only the APPROPRIATENESS heuristic (EXEMPT_TITLE_TYPES), not the
+        # citation-existence scan, and the validator already SKIPS
+        # appropriateness (exit 0) when PR_TITLE is unset — so a stale title
+        # can only mis-classify the softer half of the gate, never the
+        # existence half. Closing it is a separate, smaller change.
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
           # DEC-TEST-APPARATUS-DEBTS-001(e): the appropriateness heuristic
           # consumes the PR title/author + changed-file list (copied
           # byte-for-byte from bugfix-regression-scan below).
@@ -5624,7 +5657,12 @@ jobs:
         run: |
           set -euo pipefail
           tmp=$(mktemp)
-          printf '%s\n' "$PR_BODY" > "$tmp"
+          if live_body=$(gh pr view "$PR_NUMBER" --json body -q .body 2>/dev/null); then
+            printf '%s\n' "$live_body" > "$tmp"
+          else
+            echo "::warning::DEC-ID validator: live PR-body fetch failed; falling back to the event snapshot" >&2
+            printf '%s\n' "$PR_BODY_FALLBACK" > "$tmp"
+          fi
           # Build list of changed files (newline-separated).
           PR_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" || true)
           export PR_FILES

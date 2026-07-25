@@ -20,6 +20,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARD = REPO_ROOT / "scripts" / "ci" / "zplus-pr-guard.sh"
+CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 ALL_6_MARKERS = """
 This PR carries the Z+ 15-row matrix and Z+ 7-row resilience matrix and a
@@ -220,3 +221,126 @@ class TestBotExemption:
         """The exemption is EXACT — a lookalike author stays fail-closed."""
         assert _run("Lookalike body.", pr_author="github-actions").returncode == 1
         assert _run("Lookalike body.", pr_author="my-github-actions[bot]").returncode == 1
+
+
+def _zplus_job_block() -> str:
+    """Return the `zplus-pr-guard` job's YAML text up to the next job.
+
+    The Z+ job is followed by the `definition-of-ready` job (a sibling at the
+    same indent). Slicing on that boundary keeps the assertions scoped to the
+    Z+ job and resilient to growth elsewhere in ci.yml.
+    """
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "zplus-pr-guard:" in text, "ci.yml lost the zplus-pr-guard job"
+    block = text.split("  zplus-pr-guard:", 1)[1]
+    return block.split("\n  definition-of-ready:", 1)[0]
+
+
+def _dec_id_job_block() -> str:
+    """Return the `dec-id-validator` job's YAML text up to the next job.
+
+    The validator is followed by `bugfix-regression-scan` (a sibling at the
+    same indent).
+    """
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "dec-id-validator:" in text, "ci.yml lost the dec-id-validator job"
+    block = text.split("  dec-id-validator:", 1)[1]
+    return block.split("\n  bugfix-regression-scan:", 1)[0]
+
+
+class TestPrBodyGatesReadLiveBody:
+    """The two snapshot-bound PR-body gates must read the LIVE body.
+
+    Root cause pinned here (measured on PR #1754, 2026-07-25): ci.yml's
+    ``on: pull_request:`` carries NO ``types:``, so it defaults to
+    ``[opened, synchronize, reopened]`` — an ``edited`` body never re-fires
+    CI — and ``rerun_failed_jobs`` replays the ORIGINAL event payload. A gate
+    bound to ``github.event.pull_request.body`` therefore stays red FOREVER
+    on a body that was corrected after dispatch, with no operator action able
+    to clear it short of an unrelated push.
+
+    ``definition-of-ready`` was already fixed this way by
+    DEC-DOR-LIVE-BODY-001 (MIGRATION.md #983); these tests extend the same
+    contract to its two siblings so the class cannot reappear.
+
+    Note the direction of the change: reading live makes the gates STRICTER,
+    not weaker. A body that LOSES a required marker after dispatch now goes
+    red on the next run, where the stale snapshot would have kept it green.
+    """
+
+    def test_zplus_fetches_live_body_via_gh_cli(self) -> None:
+        """The Z+ step fetches the LIVE body, not only the event snapshot."""
+        block = _zplus_job_block()
+        assert "gh pr view" in block and "--json body" in block, (
+            "Z+ guard step must fetch the live PR body — a snapshot-bound gate "
+            "cannot see a corrected body (edited never re-fires CI)"
+        )
+        assert "GH_TOKEN: ${{ github.token }}" in block, (
+            "gh CLI needs the workflow token to read the PR body"
+        )
+
+    def test_zplus_falls_back_to_event_snapshot_not_fail_open(self) -> None:
+        """A failed live fetch falls back to the snapshot — fail-SAFE."""
+        block = _zplus_job_block()
+        assert "PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}" in block, (
+            "a live-fetch failure must fall back to the event snapshot"
+        )
+        assert "bash scripts/ci/zplus-pr-guard.sh" in block, (
+            "the guard must still run (and can still block) after body resolution"
+        )
+
+    def test_zplus_stays_pull_request_scoped(self) -> None:
+        """The live fetch is ADDED to — not a replacement of — the PR gate."""
+        assert "github.event_name == 'pull_request'" in _zplus_job_block(), (
+            "Z+ job must remain pull_request-scoped (open PRs stay gated)"
+        )
+
+    def test_dec_id_validator_fetches_live_body_via_gh_cli(self) -> None:
+        """The DEC-ID citation scan reads the LIVE body."""
+        block = _dec_id_job_block()
+        assert "gh pr view" in block and "--json body" in block, (
+            "DEC-ID validator must fetch the live PR body — a corrected "
+            "citation is invisible to a snapshot-bound gate"
+        )
+        assert "GH_TOKEN: ${{ github.token }}" in block, (
+            "gh CLI needs the workflow token to read the PR body"
+        )
+
+    def test_dec_id_validator_falls_back_to_event_snapshot(self) -> None:
+        """A failed live fetch falls back to the snapshot — fail-SAFE."""
+        block = _dec_id_job_block()
+        assert "PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}" in block, (
+            "a live-fetch failure must fall back to the event snapshot"
+        )
+        assert "python3 scripts/ci/validate_dec_ids.py" in block, (
+            "the validator must still run (and can still block) after body resolution"
+        )
+
+    def test_dec_id_validator_keeps_appropriateness_inputs(self) -> None:
+        """The appropriateness heuristic's inputs survive the live-body change.
+
+        HONEST residual (Golden Rule #10): PR_TITLE stays the event snapshot.
+        It feeds only the appropriateness half — the validator SKIPS that half
+        (exit 0) when PR_TITLE is unset — so a stale title can never break the
+        citation-EXISTENCE half this change is about.
+        """
+        block = _dec_id_job_block()
+        for var in ("PR_TITLE:", "PR_AUTHOR:", "BASE_REF:"):
+            assert var in block, f"dec-id-validator lost {var} (appropriateness input)"
+        assert "PR_FILES" in block, "dec-id-validator lost the changed-file list"
+
+    def test_ci_pull_request_trigger_has_no_edited_type(self) -> None:
+        """Pin the trigger fact this whole class exists because of.
+
+        If someone later adds ``types: [... edited ...]``, an edited body WOULD
+        re-fire CI and the live fetch becomes belt-and-braces rather than the
+        only mechanism. This test does not forbid that — it fails loudly so the
+        rationale above is re-read and updated rather than silently rotting.
+        """
+        text = CI_YML.read_text(encoding="utf-8")
+        head = text.split("\nenv:", 1)[0]
+        pr_trigger = head.split("  pull_request:", 1)[1].split("\n  merge_group:", 1)[0]
+        assert "types:" not in pr_trigger, (
+            "ci.yml's pull_request trigger gained a `types:` list — re-read "
+            "TestPrBodyGatesReadLiveBody's docstring and update it"
+        )
