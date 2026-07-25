@@ -60,7 +60,9 @@ pub struct FibLevels {
 
 /// Compute the static daily Fibonacci levels from the previous day's high/low.
 ///
-/// Mirrors `fib_levels.py::compute_fib_levels`. `range` is the integer `pdh - pdl`, taken
+/// This kernel IS the single source of the Fibonacci math —
+/// `fib_levels.py::compute_fib_levels` validates its inputs and then DELEGATES
+/// here (DEC-SHARED-CORE-001). `range` is the integer `pdh - pdl`, taken
 /// to `f64` once; each level is `round_half_even(anchor ± ratio * range)` with
 /// the ratio applied before the add/sub (matching Python operator precedence).
 /// `*_200` uses `± range` directly (`1.000 * range == range` exactly in IEEE).
@@ -68,6 +70,10 @@ pub struct FibLevels {
 pub fn compute_fib_levels(pdh_paisa: i64, pdl_paisa: i64) -> FibLevels {
     // `assert!` (always-on) so corrupt prev-day OHLC fails LOUD in release too,
     // matching the `ValueError` guard in `fib_levels.py::compute_fib_levels`.
+    // The PyO3 boundary pre-validates and raises a clean `ValueError` instead
+    // (`python.rs::py_compute_fib_levels`); that boundary is behind the
+    // optional `python` feature, so a native rlib consumer (TickVault) reaches
+    // this `assert!` directly.
     assert!(pdh_paisa >= pdl_paisa, "PDH must be >= PDL");
 
     let range_paisa = pdh_paisa - pdl_paisa;
