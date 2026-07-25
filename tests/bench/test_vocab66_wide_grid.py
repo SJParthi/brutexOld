@@ -84,7 +84,49 @@ _REGRESSION_FLOOR_SECONDS_PER_COMBO: Final[float] = 5e-3
 _WIDE_BARS: Final[int] = 20_000
 _WIDE_MASKS: Final[int] = 256
 
+#: Mirror of the supermask kernel's ``PARALLEL_WORK_THRESHOLD``
+#: (``rust/fno-math/src/python.rs:235``, DEC-RUST-RAYON-SUPERMASK-001): a batch
+#: whose ``masks · bars`` work reaches this bound dispatches on the
+#: rayon-PARALLEL arm inside ``count_supermasks_dispatch_core``; below it the
+#: same generic core runs SERIALLY. ``ResidentBarsU128::count_supermasks``
+#: (``python.rs:563``) routes through that same width-generic dispatch, so the
+#: wide (>=64-bit) path this module measures is subject to it too.
+_PARALLEL_WORK_THRESHOLD: Final[int] = 1 << 20
+
+#: Linearity-fixture sizing (DEC-BENCH-SLOPE-BOUND-001). BOTH legs must stay
+#: on the SERIAL dispatch arm or the ratio compares a serial leg against a
+#: rayon-parallel one and the parallel speedup is credited as "flatness".
+#: MEASURED 2026-07-25 on this 4-core container (rust-u128 kernel engaged,
+#: best-of-5, 3 trials each):
+#:   64 masks  →  small 320,000 work SERIAL 0.898 ns/op
+#:                large 1,280,000 work PARALLEL 0.272-0.391 ns/op
+#:                ratio 0.30-0.43x  ← a 2.3-3.3x FREE CREDIT from the arm switch,
+#:                leaving the 5.0 ceiling ~16x of hiding room for a genuine
+#:                serial-path regression.
+#:   40 masks  →  small 200,000 work SERIAL 0.889-0.895 ns/op
+#:                large 800,000 work SERIAL 0.885-0.915 ns/op
+#:                ratio 0.99-1.02x  ← honestly flat, ~5x real margin to 5.0.
+#: 40 x 20,000 = 800,000 < 1,048,576 keeps the LARGE leg serial with headroom.
+_LINEARITY_BARS_SMALL: Final[int] = 5_000
+_LINEARITY_BARS_LARGE: Final[int] = 20_000
+_LINEARITY_MASKS: Final[int] = 40
+
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _assert_serial_arm(n_masks: int, n_bars: int) -> None:
+    """Refuse a RATIO fixture whose batch would cross onto the parallel arm.
+
+    Applies to comparison fixtures only — the single-point absolute
+    throughput bench (``_WIDE_MASKS`` x ``_WIDE_BARS`` = 5.12M work) measures
+    the production-sized batch on whatever arm serves it and compares nothing.
+    """
+    work = n_masks * n_bars
+    assert work < _PARALLEL_WORK_THRESHOLD, (
+        f"bench fixture work {work:,} mask·bar reaches the kernel's parallel "
+        f"threshold {_PARALLEL_WORK_THRESHOLD:,} — a serial-vs-parallel arm switch "
+        f"would credit rayon's speedup as flatness; shrink masks or bars."
+    )
 
 
 def _m4pro_abs_active() -> bool:
@@ -167,24 +209,39 @@ def test_wide_count_throughput_measured() -> None:
 def test_wide_count_per_bar_linearity() -> None:
     """Per-(mask·bar) cost is flat across window sizes on the DISPATCHED path.
 
-    A permissive shared-CI ceiling (the house robust tier; both windows sit in
-    the same numpy/Rust arm) — NOT an O(1)-total claim: each count is
-    O(N_masks · N_bars) by design; the pin is the amortised per-op cost.
+    A permissive shared-CI ceiling (the house robust tier) — NOT an O(1)-total
+    claim: each count is O(N_masks · N_bars) by design; the pin is the
+    amortised per-op cost.
+
+    SAME-ARM LAW (DEC-BENCH-SLOPE-BOUND-001): both legs are held STRICTLY
+    BELOW the kernel's ``PARALLEL_WORK_THRESHOLD`` by ``_assert_serial_arm``,
+    so the ratio compares serial against serial. The prior shape (64 masks)
+    was NOT same-arm despite claiming to be: 64 x 5,000 = 320,000 ran serial
+    while 64 x 20,000 = 1,280,000 crossed onto the rayon arm, and the
+    resulting 2.3-3.3x parallel speedup was credited as flatness — measured
+    2026-07-25 at ratio 0.30-0.43x, which left ~16x of hiding room under the
+    5.0 ceiling for a genuine serial-path regression. At 40 masks both legs
+    stay serial and the honest ratio is 0.99-1.02x (~5x real margin).
     """
     from tests.bench._o1_tiers import cache_tier_ceiling
 
-    small, large = 5_000, 20_000
-    per_op_small = _per_mask_seconds_wide(small, 64) / small
-    per_op_large = _per_mask_seconds_wide(large, 64) / large
+    small, large = _LINEARITY_BARS_SMALL, _LINEARITY_BARS_LARGE
+    _assert_serial_arm(_LINEARITY_MASKS, small)
+    _assert_serial_arm(_LINEARITY_MASKS, large)
+    per_op_small = _per_mask_seconds_wide(small, _LINEARITY_MASKS) / small
+    per_op_large = _per_mask_seconds_wide(large, _LINEARITY_MASKS) / large
     ratio = per_op_large / max(per_op_small, 1e-12)
     print(
-        f"\nWide count per-op linearity: {per_op_small * 1e9:.3f} ns @ {small} bars "
+        f"\nWide count per-op linearity ({_LINEARITY_MASKS} masks, both legs on the "
+        f"SERIAL arm): {per_op_small * 1e9:.3f} ns @ {small} bars "
         f"vs {per_op_large * 1e9:.3f} ns @ {large} bars → ratio {ratio:.2f}× "
         f"(engaged: {_wide_dispatch_label()})\n"
     )
     assert ratio < cache_tier_ceiling(5.0), (
         f"wide count per-(mask·bar) ratio {ratio:.2f}× exceeds the ceiling — "
-        f"super-linear regression in the >=64-bit count dispatch."
+        f"super-linear regression in the >=64-bit count dispatch "
+        f"(both legs serial: {_LINEARITY_MASKS}×{small} and "
+        f"{_LINEARITY_MASKS}×{large} mask·bar)."
     )
 
 

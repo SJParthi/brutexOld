@@ -109,15 +109,47 @@ class TestOffModeIsFree:
     ) -> None:
         """OFF-arm seam cost ≈ the direct lot/rate/stack/breakdown chain it
         wraps (identical big work ± one env probe + one None-returning seam
-        call per trade)."""
+        call per trade).
+
+        FIDELITY (DEC-BENCH-SLOPE-BOUND-001): ``_direct`` mirrors the seam's
+        per-trade work EXACTLY — the three in-loop ``entry_dt_ist.date()``
+        calls, the ``OptionsUnderlying(trade.instrument)`` enum-from-value
+        construction inside ``_lookup_lot_size``, and the
+        ``side.startswith("long")`` read. The prior shape hoisted the date out
+        of the loop and passed the enum MEMBER + a literal ``is_long=True``, so
+        the control arm did strictly LESS work than the subject and the
+        docstring's "identical big work" claim was false: the unloaded true
+        ratio measured 1.163 rather than ~1.0, leaving only 1.72× headroom
+        under the 2.0 ceiling. Restoring parity measures what the docstring
+        says it measures — the env probe + the None-returning seam call — and
+        the teeth are UNCHANGED: an accidental extra pass inside
+        ``compute_trade_cost`` is still work ``_direct`` does not do, so it
+        still inflates the ratio.
+
+        ESTIMATOR (DEC-BENCH-SLOPE-BOUND-001): the statistic is the median of
+        the PER-PAIR ratios over interleaved samples, never two independently
+        estimated medians. Independent medians can draw from different
+        iterations, so a scheduler stall / co-tenant burst landing in ONE arm's
+        list shifts that median with nothing to cancel it. Reproduced twice
+        2026-07-25 on an emulated contended 2-core runner (6 busy loops,
+        ``taskset -c 0,1``): run A trial 6 read ``direct=8.80 ms`` against a
+        normal ``seam=23.84 ms`` → unpaired 2.71× FAIL where the paired median
+        over the SAME samples was 1.38×; run B trial 4 read unpaired 2.56× vs
+        paired 1.29×. In both the DENOMINATOR was the outlier, not the
+        numerator. Pairing alone was not sufficient (run A had a separate trial
+        at paired 2.05×) — which is why the fidelity fix above ships WITH it,
+        restoring the headroom that makes the pair robust. The ceiling is
+        UNCHANGED at 2.0: a genuine regression inflates EVERY pair, so the
+        median moves with it.
+        """
         monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
         trade = _trade()
-        entry_date = trade.entry_dt_ist.date()
         n_trades = 200
 
         def _direct() -> None:
             for _ in range(n_trades):
-                lot = get_lot_size(OptionsUnderlying.NIFTY, entry_date)
+                # Mirror `_lookup_lot_size`: enum-from-value + the .date() call.
+                lot = get_lot_size(OptionsUnderlying(trade.instrument), trade.entry_dt_ist.date())
                 # Worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001): the stack
                 # takes the four bar extremes, narrowed by the COMMON
                 # ``require_bar_extremes`` seam exactly as compute_trade_cost does.
@@ -132,14 +164,16 @@ class TestOffModeIsFree:
                     entry_low,
                     exit_high,
                     exit_low,
-                    is_long=True,
+                    is_long=trade.side.startswith("long"),
                     lot_size=lot,
                     n_lots=trade.n_lots,
                     brokerage_round_trip_paisa=const.brokerage_paisa(trade.broker) * 2,
-                    stt_rate=const.stt_options_rate_bps_x100(entry_date),
-                    etc_rate=const.exchange_charge_bps_x100("NIFTY", entry_date),
+                    stt_rate=const.stt_options_rate_bps_x100(trade.entry_dt_ist.date()),
+                    etc_rate=const.exchange_charge_bps_x100(
+                        trade.instrument, trade.entry_dt_ist.date()
+                    ),
                     sebi_rate=const.SEBI_FEE_BPS_X100,
-                    ipft_rate=const.ipft_bps_x100("NIFTY"),
+                    ipft_rate=const.ipft_bps_x100(trade.instrument),
                     stamp_rate=const.STAMP_DUTY_OPTIONS_BPS_X100,
                     gst_rate=const.GST_TOTAL_BPS_X100,
                 )
@@ -175,21 +209,30 @@ class TestOffModeIsFree:
 
         _direct()
         _seam()  # warm-up both
+        pair_ratios: list[float] = []
         direct_samples: list[float] = []
         seam_samples: list[float] = []
         for _ in range(15):
             t0 = time.perf_counter()
             _direct()
-            direct_samples.append(time.perf_counter() - t0)
+            direct_i = time.perf_counter() - t0
             t0 = time.perf_counter()
             _seam()
-            seam_samples.append(time.perf_counter() - t0)
-        direct = _median(direct_samples)
-        seam = _median(seam_samples)
-        # Identical big work ± one env probe + a None-returning call + the
-        # breakdown construction; 2.0× absorbs shared-CI timer noise while
-        # still catching an accidental second charge-stack pass.
-        assert seam < direct * 2.0, (
-            f"OFF-mode compute_trade_cost ({seam * 1e3:.2f} ms / {n_trades} trades) is not "
-            f"within the noise ceiling of the direct oracle chain ({direct * 1e3:.2f} ms)"
+            seam_i = time.perf_counter() - t0
+            direct_samples.append(direct_i)
+            seam_samples.append(seam_i)
+            pair_ratios.append(seam_i / direct_i)
+        # Identical big work ± one env probe + a None-returning call; 2.0×
+        # absorbs shared-CI timer noise while still catching an accidental
+        # second charge-stack pass. The statistic is the PER-PAIR median (see
+        # the ESTIMATOR paragraph) — a stall inside one arm's window is
+        # cancelled by its own paired neighbour, never by an unrelated
+        # iteration's sample.
+        ratio = _median(pair_ratios)
+        assert ratio < 2.0, (
+            f"OFF-mode compute_trade_cost is not within the noise ceiling of the direct "
+            f"oracle chain: paired median {ratio:.2f}× over {len(pair_ratios)} interleaved "
+            f"rounds of {n_trades} trades (arm medians seam "
+            f"{_median(seam_samples) * 1e3:.2f} ms vs direct "
+            f"{_median(direct_samples) * 1e3:.2f} ms)"
         )

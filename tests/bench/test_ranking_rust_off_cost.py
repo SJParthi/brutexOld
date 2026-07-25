@@ -147,17 +147,53 @@ class TestDifferentialCostBound:
         burn-in, so the measurement is the WORST honest shape — every family
         double-computing on every timed call (measured 1.5-1.7× on this
         container 2026-07-11; steady state 1.1-1.3×). A blow-past means an
-        accidental extra pass (e.g. a per-row FFI call) snuck in."""
+        accidental extra pass (e.g. a per-row FFI call) snuck in.
+
+        ESTIMATOR (DEC-BENCH-SLOPE-BOUND-001): the two arms are INTERLEAVED and
+        the statistic is the median of the PER-PAIR ratios — never two
+        independently-measured medians. The prior shape measured arm OFF to
+        completion, then arm ON to completion, so a scheduler stall / co-tenant
+        burst / GC pause landing in ONE window shifted that arm's whole median
+        with nothing to cancel it. Reproduced 2026-07-25 on an emulated
+        contended 2-core runner (``taskset -c 0,1`` + 6 busy loops): the
+        unpaired shape failed 1-in-8 trials at 3.35× (``off`` read anomalously
+        FAST at 4.06 ms vs a 5-7 ms unloaded baseline — the DENOMINATOR was the
+        outlier, not the numerator), while the paired estimator over the same
+        load peaked at 2.16×. ``min``-of-repeats was measured and REJECTED here:
+        worst-of-8 4.76×, because interruption probability scales with duration
+        and ``min`` systematically favours the shorter (OFF) arm. The ceiling is
+        UNCHANGED at 3.0 — this fixes the estimator, never the teeth: a genuine
+        regression inflates EVERY pair, so the median moves with it."""
         pool = _pool()
         monkeypatch.setenv(RANKING_RUST_ENV, "0")
-        off = _rank_median(pool, overfit=_OVERFIT_CFG)
+        rank_combos(pool, overfit=_OVERFIT_CFG)  # warm-up OFF
         monkeypatch.setenv(RANKING_RUST_ENV, "1")
         reset_ranking_rust_for_tests()
+        rank_combos(pool, overfit=_OVERFIT_CFG)  # warm-up ON (burn-in progression)
+        pair_ratios: list[float] = []
+        off_samples: list[float] = []
+        on_samples: list[float] = []
         try:
-            on = _rank_median(pool, overfit=_OVERFIT_CFG)
+            for _ in range(15):
+                # ``ranking_rust_enabled()`` is read per call (no global latch),
+                # so the arm can be flipped inside the loop.
+                monkeypatch.setenv(RANKING_RUST_ENV, "0")
+                t0 = time.perf_counter()
+                rank_combos(pool, overfit=_OVERFIT_CFG)
+                off_i = time.perf_counter() - t0
+                monkeypatch.setenv(RANKING_RUST_ENV, "1")
+                t0 = time.perf_counter()
+                rank_combos(pool, overfit=_OVERFIT_CFG)
+                on_i = time.perf_counter() - t0
+                off_samples.append(off_i)
+                on_samples.append(on_i)
+                pair_ratios.append(on_i / off_i)
         finally:
             reset_ranking_rust_for_tests()
-        assert on < off * 3.0, (
-            f"flag-ON rank ({on * 1e3:.2f} ms) exceeds 3× the flag-OFF rank "
-            f"({off * 1e3:.2f} ms) — the differential envelope regressed"
+        ratio = _median(pair_ratios)
+        assert ratio < 3.0, (
+            f"flag-ON rank exceeds 3× the flag-OFF rank — the differential envelope "
+            f"regressed: paired median {ratio:.2f}× over {len(pair_ratios)} interleaved "
+            f"rounds (arm medians ON {_median(on_samples) * 1e3:.2f} ms vs OFF "
+            f"{_median(off_samples) * 1e3:.2f} ms)"
         )

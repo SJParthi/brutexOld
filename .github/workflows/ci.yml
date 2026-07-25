@@ -3889,13 +3889,37 @@ jobs:
             # filterwarnings for the bench session so third-party
             # deprecation warnings (pytest-benchmark, pkg_resources)
             # on Python 3.12 don't fail the run.
+            #
+            # FAILURE OBSERVABILITY (DEC-BENCH-SLOPE-BOUND-001): this is the
+            # one required gate whose failures are pure wall-clock ratios, so
+            # the failing test id + its measured numbers must reach the run
+            # summary WITHOUT a maintainer downloading the raw log. The
+            # `::error` annotations below surface exactly the `FAILED …` short
+            # summary lines pytest already prints (`-rfE` pins that summary on
+            # rather than relying on the default).
+            #
+            # The gate is NEVER weakened: `set -o pipefail` + the captured `rc`
+            # + the explicit `exit "$rc"` re-raise pytest's own exit code
+            # verbatim, so this block can only ever ADD annotations — it can
+            # never turn a red run green.
+            set -o pipefail
+            rc=0
             pytest tests/bench \
               -W default::DeprecationWarning \
               -W default::PendingDeprecationWarning \
+              -rfE \
               --benchmark-min-rounds=3 \
               --benchmark-disable-gc \
               --benchmark-columns=min,mean,median,stddev,ops \
-              --benchmark-json=bench-results.json
+              --benchmark-json=bench-results.json \
+              2>&1 | tee bench-output.txt || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              grep -E '^(FAILED|ERROR) ' bench-output.txt | while IFS= read -r line; do
+                echo "::error title=bench-failure::${line}"
+              done
+              echo "::error title=bench-gate::pytest tests/bench exited ${rc} — see the bench-failure annotations above. Ratio ceilings live in tests/bench/_o1_tiers.py; never widen one to make a run green (Golden Rule #10)."
+            fi
+            exit "$rc"
           else
             echo "⏸  tests/bench does not exist yet — skipping"
           fi
