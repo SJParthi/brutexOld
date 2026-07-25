@@ -410,7 +410,10 @@ jobs:
         # (pre-receive hooks are GitHub Enterprise Server only, so that
         # state is not expected on github.com) or any future value. Red
         # checks cannot reach this step: the ci-check above refuses ANY
-        # failing check run, requires EVERY `CI OK (aggregate gate)`
+        # failing check run EXCEPT the one exempted NON-REQUIRED bench
+        # check `m4pro-absolute-throughput` (see the NON-BLOCKING
+        # EXEMPTION note above the `failing` awk — every REQUIRED check
+        # still refuses), requires EVERY `CI OK (aggregate gate)`
         # instance to be success (DEC-AUTOMERGE-ALLGREEN-001), and — since
         # DEC-AUTOMERGE-CLEAN-STRICT-001 — requires every push/pull_request
         # CI run on the head to be COMPLETED with a green pull_request
@@ -419,7 +422,10 @@ jobs:
         # advisory third-party/nightly checks (tolerated by design — their
         # completion fires no auto-merge trigger, and an offline self-hosted
         # runner must never strand a merge; if they FAIL, the failing-check
-        # filter refuses). Known blind spot, disclosed in the charter §4.5:
+        # filter refuses — except the one exempted non-required bench
+        # check named above, whose FAILURE is tolerated by the same
+        # offline-runner-must-never-strand-a-merge reasoning that already
+        # tolerates it PENDING). Known blind spot, disclosed in the charter §4.5:
         # legacy commit STATUSES (the pre-check-runs API) are invisible to
         # ci-check; nothing in this repo's CI posts them today.
         # `mergeable`/`mergeable_state` are computed async by GitHub, so
@@ -489,7 +495,9 @@ jobs:
               # `blocked` keeps refusing (fail-closed; the shipped flip path IS
               # the ruleset, so this is by design).
               # Red checks still cannot reach here — the ci-check step above
-              # refuses ANY failing/incomplete run — and the rollup-gate
+              # refuses ANY failing/incomplete run except the one exempted
+              # non-required bench check (see the NON-BLOCKING EXEMPTION
+              # note above the `failing` awk) — and the rollup-gate
               # below still re-checks the complete live rollup. dirty /
               # behind / unknown — and `blocked` WITHOUT a queue — refuse
               # exactly as before.
@@ -532,7 +540,10 @@ jobs:
         # "NO PR may EVER merge with ANY red — at any time". This gate makes
         # the merge decision against the live `gh pr view --json
         # statusCheckRollup` AT MERGE TIME: it fails closed (exit != 0) on ANY
-        # FAILURE / CANCELLED / TIMED_OUT check, on a rollup smaller than the
+        # FAILURE / CANCELLED / TIMED_OUT check EXCEPT its own hardcoded
+        # `NONBLOCKING_CHECK_NAMES` (the same one non-required bench check,
+        # `m4pro-absolute-throughput` — DEC-PREMERGE-M4PRO-NONBLOCK-001;
+        # every REQUIRED check still refuses), on a rollup smaller than the
         # expected gate count (CI not finished registering), and on ANY pending
         # check — the same single source of truth a human/automation runs by
         # hand. NO OPERATOR_OVERRIDE is set here, so the script cannot be

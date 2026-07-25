@@ -4697,7 +4697,7 @@ hostile-review pass._
   while that runner is red. ROOT: the scan refuses on ANY check whose conclusion
   is in `failure|cancelled|timed_out|action_required|stale`, exempting exactly one
   name — this workflow's OWN check (the `failing` awk at
-  `.github/workflows/auto-merge.yml` lines 287-291 pre-change / 305-309 after).
+  `.github/workflows/auto-merge.yml` lines 290-291 pre-change / 305-308 after).
   `m4pro-absolute-throughput` is NOT in `ci.yml`'s `ci-ok` needs and NOT among
   branch protection's 22 required contexts, and MIGRATION.md #382 + #1534 both
   state a bench regression is caught POST-merge, never as a merge blocker —
@@ -4731,7 +4731,7 @@ hostile-review pass._
   (the round-3 SCOPE comment records the amendment + the corrected line cite),
   CLAUDE.md ×3 (this file's #1753 header blurb + the §1 Earlier-chain and §3
   branch-chain blurbs), and `docs/MIGRATION.md` #1753 (a bracketed
-  SUPERSEDED-IN-PART note carrying the closure + the 282-289 → 287-291 citation
+  SUPERSEDED-IN-PART note carrying the closure + the 282-289 → 290-291 citation
   correction; the entry otherwise byte-preserved). TESTS: two new redteam pins in
   `tests/redteam/test_redteam_automerge_safety.py` that drive the SHIPPED program
   — `_ci_check_failing_awk_program()` extracts the awk source from the live
@@ -4742,7 +4742,7 @@ hostile-review pass._
   CENSUS to exactly the two sanctioned names and refuses an `||` anywhere in the
   program. FAILS-BEFORE: with ONLY the workflow reverted, both new pins FAIL while
   all 20 pre-existing pins still PASS. GATES: redteam automerge 22 passed; the
-  26-test `test_redteam_premerge_guard.py` green UNMODIFIED (its #1753 m4pro pins
+  29-test `test_redteam_premerge_guard.py` green UNMODIFIED (its #1753 m4pro pins
   untouched and still valid — this adds a gate, never relaxes that one); YAML
   parses; `bash -n` clean; ledger validator green. CI-workflow + one script
   comment + redteam tests + docs ONLY — ZERO `brutex/` source change; ENGINE

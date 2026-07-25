@@ -88,7 +88,7 @@ IGNORE_CHECK_NAMES="${IGNORE_CHECK_NAMES:-}"
 # tolerance below for a FAILED/CANCELLED/TIMED_OUT m4pro conclusion is
 # now honoured END-TO-END on the auto-merge path too. The workflow's
 # EARLIER ci-check step (.github/workflows/auto-merge.yml — the `failing`
-# awk scan, at lines 287-291 pre-#2254 / 305-309 after it, matching
+# awk scan, at lines 290-291 pre-#2254 / 305-308 after it, matching
 # conclusions failure|cancelled|timed_out|action_required|stale) used to
 # exempt ONLY "Auto-merge on green CI" and therefore refused those m4pro
 # conclusions upstream of this script; #2254 adds the same one-name
