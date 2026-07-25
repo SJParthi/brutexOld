@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -41,6 +42,15 @@ _SESSION_1_US = 1_704_167_100_000_000
 
 #: One IST day in epoch microseconds.
 _DAY_US = 86_400_000_000
+
+#: The crate's fixed-IST magnitude envelope ceiling
+#: (``rust/brutex-feed/src/scan.rs`` ``MAX_SAFE_TS_US``, half-open) — the
+#: refusal boundary of ``DEC-FFI-MAGNITUDE-CEILING-001``. MIRRORED, not
+#: imported: adding a Rust const to the FFI handshake surface for a test's
+#: convenience would grow ``_EXPECTED_COMPILED_SYMBOLS`` +
+#: ``EXPECTED_BUILD.json`` + the ``.pyi`` in lockstep for zero production
+#: value. ``test_max_safe_ts_us_mirror_matches_crate_source`` is the drift pin.
+_MAX_SAFE_TS_US = 253_402_214_400_000_000
 
 #: One minute in epoch microseconds.
 _MINUTE_US = 60_000_000
@@ -273,6 +283,37 @@ class TestValidateStrictScanTokens:
 class TestLeafDiscipline:
     """AST pins: import leaf-ness + the inline flag vocabulary mirror."""
 
+    def test_max_safe_ts_us_mirror_matches_crate_source(self) -> None:
+        """``_MAX_SAFE_TS_US`` mirrors the crate const it stands in for.
+
+        The drift pin for ``DEC-FFI-MAGNITUDE-CEILING-001``'s refusal
+        boundary. The Python-side value is a MIRROR (see the constant's own
+        comment for why it is not on the FFI handshake surface), so a change to
+        ``scan.rs``'s envelope has to move this literal too — otherwise the
+        guard's boundary test would silently drift off the real boundary and
+        stop proving anything.
+
+        Source-parse only, so it runs WITHOUT the wheel — including in the
+        wheel-free lanes where the sibling FFI tests skip.
+        """
+        scan_rs = (Path(__file__).resolve().parents[2] / "rust/brutex-feed/src/scan.rs").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"^pub const MAX_SAFE_TS_US:\s*i64\s*=\s*([0-9_]+)\s*;",
+            scan_rs,
+            re.MULTILINE,
+        )
+        assert match is not None, (
+            "rust/brutex-feed/src/scan.rs must declare `pub const MAX_SAFE_TS_US: i64 = …` "
+            "— the FFI magnitude envelope this file mirrors "
+            "(DEC-FFI-MAGNITUDE-CEILING-001)"
+        )
+        assert int(match.group(1).replace("_", "")) == _MAX_SAFE_TS_US, (
+            "the crate's MAX_SAFE_TS_US moved; update _MAX_SAFE_TS_US in this file "
+            "so the envelope-refusal boundary test still pins the REAL boundary"
+        )
+
     def test_leaf_imports_only_from_the_allowlist(self) -> None:
         # Import ALLOWLIST (strictly stronger than a denylist) — a stray
         # third-party or brutex.* import into the leaf fails by construction.
@@ -461,6 +502,73 @@ class TestSeriesFfi:
         # A degenerate window strictly between grid labels holds none.
         assert (
             brutex_feed.expected_bar_instant(open_us + 1, open_us + 2, _MINUTE_US, now, sessions)
+            is False
+        )
+
+    def test_expected_bar_instant_refuses_out_of_envelope_magnitudes(self) -> None:
+        """The FFI magnitude ceiling (``DEC-FFI-MAGNITUDE-CEILING-001``).
+
+        ``series::expected_bar_instant``'s intraday label expression carries
+        five unchecked ``i64`` ops, and ``rust/brutex-feed``'s
+        ``[profile.release]`` sets BOTH ``overflow-checks = true`` and
+        ``panic = "abort"`` — so an overflow there does not unwind into pyo3's
+        catch-and-convert wrapper, it SIGABRTs THIS interpreter. The
+        ``#[pyfunction]`` face therefore refuses every integer outside the
+        crate's own fixed-IST envelope ``[0, MAX_SAFE_TS_US)`` — the same
+        predicate ``ownership_cut`` abstains on — with a ``ValueError``
+        naming the offending argument.
+
+        Each argument position is driven, because the guard is one
+        ``require_ts_envelope`` call per position and a dropped call would
+        otherwise be invisible. The ``sessions`` triple is driven on
+        ``open_us``: that is the component the label arithmetic subtracts, so
+        it is the position that actually aborts.
+
+        Production can never reach this: ``series_load.py`` derives every
+        argument from a real ``datetime`` via ``_ts_epoch_us``.
+        """
+        brutex_feed = pytest.importorskip("brutex_feed", reason=_WHEEL_SKIP_REASON)
+        midnight = 1_704_133_800_000_000
+        open_us = midnight + (9 * 60 + 15) * _MINUTE_US
+        close_us = midnight + (15 * 60 + 30) * _MINUTE_US
+        ok_sessions = [(midnight, open_us, close_us)]
+        # The envelope ceiling is a Rust const, deliberately NOT added to the
+        # FFI handshake surface just to be readable here (that would grow
+        # `_EXPECTED_COMPILED_SYMBOLS` + `EXPECTED_BUILD.json` + the `.pyi` for
+        # a test's convenience). It is mirrored instead, with the source as the
+        # drift pin — the `_TRUTHY`/`_FALSY` mirror-pin idiom this same file
+        # already uses for `sweep_lookahead`'s vocabulary.
+        max_safe = _MAX_SAFE_TS_US
+
+        # A hand-derived tuple that REACHES the label expression: seg_start >
+        # open (the else branch), a non-zero step, and an overlapping session.
+        # With open_us = -(2**63) the very first op overflows.
+        aborting_open = -(2**63)
+        with pytest.raises(ValueError, match=r"sessions\[0\]\.open_us must be in \[0, "):
+            brutex_feed.expected_bar_instant(1, 1, 1, 0, [(0, aborting_open, 2)])
+
+        # Every other guarded position, each independently.
+        for name, args in (
+            ("seg_start_us", (-1, close_us, _MINUTE_US, close_us, ok_sessions)),
+            ("seg_end_us", (open_us, max_safe, _MINUTE_US, close_us, ok_sessions)),
+            ("step_us", (open_us, close_us, -1, close_us, ok_sessions)),
+            ("now_us", (open_us, close_us, _MINUTE_US, -1, ok_sessions)),
+            (
+                "sessions[0].stamp_us",
+                (open_us, close_us, _MINUTE_US, close_us, [(-1, open_us, close_us)]),
+            ),
+            (
+                "sessions[0].close_us",
+                (open_us, close_us, _MINUTE_US, close_us, [(midnight, open_us, max_safe)]),
+            ),
+        ):
+            with pytest.raises(ValueError, match=rf"{re.escape(name)} must be in \[0, "):
+                brutex_feed.expected_bar_instant(*args)
+
+        # The boundary is exact and half-open: MAX_SAFE_TS_US - 1 is ACCEPTED,
+        # so the guard refuses by overflow reachability, not by "large".
+        assert (
+            brutex_feed.expected_bar_instant(max_safe - 1, max_safe - 1, _MINUTE_US, 0, ok_sessions)
             is False
         )
 

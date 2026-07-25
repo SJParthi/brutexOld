@@ -117,10 +117,54 @@ fn scan_bars_strict(
     Ok(outcome.map(|o| (o.kept_rows, o.warn_events, o.stop)))
 }
 
+/// Refuse an epoch-µs / step magnitude outside the crate's OWN fixed-IST
+/// envelope `[0, MAX_SAFE_TS_US)` — `DEC-FFI-MAGNITUDE-CEILING-001`.
+///
+/// The predicate itself is the crate's ONE shared magnitude law
+/// (`series::ts_in_envelope`) — the same `(0..MAX_SAFE_TS_US)` test
+/// `series::ownership_cut` already abstains on — so the two FFI faces cannot
+/// drift apart. `ownership_cut` can express its refusal in its return type
+/// (`Option`); `expected_bar_instant` returns a plain `bool`, so the refusal
+/// has to be raised here.
+///
+/// Why a refusal and not a `checked_*` fallback: this crate's
+/// `[profile.release]` carries BOTH `overflow-checks = true` and
+/// `panic = "abort"` (Cargo.toml), so an overflow inside
+/// `series::expected_bar_instant`'s label arithmetic does not unwind into
+/// pyo3's catch-and-convert wrapper — it SIGABRTs the CPython interpreter.
+/// A `ValueError` naming the offending argument is diagnosable; a dead
+/// process is not.
+#[inline]
+fn require_ts_envelope(name: &str, value: i64) -> PyResult<()> {
+    if series::ts_in_envelope(value) {
+        return Ok(());
+    }
+    Err(PyValueError::new_err(format!(
+        "{name} must be in [0, {}) epoch-µs (fixed-IST envelope); got {value}",
+        scan::MAX_SAFE_TS_US
+    )))
+}
+
 /// `_expected_bar_time_in_window`'s geometric core: `step_us == 0` marks
 /// the derived-`1day` arm; `sessions` are `(stamp_us, open_us, close_us)`
 /// exact epoch-microsecond triples in chronological order. Pure verdict —
 /// the Python wrapper owns the calendar walk + both abstain arms.
+///
+/// Every integer argument is envelope-checked FIRST
+/// (`DEC-FFI-MAGNITUDE-CEILING-001`): the intraday label expression
+/// `open + -((open - seg_start) / step) * step` (`series.rs`) carries five
+/// unchecked `i64` ops, and under this crate's `panic = "abort"` release
+/// profile an overflow there kills the caller's interpreter instead of
+/// raising. Bounding all inputs into `[0, MAX_SAFE_TS_US)` (≈ year 9999)
+/// makes every one of those ops provably overflow-free:
+/// `|open - seg_start| < MAX_SAFE_TS_US`, so the quotient, its negation and
+/// the re-multiplication stay inside that same magnitude, and the final add
+/// is `< 2 · MAX_SAFE_TS_US ≈ 5.1e17 ≪ i64::MAX`.
+///
+/// Production can never trip it: `series_load.py` derives every argument
+/// from a real `datetime` through `_ts_epoch_us`, so the values are
+/// calendar-bounded far inside the envelope (a `step_us` likewise comes from
+/// a positive `timedelta`). Only a direct FFI call can reach the refusal.
 #[pyfunction]
 #[pyo3(signature = (seg_start_us, seg_end_us, step_us, now_us, sessions))]
 fn expected_bar_instant(
@@ -129,8 +173,27 @@ fn expected_bar_instant(
     step_us: i64,
     now_us: i64,
     sessions: Vec<(i64, i64, i64)>,
-) -> bool {
-    series::expected_bar_instant(seg_start_us, seg_end_us, step_us, now_us, &sessions)
+) -> PyResult<bool> {
+    require_ts_envelope("seg_start_us", seg_start_us)?;
+    require_ts_envelope("seg_end_us", seg_end_us)?;
+    // `step_us == 0` is the derived-`1day` arm; a positive step is the
+    // intraday grid. A NEGATIVE step is not a production shape (Python
+    // computes it from a positive `timedelta`) and is exactly the argument
+    // that turns the label multiply into an abort, so it is refused here.
+    require_ts_envelope("step_us", step_us)?;
+    require_ts_envelope("now_us", now_us)?;
+    for (i, &(stamp_us, open_us, close_us)) in sessions.iter().enumerate() {
+        require_ts_envelope(&format!("sessions[{i}].stamp_us"), stamp_us)?;
+        require_ts_envelope(&format!("sessions[{i}].open_us"), open_us)?;
+        require_ts_envelope(&format!("sessions[{i}].close_us"), close_us)?;
+    }
+    Ok(series::expected_bar_instant(
+        seg_start_us,
+        seg_end_us,
+        step_us,
+        now_us,
+        &sessions,
+    ))
 }
 
 /// The exact IST-date ownership cut: kept indices ascending, or `None`

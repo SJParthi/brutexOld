@@ -30,6 +30,43 @@
 
 use crate::scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US};
 
+/// `true` iff an epoch-µs / step integer lies inside the crate's fixed-IST
+/// envelope `[0, MAX_SAFE_TS_US)` — the ONE magnitude law of
+/// `DEC-FFI-MAGNITUDE-CEILING-001`, shared by the `#[pyfunction]` guard and
+/// the abstain arm of [`ownership_cut`].
+///
+/// It is the SAME predicate `ownership_cut` already applies per timestamp
+/// (`(0..MAX_SAFE_TS_US).contains(&t)`), hoisted so the two FFI faces cannot
+/// drift apart: `ownership_cut` can express its refusal in its return type
+/// (`Option` → the caller's loud refusal), while
+/// [`expected_bar_instant`] returns a plain `bool`, so its face raises
+/// `ValueError` instead.
+///
+/// ## Why this bound makes the label arithmetic provably overflow-free
+///
+/// `MAX_SAFE_TS_US` ≈ `2.534e17`, so for envelope-bounded `open_us`,
+/// `seg_start_us` and `step_us`:
+///
+/// * `open_us - seg_start_us` has magnitude `< MAX_SAFE_TS_US` (both
+///   operands are non-negative and bounded);
+/// * `div_euclid(step_us)` cannot hit the sole `i64` division overflow
+///   (`i64::MIN / -1`) — the numerator is bounded and `step_us >= 0`;
+/// * the quotient's magnitude is `<= |open_us - seg_start_us|` (dividing by
+///   `step_us >= 1`), so negating it cannot overflow (`i64::MIN` is
+///   unreachable);
+/// * `quotient * step_us` reconstructs a value of magnitude
+///   `<= |open_us - seg_start_us| < MAX_SAFE_TS_US`;
+/// * the final `open_us + …` is therefore `< 2 · MAX_SAFE_TS_US ≈ 5.1e17`,
+///   an order of magnitude inside `i64::MAX ≈ 9.22e18`.
+///
+/// A `step_us` of `0` is legal (it selects the derived-`1day` arm, which
+/// performs no arithmetic at all — only comparisons).
+#[must_use]
+#[inline]
+pub fn ts_in_envelope(value: i64) -> bool {
+    (0..MAX_SAFE_TS_US).contains(&value)
+}
+
 /// One resolvable NSE session day, as exact epoch-microsecond instants:
 /// `(stamp_us, open_us, close_us)` — `stamp_us` is the derived-`1day`
 /// bar's midnight-IST stamp for the day (consulted only on the 1day arm),
@@ -57,6 +94,20 @@ pub type SessionDay = (i64, i64, i64);
 ///
 /// Sessions are consulted in the caller's (chronological) order and the
 /// first qualifying day wins — matching the deleted walk's early return.
+///
+/// # Magnitude envelope (`DEC-FFI-MAGNITUDE-CEILING-001`)
+///
+/// The intraday label expression below carries FIVE unchecked `i64` ops
+/// (subtract, `div_euclid`, negate, multiply, add) and this crate's
+/// `[profile.release]` sets BOTH `overflow-checks = true` and
+/// `panic = "abort"`, so an overflow here does not unwind into pyo3's
+/// catch-and-convert wrapper — it SIGABRTs the calling interpreter. Callers
+/// MUST therefore pass integers satisfying [`ts_in_envelope`]; the
+/// `#[pyfunction]` face enforces it (`python.rs::expected_bar_instant`) and
+/// the production Python caller satisfies it by construction (every argument
+/// comes from a real `datetime` via `_ts_epoch_us`). Inside the envelope
+/// every one of the five ops is provably overflow-free — see
+/// [`ts_in_envelope`] for the bound arithmetic.
 #[must_use]
 pub fn expected_bar_instant(
     seg_start_us: i64,
