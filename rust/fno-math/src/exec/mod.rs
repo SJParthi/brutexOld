@@ -1,4 +1,4 @@
-//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1979).
+//! Options/futures execution integer cores — DEC-EXEC-RUST-CORE-001 (MIGRATION.md #2212).
 //!
 //! Slice 7 / P8 of the Rust conversion program: everything from the moment
 //! prices are **integer paisa** — the worst-case fill law
@@ -8,9 +8,23 @@
 //! in `brutex.costs.calculator` / `brutex.costs.futures_costs` /
 //! `brutex.options.executor` / `brutex.futures.executor`. The Python bodies
 //! stay the permanent oracles (deletion is a distinct later decision,
-//! DEC-EXEC-PY-BODY-DELETE-001); dispatch is default-OFF behind
-//! `BRUTEX_EXEC_RUST` (the flip is its own later decision,
-//! DEC-EXEC-RUST-FLIP-001).
+//! DEC-EXEC-PY-BODY-DELETE-001); dispatch is default-ON behind
+//! `BRUTEX_EXEC_RUST` — DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215)
+//! flipped it and SUBSUMED the named follow-up DEC-EXEC-RUST-FLIP-001, which
+//! was therefore never separately minted. `BRUTEX_EXEC_RUST=0` is the
+//! explicit kill switch; an unrecognised value fails SAFE to OFF.
+//!
+//! HONEST GOVERNANCE RESIDUAL (Golden Rule #10): #2212's coordinator
+//! land-clearance block named FOUR pre-conditions for that flip DEC —
+//! (a) the futures executor production-wired, (b) DEC-EXEC-RUST-STAGE2-001
+//! decided, (c) DEC-EXEC-COSTS-MUTMUT-001's futures_costs mutmut pair
+//! landed, (d) the UNKNOWN payoff replaced by a measured figure. The #2215
+//! wave flipped every seam wholesale and NEITHER #2215 nor the #2252 prose
+//! reconcile records those four as discharged, so they stand OPEN against
+//! this seam. What protects the engaged path is therefore the shipped
+//! safety envelope, NOT those gates: the 16-call burn-in bit-compare with
+//! ship-the-ORACLE autorevert, the refuse-poison result gates,
+//! degrade-to-oracle on an absent/stale wheel, and the panic belt.
 //!
 //! ## ⚠ TWO money laws live in this repo — do not confuse them
 //!

@@ -2,7 +2,9 @@
 
 Two pins, mirroring ``test_sweep_rust_metrics_off_cost.py``:
 
-1. **OFF-arm zero-cost:** with ``BRUTEX_RANKING_RUST`` OFF (the default),
+1. **OFF-arm zero-cost:** with ``BRUTEX_RANKING_RUST`` OFF — since
+   DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215) the seam default is ON,
+   so OFF is the EXPLICIT ``"0"`` kill switch these tests monkeypatch —
    the ONLY additions on the ``rank_combos`` path are one cached-module
    import, one env-dict probe and one boolean call — pinned nil next to
    the rank itself (measured 2026-07-11 on this container: probe median

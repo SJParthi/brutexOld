@@ -88,7 +88,9 @@ pub mod metrics_fold;
 /// composite term inputs/fold, the DSR z-term, the rank-order index
 /// permutation, batched overfit verdicts, and the correctly-rounded
 /// i64/i64 division fast path. Pure rlib-style cores + thin `#[pyfunction]`
-/// wrappers; default-OFF behind `BRUTEX_RANKING_RUST` on the Python side.
+/// wrappers; default-ON behind `BRUTEX_RANKING_RUST` on the Python side
+/// (DEC-RUST-DEFAULT-ON-WAVE-001, MIGRATION.md #2215 — `=0` is the kill
+/// switch).
 pub mod ranking;
 
 /// DEC-SWEEP-ENUM-RUST-001 (#1738): sweep-enumeration kernel — the RANGED
@@ -98,12 +100,13 @@ pub mod ranking;
 /// (`has_conflict`) + Stage-1B min-hits count over a resident condition-major
 /// transposed-bitplane substrate, unranked via the LEX-RANK combinatorial
 /// number system, emitting kept masks in the exact `itertools.combinations`
-/// lexicographic order the sweep's durable bytes depend on. Default-OFF
-/// behind `BRUTEX_SWEEP_RUST_ENUM` (Python wrapper
+/// lexicographic order the sweep's durable bytes depend on. Default-ON
+/// behind `BRUTEX_SWEEP_RUST_ENUM` (DEC-RUST-DEFAULT-ON-WAVE-001,
+/// MIGRATION.md #2215 — `=0` is the kill switch; Python wrapper
 /// `brutex/engine/rust_enum.py`).
 pub mod enum_kernel;
 
-// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
 /// Options/futures execution integer cores: money-law primitives, the
 /// worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001), both charge stacks,
 /// and the post-I/O materialize verdict tails — exact-integer twins of the
@@ -236,7 +239,7 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ranking::ranking_rank_order, m)?)?;
     m.add_function(wrap_pyfunction!(ranking::ranking_zscores, m)?)?;
     // ── end slice-4 ranking.rs registrations ──
-    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979) ---
+    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
     m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_paisa, m)?)?;
     m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_rupee, m)?)?;
     m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_slippage, m)?)?;
@@ -261,8 +264,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stats::pbo::stats_pbo_cscv, m)?)?;
     m.add_function(wrap_pyfunction!(stats::wfo::stats_wfo_pass_count, m)?)?;
     // DEC-RANK-CVAR-TAIL-GATE-001: the integer-exact CVaR worst-k tail fold
-    // behind the default-OFF `BRUTEX_RANK_CVAR_RUST` seam
-    // (`brutex.ranking.cvar_gate`).
+    // behind the `BRUTEX_RANK_CVAR_RUST` seam (`brutex.ranking.cvar_gate`).
+    // Default-ON since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215);
+    // `=0` is the kill switch (runtime-verified: `cvar_rust_enabled()` is
+    // True with the flag unset).
     m.add_function(wrap_pyfunction!(stats::cvar::stats_cvar_tail_fold, m)?)?;
     // DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark scalar
     // (fenced additive registration; NO crate version bump — the #1942
@@ -272,7 +277,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ---- optcost module (DEC-OPTCOST-TAILS-RUST-001): options-cost tail
     // kernels (regime rates / moneyness / strike-lot-expiry rules).
     // Additive registration only; existing registrations above are
-    // untouched. Consumed by the default-OFF BRUTEX_OPTCOST_TAILS_RUST seam.
+    // untouched. Consumed by the BRUTEX_OPTCOST_TAILS_RUST seam — default-ON
+    // since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215), `=0` is the
+    // kill switch (runtime-verified: `optcost_rust_enabled()` is True with
+    // the flag unset).
     m.add_function(wrap_pyfunction!(optcost::regime::optcost_regime_rate, m)?)?;
     m.add_function(wrap_pyfunction!(optcost::lots::optcost_history_lookup, m)?)?;
     m.add_function(wrap_pyfunction!(

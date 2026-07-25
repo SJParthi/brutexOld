@@ -640,8 +640,9 @@ def _materialize_tail_rust(
 
     ``None`` means "not served": the verbatim Python tail below reproduces
     the exact behaviour (including any raise) from its own natural site —
-    so ANY prep or kernel fallback is behaviour-neutral (default-OFF —
-    MIGRATION.md #1979). The stale gate is UNCONDITIONAL on both arms
+    so ANY prep or kernel fallback is behaviour-neutral (default-ON since
+    DEC-RUST-DEFAULT-ON-WAVE-001 #2215; the slice itself is
+    DEC-EXEC-RUST-CORE-001 #2212). The stale gate is UNCONDITIONAL on both arms
     (DEC-FILL-WORST-CASE-ONLY-001 — the opt-in knob is deleted) and the
     fills anchor on the fill bars' adverse EXTREMES. A served ``trade``
     verdict is re-materialized through the EXISTING frozen
@@ -864,7 +865,8 @@ def materialize_futures_trade(
         return RejectedFuturesTrade(leg=leg, reason=FuturesRejectReason.NO_DATA)
 
     # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
-    # Default-OFF (`BRUTEX_EXEC_RUST`): None unless the kernel serves the
+    # Default-ON (`BRUTEX_EXEC_RUST` — DEC-RUST-DEFAULT-ON-WAVE-001 #2215
+    # flipped it; `=0` is the kill switch): None unless the kernel serves the
     # whole stale/cost/excursion tail; the verbatim Python tail below is the
     # permanent oracle arm.
     rust_served = _materialize_tail_rust(

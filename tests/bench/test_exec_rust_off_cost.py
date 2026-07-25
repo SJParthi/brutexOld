@@ -2,7 +2,9 @@
 
 DEC-EXEC-RUST-CORE-001's hard constraint (mirrors
 ``test_sweep_rust_metrics_off_cost.py``): with ``BRUTEX_EXEC_RUST`` OFF —
-BOTH the default (unset) arm and the explicit ``"0"`` kill switch —
+since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215) the seam default is
+ON, so OFF means an EXPLICIT kill-switch value (``"0"``/``"off"``); the
+unset arm now engages the crate and is no longer an OFF spelling —
 ``compute_trade_cost`` / ``compute_futures_trade_cost`` must be
 byte-identical AND cost-unchanged: the ONLY addition on the OFF path is one
 env-dict probe + one returning-``None`` seam call per dispatch.

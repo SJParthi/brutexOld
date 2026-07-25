@@ -458,7 +458,8 @@ def _materialize_tail_rust(
     """The ``BRUTEX_EXEC_RUST`` tail of :func:`materialize_trade`, or ``None``.
 
     Serves the post-I/O stale/tick/cost tail from the Rust kernel via
-    :mod:`brutex.exec_rust` (default-OFF — MIGRATION.md #1979). ``None``
+    :mod:`brutex.exec_rust` (default-ON since DEC-RUST-DEFAULT-ON-WAVE-001
+    #2215; the slice itself is DEC-EXEC-RUST-CORE-001 #2212). ``None``
     means "not served": the verbatim Python tail below reproduces the exact
     behaviour (including any raise) from its own natural site — so ANY prep
     or kernel fallback is behaviour-neutral. The stale gate is UNCONDITIONAL
@@ -695,7 +696,8 @@ def materialize_trade(
         return RejectedTrade(leg=leg, reason=RejectReason.NO_DATA)
 
     # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
-    # Default-OFF (`BRUTEX_EXEC_RUST`): None unless the kernel serves the
+    # Default-ON (`BRUTEX_EXEC_RUST` — DEC-RUST-DEFAULT-ON-WAVE-001 #2215
+    # flipped it; `=0` is the kill switch): None unless the kernel serves the
     # whole stale/tick/cost tail; the verbatim Python tail below is the
     # permanent oracle arm.
     rust_served = _materialize_tail_rust(

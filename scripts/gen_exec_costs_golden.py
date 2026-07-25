@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the cross-language golden answer-key for the exec integer cores.
 
-DEC-EXEC-RUST-CORE-001 (MIGRATION.md #1979), the ``vocab_golden_vectors``
+DEC-EXEC-RUST-CORE-001 (MIGRATION.md #2212), the ``vocab_golden_vectors``
 discipline: freeze the *current* Python charge-stack / fill / money /
 materialize outputs over a diverse, deterministic case set into ONE
 language-neutral JSON fixture (``tests/golden/fixtures/
@@ -628,10 +628,19 @@ def _futures_materialize_cases() -> list[dict[str, Any]]:
 
 def build_payload() -> dict[str, Any]:
     rng = random.Random(_SEED)  # noqa: S311 — deterministic fixture seed, not crypto
+    # The ``_comment`` carries the STABLE DEC-ID handle only, never a ledger
+    # NUMBER (DEC-LEDGER-RENUMBER-001: entry numbers renumber at every club
+    # fold, DEC-IDs never do). It previously carried one, which drifted twice
+    # — the committed fixture froze `#1963`, this generator later read `#1979`
+    # — so a regeneration would have emitted a `_comment`-only diff that LOOKS
+    # like a golden re-lock but changes no oracle value. The committed fixture
+    # is deliberately NOT regenerated to erase that historical divergence
+    # (frozen-golden law); dropping the number here makes the class impossible
+    # to re-introduce on the next renumber.
     payload: dict[str, Any] = {
         "_comment": (
             "FROZEN cross-language oracle for the exec integer cores "
-            "(DEC-EXEC-RUST-CORE-001, MIGRATION.md #1979). Generated from "
+            "(DEC-EXEC-RUST-CORE-001). Generated from "
             "the Python bodies by scripts/gen_exec_costs_golden.py; "
             f"regeneration refused without {REGEN_ENV}=1. Schema v2 = the "
             "DEC-FILL-WORST-CASE-ONLY-001 (#1825) reconcile: bar-extreme "

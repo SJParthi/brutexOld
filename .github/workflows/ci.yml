@@ -1630,11 +1630,11 @@ jobs:
           else
             echo "(brutex.costs.calculator test file not present yet — gate inactive)"
           fi
-          # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+          # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
           # 19f1 · brutex.exec_rust (200 stmts, 70 branches — re-measured at
           #        the round-2 NIT-polish HEAD after the i64 wire-element
           #        range guard; history: 146/38 round 1 → 198/68 round 2) — the
-          #        BRUTEX_EXEC_RUST default-OFF seam over the fno-math exec
+          #        BRUTEX_EXEC_RUST default-ON seam over the fno-math exec
           #        cores; standalone 100% gate (the rust_metrics precedent).
           if compgen -G "tests/unit/test_exec_rust_seam.py" > /dev/null; then
             pytest --cov=brutex.exec_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_exec_rust_seam.py
@@ -1684,8 +1684,9 @@ jobs:
             echo "(brutex.engine.sweep_apriori test file not present yet — gate inactive)"
           fi
           # 19i1a2 · brutex.engine.rust_enum — the flag-gated Rust sweep-enum
-          # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-OFF behind
-          # BRUTEX_SWEEP_RUST_ENUM; no size figure here on purpose — the
+          # kernel seam (DEC-SWEEP-ENUM-RUST-001 #1738, default-ON behind
+          # BRUTEX_SWEEP_RUST_ENUM since DEC-RUST-DEFAULT-ON-WAVE-001 #2215 —
+          # `=0` is the kill switch; no size figure here on purpose — the
           # gate enforces 100%, counts drift). 100% line+branch from the
           # dedicated unit suite (the
           # byte-identical-leaderboard parity gate lives in
@@ -3295,11 +3296,16 @@ jobs:
             echo "(brutex.engine.resilience_streaks test file not present yet — gate inactive)"
           fi
 
-      # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1963) ---
+      # --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #2212) ---
       - name: Dual-arm exec-rust parity (BRUTEX_EXEC_RUST=1, covering set)
-        # The flag is default-OFF, so every step above exercised the Python
+        # `tests/conftest.py`'s suite-wide `os.environ.setdefault` hermeticity
+        # belt pins BRUTEX_EXEC_RUST="0" for the test process (the flag itself
+        # is default-ON in PRODUCTION since DEC-RUST-DEFAULT-ON-WAVE-001,
+        # MIGRATION.md #2215 — the belt is hermeticity vs the AMBIENT env,
+        # never the tested law), so every step above exercised the Python
         # oracle arm; this step re-runs the BOUNDED exec covering set with
-        # the kernel arm FORCED ON. Engagement is ASSERTED inside the suites
+        # the kernel arm FORCED ON — it is the ONLY forced-ON exec arm in main
+        # CI, so it must never be deleted. Engagement is ASSERTED inside the suites
         # (counting-proxy spies in the seam/gate files + the golden's
         # engaged-assert fixture), so a silently-fallen-back kernel FAILS —
         # the ON arm can never go vacuous (spec §5's dedicated red-gate
@@ -5530,13 +5536,31 @@ jobs:
           set -euo pipefail
           echo "author=$PR_AUTHOR" >> "$GITHUB_OUTPUT"
       - name: Run Z+ PR guard
+        # DEC-DOR-LIVE-BODY-001 idiom (extended to this sibling gate): evaluate
+        # the LIVE PR body at run-time, not the `github.event.pull_request.body`
+        # event snapshot. `on: pull_request:` carries no `types:`, so it defaults
+        # to [opened, synchronize, reopened] — an `edited` body NEVER re-fires
+        # CI, and a `rerun_failed_jobs` replays the ORIGINAL event payload. A
+        # snapshot-bound gate therefore stays red forever on a corrected body.
+        # Fetching live makes the gate STRICTER in both directions: a body that
+        # LOSES a marker after dispatch now goes red on the next run, where the
+        # snapshot would have kept it green. Fall back to the snapshot only if
+        # the live fetch fails (fail-SAFE — the guard still runs and can still
+        # block; it never fail-opens to a silent pass).
         env:
           PR_AUTHOR: ${{ steps.pr-meta.outputs.author }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
-          printf '%s\n' "$PR_BODY" > "$tmp"
+          if live_body=$(gh pr view "$PR_NUMBER" --json body -q .body 2>/dev/null); then
+            printf '%s\n' "$live_body" > "$tmp"
+          else
+            echo "::warning::Z+ guard: live PR-body fetch failed; falling back to the event snapshot" >&2
+            printf '%s\n' "$PR_BODY_FALLBACK" > "$tmp"
+          fi
           bash scripts/ci/zplus-pr-guard.sh "$tmp"
 
   # ─────────────────────────────────────────────────────────────────
@@ -5607,8 +5631,23 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate DEC-IDs cited in PR body against MIGRATION.md
+        # DEC-DOR-LIVE-BODY-001 idiom (extended to this sibling gate): the
+        # CITED-DEC-ID scan reads the LIVE body, not the event snapshot — see
+        # the Z+ guard above for the full rationale (an `edited` body never
+        # re-fires CI and a re-run replays the original payload, so a
+        # snapshot-bound gate can never see a corrected citation). Fail-SAFE
+        # fallback to the snapshot; never fail-open.
+        #
+        # HONEST residual: PR_TITLE stays the event snapshot. The title feeds
+        # only the APPROPRIATENESS heuristic (EXEMPT_TITLE_TYPES), not the
+        # citation-existence scan, and the validator already SKIPS
+        # appropriateness (exit 0) when PR_TITLE is unset — so a stale title
+        # can only mis-classify the softer half of the gate, never the
+        # existence half. Closing it is a separate, smaller change.
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY_FALLBACK: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
           # DEC-TEST-APPARATUS-DEBTS-001(e): the appropriateness heuristic
           # consumes the PR title/author + changed-file list (copied
           # byte-for-byte from bugfix-regression-scan below).
@@ -5618,7 +5657,12 @@ jobs:
         run: |
           set -euo pipefail
           tmp=$(mktemp)
-          printf '%s\n' "$PR_BODY" > "$tmp"
+          if live_body=$(gh pr view "$PR_NUMBER" --json body -q .body 2>/dev/null); then
+            printf '%s\n' "$live_body" > "$tmp"
+          else
+            echo "::warning::DEC-ID validator: live PR-body fetch failed; falling back to the event snapshot" >&2
+            printf '%s\n' "$PR_BODY_FALLBACK" > "$tmp"
+          fi
           # Build list of changed files (newline-separated).
           PR_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" || true)
           export PR_FILES
