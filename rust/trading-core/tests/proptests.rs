@@ -65,14 +65,28 @@ fn arb_prev_day() -> impl Strategy<Value = (i64, i64, i64)> {
 }
 
 /// Proximity tolerances spanning 0 bps (degenerate, only exact hits) … 2 %.
+///
+/// Every family band is drawn INDEPENDENTLY — in particular `gap_mid` and
+/// `swing`, which this generator previously ALIASED to one drawn value. That
+/// aliasing was a real hole in the module docstring's "a mutant in `src/`
+/// diverges from this oracle and dies" promise: with the two bands always
+/// equal, swapping the swing group's band read
+/// (`evaluator.rs` `p.swing_proximity_bps` -> `p.gap_mid_proximity_bps`) is
+/// UNREACHABLE by any property here, and that mutant survived the whole Rust
+/// suite (DEC-TRADING-CORE-SWING-BAND-TEETH-001). Independent draws restore
+/// reachability; `swing_band_is_swing_bps_not_gap_mid_bps` below is the
+/// deterministic killer that does not rely on the generator happening to
+/// sample a discriminating region.
 fn arb_proximity() -> impl Strategy<Value = ProximityParams> {
-    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c, d)| ProximityParams {
-        pivot_proximity_bps: a,
-        pdh_pdl_proximity_bps: b,
-        fib_proximity_bps: c,
-        gap_mid_proximity_bps: d,
-        swing_proximity_bps: d,
-    })
+    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(
+        |(a, b, c, d, e)| ProximityParams {
+            pivot_proximity_bps: a,
+            pdh_pdl_proximity_bps: b,
+            fib_proximity_bps: c,
+            gap_mid_proximity_bps: d,
+            swing_proximity_bps: e,
+        },
+    )
 }
 
 /// One confirmed-swing anchor (bits 72/73, DEC-FIB-TEMPLATE-EXPRESS-001):
@@ -1600,6 +1614,142 @@ fn every_implemented_bit_is_individually_reachable() {
         seen, FULL_MASK,
         "not all implemented bits (incl. VWAP/R5-S5/BOS/CHoCH/CPR/Supertrend/gap-mid/fib-express) were exercised"
     );
+}
+
+/// Deterministic BAND-PROVENANCE pin for the swing group (bits 72-73): the band
+/// is `swing_proximity_bps`, NEVER the sibling `gap_mid_proximity_bps`
+/// (DEC-TRADING-CORE-SWING-BAND-TEETH-001).
+///
+/// This is the killer for a mutant that survived the ENTIRE Rust suite: swap
+/// the swing group's band read in `evaluator.rs` from `p.swing_proximity_bps`
+/// to `p.gap_mid_proximity_bps` and nothing went red, because `arb_proximity`
+/// aliased the two bands to one drawn value (now de-aliased above) and every
+/// deterministic swing case ran at `swing_proximity_bps: 0`, where the two
+/// bands coincide. Python catches it (`tests/unit/test_vocabulary.py`,
+/// `tests/property/test_vocab_express_differential.py`) but ONLY with a built
+/// wheel, so the crate was not self-verifying for its NATIVE consumer
+/// (TickVault, DEC-SHARED-CORE-001).
+///
+/// The snapshot deliberately leaves `gap_mid_paisa: None`, so the gap-mid group
+/// ABSTAINS and its band is provably inert on correct code — any dependence of
+/// bits 72/73 on that band is therefore the mutant, in either direction:
+///   * swing WIDE / gap NARROW -> the bits MUST fire (a mutant reads tol 0);
+///   * swing NARROW / gap WIDE -> the bits MUST stay clear (a mutant fires).
+#[test]
+fn swing_band_is_swing_bps_not_gap_mid_bps() {
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    // close = 1_000_000 paisa: 100 bps -> tolerance 10_000; 0 bps -> 0.
+    // The swing anchors sit 5_000 paisa away — inside the 100 bps band, far
+    // outside the 0 bps band, so the two bands give OPPOSITE verdicts.
+    const CLOSE: i64 = 1_000_000;
+    const OFFSET: i64 = 5_000;
+
+    let eval = |swing_bps: i64, gap_mid_bps: i64| {
+        let prox = ProximityParams {
+            pivot_proximity_bps: 0,
+            pdh_pdl_proximity_bps: 0,
+            fib_proximity_bps: 0,
+            gap_mid_proximity_bps: gap_mid_bps,
+            swing_proximity_bps: swing_bps,
+        };
+        let s = IndicatorSnapshot {
+            tod_seconds: 0,
+            open_paisa: CLOSE,
+            high_paisa: CLOSE,
+            low_paisa: CLOSE,
+            close_paisa: CLOSE,
+            ema20_paisa: None,
+            ema200_paisa: None,
+            vwap_paisa: None,
+            pivots,
+            fib,
+            day_high_paisa: CLOSE,
+            day_low_paisa: CLOSE,
+            open_of_day_paisa: CLOSE,
+            market_structure: MarketStructureSignal::default(),
+            supertrend_x2_paisa: None,
+            gap_mid_paisa: None, // the gap-mid group abstains — its band is inert
+            last_swing_high_paisa: Some(CLOSE + OFFSET),
+            last_swing_low_paisa: Some(CLOSE - OFFSET),
+        };
+        evaluate_atoms(&s, &prox, &no_prior)
+    };
+    let bit = |m: u128, b: u32| (m >> b) & 1;
+
+    // swing band WIDE (100 bps -> tol 10_000 >= 5_000), gap band NARROW.
+    let wide_swing = eval(100, 0);
+    assert_eq!(
+        bit(wide_swing, bits::BIT_NEAR_SWING_HIGH),
+        1,
+        "bit 72 must read swing_proximity_bps (100), not gap_mid_proximity_bps (0)"
+    );
+    assert_eq!(
+        bit(wide_swing, bits::BIT_NEAR_SWING_LOW),
+        1,
+        "bit 73 must read swing_proximity_bps (100), not gap_mid_proximity_bps (0)"
+    );
+
+    // swing band NARROW (0 bps -> tol 0 < 5_000), gap band WIDE.
+    let narrow_swing = eval(0, 100);
+    assert_eq!(
+        bit(narrow_swing, bits::BIT_NEAR_SWING_HIGH),
+        0,
+        "bit 72 must stay clear at swing_proximity_bps 0 even with a wide gap_mid band"
+    );
+    assert_eq!(
+        bit(narrow_swing, bits::BIT_NEAR_SWING_LOW),
+        0,
+        "bit 73 must stay clear at swing_proximity_bps 0 even with a wide gap_mid band"
+    );
+
+    // Exact band EDGE on the swing band itself (the `<=` law, `<` mutant
+    // killer): 50 bps -> tolerance exactly 5_000 == OFFSET ⇒ FIRES; 49 bps ->
+    // tolerance 4_900 < 5_000 ⇒ CLEAR.
+    let at_edge = eval(50, 0);
+    assert_eq!(bit(at_edge, bits::BIT_NEAR_SWING_HIGH), 1);
+    assert_eq!(bit(at_edge, bits::BIT_NEAR_SWING_LOW), 1);
+    let inside_edge = eval(49, 0);
+    assert_eq!(bit(inside_edge, bits::BIT_NEAR_SWING_HIGH), 0);
+    assert_eq!(bit(inside_edge, bits::BIT_NEAR_SWING_LOW), 0);
+}
+
+/// Deterministic EXACT-VALUE pin for the proximity family defaults — all five
+/// bands default to 10 bps (DEC-TRADING-CORE-SWING-BAND-TEETH-001).
+///
+/// Nothing in the crate asserted these VALUES, so perturbing the literal in
+/// `default_swing_proximity_bps()` (`evaluator.rs`) survived Rust AND Python:
+/// every deterministic swing case constructs `ProximityParams` explicitly, and
+/// the cases that DO use `..Default::default()` place their levels where the
+/// band value cannot discriminate. That literal is the serde default for a
+/// pre-`swing` serialized spec AND the `swing_bps` signature default on three
+/// `python.rs` pyfunctions, so a silent drift would re-key nothing yet change
+/// what a legacy spec evaluates to.
+///
+/// The single shared value is the documented family law ("the production
+/// defaults (10 bps per family)"), so this also pins the three hardcoded
+/// literals in `impl Default for ProximityParams` and `DEFAULT_GAP_MID_PROXIMITY_BPS`.
+#[test]
+fn proximity_family_defaults_are_ten_bps() {
+    use trading_core::evaluator::{DEFAULT_GAP_MID_PROXIMITY_BPS, default_swing_proximity_bps};
+
+    assert_eq!(default_swing_proximity_bps(), 10);
+    assert_eq!(DEFAULT_GAP_MID_PROXIMITY_BPS, 10);
+
+    let d = ProximityParams::default();
+    assert_eq!(d.pivot_proximity_bps, 10);
+    assert_eq!(d.pdh_pdl_proximity_bps, 10);
+    assert_eq!(d.fib_proximity_bps, 10);
+    assert_eq!(d.gap_mid_proximity_bps, 10);
+    assert_eq!(d.swing_proximity_bps, 10);
+
+    // `Default` must route through the two named sources, not re-hardcode them.
+    assert_eq!(d.gap_mid_proximity_bps, DEFAULT_GAP_MID_PROXIMITY_BPS);
+    assert_eq!(d.swing_proximity_bps, default_swing_proximity_bps());
 }
 
 /// Deterministic CPR boundary pins: at close == TC the strict above-bit stays
