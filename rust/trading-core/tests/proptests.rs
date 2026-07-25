@@ -78,15 +78,15 @@ fn arb_prev_day() -> impl Strategy<Value = (i64, i64, i64)> {
 /// deterministic killer that does not rely on the generator happening to
 /// sample a discriminating region.
 fn arb_proximity() -> impl Strategy<Value = ProximityParams> {
-    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(
-        |(a, b, c, d, e)| ProximityParams {
+    (0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200, 0i64..=200).prop_map(|(a, b, c, d, e)| {
+        ProximityParams {
             pivot_proximity_bps: a,
             pdh_pdl_proximity_bps: b,
             fib_proximity_bps: c,
             gap_mid_proximity_bps: d,
             swing_proximity_bps: e,
-        },
-    )
+        }
+    })
 }
 
 /// One confirmed-swing anchor (bits 72/73, DEC-FIB-TEMPLATE-EXPRESS-001):
