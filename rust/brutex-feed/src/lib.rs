@@ -46,7 +46,9 @@ pub use lookahead::{
 };
 pub use materialize::{STOP_NONFINITE, STOP_NONPOSITIVE, StrictOutcome, scan_bars_strict};
 pub use scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, ScanOutcome, WarnEvent, scan_bars};
-pub use series::{SessionDay, boundary_monotonic_break, expected_bar_instant, ownership_cut};
+pub use series::{
+    SessionDay, boundary_monotonic_break, expected_bar_instant, ownership_cut, ts_in_envelope,
+};
 
 /// BLAKE3 hex digest of this crate's source (`Cargo.toml` + `src/**/*.rs`),
 /// baked at build time by `build.rs` under the shared FRAMING v1 of
