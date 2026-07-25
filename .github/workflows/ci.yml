@@ -4170,11 +4170,26 @@ jobs:
       # oracle the Python golden test reads). --release runs with overflow-checks.
       - name: cargo test (golden bit-identity vs the Python oracle)
         run: cargo test --release
-      # Verify the optional PyO3 binding (Phase-2 scaffold) still compiles. The
-      # ubuntu runner's python3 satisfies pyo3's abi3 build config (same as the
-      # fno-math job). The wheel itself is NOT built here (that is Phase 2).
-      - name: cargo check --features python (PyO3 binding compiles)
-        run: cargo check --features python
+      # DEC-TRADING-CORE-PYTHON-FEATURE-GATE-001 (MIGRATION.md #2255): RUN the
+      # feature-gated tests, don't merely `cargo check` them. `src/python.rs` is
+      # gated at `src/lib.rs:82-83` (`#[cfg(feature = "python")] mod python;`)
+      # and `spec.rs`'s `mask_hex` module is serde-gated, so the default-feature
+      # `cargo test --release` above compiles a crate those modules are ABSENT
+      # from: measured 228 tests default vs 314 with `python,serde` — 86 tests
+      # that a `cargo check` can never execute. The feature set matches
+      # `.cargo/mutants.toml` EXACTLY so the CI gate and the weekly cargo-mutants
+      # gate can never drift (mutation.yml documents 376 python.rs + 3 mask_hex
+      # mutants as feature-dead without them). Linking is environment-independent:
+      # pyo3's `extension-module` suppresses the libpython link and these tests
+      # call no CPython API, so the test binary carries ZERO undefined `Py*`
+      # symbols (verified with `nm -D --undefined-only`) — no libpython needed on
+      # the runner. HONEST scope note: `python,serde` is a strict SUPERSET of the
+      # retired `cargo check --features python`, so it does not by itself prove
+      # the `python`-ALONE build compiles — that is covered by the Phase-2a
+      # `maturin build` step below, which builds the SHIPPED wheel with exactly
+      # `features = ["python"]` (`pyproject.toml:37`). Nothing is lost.
+      - name: cargo test --features python,serde (feature-gated modules)
+        run: cargo test --release --features python,serde
       # DEC-SHARED-CORE-001 Phase 2a: prove the Python-callable PyO3 binding
       # (trading_core.evaluate_from_raw) is bit-identical to the Python vocab —
       # build the abi3 wheel with maturin, install it, and run the 400-case
