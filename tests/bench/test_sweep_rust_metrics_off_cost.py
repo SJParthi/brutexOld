@@ -20,7 +20,9 @@ kernel machinery — is a unit test with a bombed seam in
    work ± one env read). The statistic is the median of the per-pair ratios
    over interleaved samples, never two independently estimated medians —
    see the ESTIMATOR paragraph on the test itself
-   (DEC-BENCH-SLOPE-BOUND-001, MIGRATION.md #2250).
+   (DEC-BENCH-SLOPE-BOUND-002, MIGRATION.md #2251 — the estimator fix
+   DEC-BENCH-SLOPE-BOUND-001 #2250 introduced, applied to this third
+   sibling its residual list did not name).
 """
 
 from __future__ import annotations
@@ -107,7 +109,7 @@ class TestOffModeIsFree:
         so the ceiling stays 1.5× — widening it to absorb noise would be
         weakening real teeth (Golden Rule #10).
 
-        ESTIMATOR (DEC-BENCH-SLOPE-BOUND-001, MIGRATION.md #2250): the
+        ESTIMATOR (DEC-BENCH-SLOPE-BOUND-002, MIGRATION.md #2251): the
         statistic is the median of the PER-PAIR ratios over interleaved
         samples, never two independently estimated medians. Independent
         medians can draw from different iterations, so a scheduler stall or
@@ -146,7 +148,13 @@ class TestOffModeIsFree:
             seam_samples.append(seam_i)
             pair_ratios.append(seam_i / direct_i)
         # Identical big work ± one env probe; 1.5× absorbs shared-CI timer
-        # noise while still catching any accidental extra per-bar pass. The
+        # noise. HONEST SENSITIVITY (measured, not asserted — an injected
+        # extra per-bar integer pass over 100% of bars reads 1.302× and over
+        # 50% reads 1.155×, i.e. BOTH pass): this gate catches a pass costing
+        # roughly >=50% of the equity+metrics tail, NOT any accidental extra
+        # per-bar pass. The earlier wording claimed the latter and was
+        # measurably optimistic. The deterministic teeth for a small extra
+        # pass are the seam's own parity/golden suites, not this bench. The
         # statistic is the PER-PAIR median (see the ESTIMATOR paragraph) — a
         # stall inside one arm's window is cancelled by its own paired
         # neighbour, never by an unrelated iteration's sample.

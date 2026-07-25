@@ -13,7 +13,8 @@ Two kinds of teeth (the house #1533/#1614 shape):
   The V3 classification honestly pays an O(stores) stat-level glob; the
   bound is what keeps that term honest. A ratio was the previous shape and
   was near-vacuous once the rows were equalised — see
-  DEC-BENCH-SLOPE-BOUND-001 (MIGRATION.md #2250) and the test's own
+  DEC-BENCH-SLOPE-BOUND-002 (MIGRATION.md #2251, closing a residual
+  DEC-BENCH-SLOPE-BOUND-001 #2250 registered) and the test's own
   docstring for the measured two-shape separation.
 
 Honest envelope (Golden Rule #10): the serve is O(K-union) + an O(stores)
@@ -46,7 +47,7 @@ from brutex.engine.results_rollup import (
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
 
-# --- flatness fixture (DEC-BENCH-SLOPE-BOUND-001) -------------------------
+# --- flatness fixture (DEC-BENCH-SLOPE-BOUND-002 #2251) -------------------------
 # The two arms differ ONLY in store count: the row product is held equal
 # (``_SMALL_STORES * _LARGE_STORES`` either way), so the K-union — and with
 # it the Parquet-load + rank + project term — is byte-for-byte the same size
@@ -55,11 +56,15 @@ _SMALL_STORES = 10
 _LARGE_STORES = 100
 _FIXTURE_ROWS = _SMALL_STORES * _LARGE_STORES
 # The absolute marginal bound. MEASURED, never proposed — see the
-# ``test_served_poll_flat_vs_store_count`` docstring for the two-shape table
-# (healthy max 86.7 µs/store vs regressed legacy-scan min 1439.9 µs/store,
-# ~18× apart). 600 µs sits 6.9× above healthy-max and 2.4× below
-# regressed-min. Widening it to make a run green is forbidden
-# (Golden Rule #10) — a breach means the O(stores) term genuinely grew.
+# ``test_served_poll_flat_vs_store_count`` docstring for the two-shape table.
+# Three sandboxes were measured and the PESSIMISTIC one is the figure to
+# carry (Golden Rule #10 — min-over-N is not a distribution bound, so the
+# headroom is quoted from the WORST observed arm, not the best):
+# healthy-max 86.7 / 105.5 µs-per-store and regressed-min 1439.9 / 1304.3 /
+# 1197.5 µs-per-store across the three. 600 µs therefore sits at worst
+# 5.69× ABOVE healthy-max and 2.00× BELOW regressed-min, separation ~11×
+# at worst / ~21× at best, with NO overlap in any sandbox. Widening it to
+# make a run green is forbidden — a breach means the O(stores) term grew.
 _MAX_SLOPE_S_PER_STORE = 600e-6
 
 
@@ -185,7 +190,7 @@ class TestRollupServeFlatness:
         marginal per-store bound — the O(stores) stat-glob is the only
         store-count term left on the serve path.
 
-        FIXTURE (DEC-BENCH-SLOPE-BOUND-001): the two arms are ROW-EQUAL by
+        FIXTURE (DEC-BENCH-SLOPE-BOUND-002 #2251): the two arms are ROW-EQUAL by
         construction — ``_SMALL_STORES * _LARGE_STORES`` rows either way, so
         both build exactly ``_FIXTURE_ROWS`` rows and both K-unions are the
         same size. The prior fixture was 10×10 vs 100×10, i.e. 100 rows vs
@@ -206,31 +211,74 @@ class TestRollupServeFlatness:
         MEASURED 2026-07-25 (sandbox; ``scratchpad/measure_rollup_slope.py``
         + ``measure_legacy_slope.py``, best-of-5 per arm):
 
-        =========================  ==================  =======
-        shape                      slope (µs/store)    trials
-        =========================  ==================  =======
-        healthy (rollup-served)    median 66.8, max 86.7    16
-        regressed (legacy scan)    median 1592.8, min 1439.9  5
-        =========================  ==================  =======
+        =========================  =========================  =======
+        shape                      slope (µs/store)           trials
+        =========================  =========================  =======
+        healthy (rollup-served)    median 66.8, max 86.7          16
+        healthy (re-measure A)     median 63.2, max 105.5          5
+        healthy (re-measure B)     median 61.2, max 75.9           8
+        healthy (re-verify C)      median 65.6, max 93.5          10
+        regressed (legacy scan)    median 1592.8, min 1439.9       5
+        regressed (re-measure A)   median 1330.3, min 1197.5       5
+        regressed (re-measure B)   median 1498.0, min 1304.3       6
+        regressed (re-verify C)    median 1455.9, min 1335.5       5
+        =========================  =========================  =======
 
-        ~18× separation, so the bound below is genuine teeth, not decoration:
-        it sits 6.9× ABOVE the healthy max (headroom for a slower / contended
-        shared runner) and 2.4× BELOW the regressed min (the exact O(stores)
-        file-load shape ``test_legacy_scan_is_the_o_stores_shape`` pins still
-        fails it). HONEST LIMIT (Golden Rule #10): this is still a wall-clock
-        gate on a shared runner — it detects an O(stores) term that GROWS,
-        never a constant-factor regression in F. The deterministic op-count
-        pins in :class:`TestRollupServeOpCounts` (one Parquet load, zero
-        audit bytes, independent of store count) remain the PRIMARY teeth and
-        are untouched.
+        FOUR sandboxes, all reported because they DISAGREE and the honest
+        bound is the weakest one (Golden Rule #10): separation runs ~11×
+        (worst) to ~21× (best) with NO overlap anywhere, and 600 µs/store
+        sits at worst **5.69× ABOVE healthy-max** (re-measure A) and **2.00×
+        BELOW regressed-min** (re-measure A). Quote those, not the authoring
+        container's 6.9× / 2.4× — a min-over-N is a sample, not a
+        distribution bound. Sandbox C is the one REPRODUCIBLE on demand from
+        the harnesses named above and reads 6.42× / 2.23×, i.e. it lands
+        BETWEEN A and the authoring run and contradicts neither. The
+        regressed shape is the exact O(stores) file-load path
+        ``test_legacy_scan_is_the_o_stores_shape`` pins, and it breaches the
+        bound on every trial of every sandbox.
+
+        WHY THIS REPLACED A RATIO, measured rather than argued: applying the
+        OLD ratio gate to the OLD fixture reads, POOLED ACROSS EVERY RECORDED
+        RUN, healthy 6.36-6.97× against regressed 6.37-11.20× — the ranges
+        **OVERLAP**, so the ratio could not reliably separate the two shapes
+        ACROSS runs, while healthy sat at ~84% of its own 8.0 ceiling
+        (flake-tight in the other direction). Stated precisely, because it
+        matters: within any ONE run the two shapes may well separate (the
+        sandbox-C run reads healthy 6.36-6.76× vs regressed 9.80-10.10×,
+        which does not overlap) — but a CI gate has to hold ACROSS runs on
+        unlike runners, and pooled across runs it does not. The slope is
+        strictly STRONGER, not merely tidier.
+
+        ESTIMATOR CAVEAT (stated because this file is otherwise scrupulous
+        about estimator choice): ``_best_of`` takes the MINIMUM per arm, so
+        ``min(large) - min(small)`` systematically UNDER-states the marginal
+        cost versus a median-based slope — i.e. it biases toward PASSING.
+        That is deliberate here (the min is the least contended sample, which
+        is what a per-store cost should be read from on a shared runner) and
+        harmless at the measured 5.69× worst-case headroom, but it means this
+        gate is tuned to catch a term that GROWS, never one that merely
+        wobbles. HONEST LIMIT (Golden Rule #10): still a wall-clock gate — it
+        detects an O(stores) term that grows, never a constant-factor
+        regression in F. The deterministic op-count pins in
+        :class:`TestRollupServeOpCounts` (one Parquet load, zero audit bytes,
+        independent of store count) remain the PRIMARY teeth and are
+        untouched.
         """
         # Drift pin: the fixture is sized to sit exactly AT the union cap, so
         # both arms measure the heaviest legal load. A ``ROLLUP_K`` bump must
         # move the fixture with it or this arm silently becomes under-cap.
-        assert _FIXTURE_ROWS == ROLLUP_K, (
-            f"fixture rows ({_FIXTURE_ROWS}) no longer sit at the union cap "
+        assert _FIXTURE_ROWS >= ROLLUP_K, (
+            f"fixture rows ({_FIXTURE_ROWS}) fell BELOW the union cap "
             f"ROLLUP_K={ROLLUP_K} — resize _SMALL_STORES/_LARGE_STORES so their "
-            f"product tracks it (their product is also the row count PER ARM)"
+            f"product stays at or above it (their product is also the row count "
+            f"PER ARM). Below the cap the K-union stops being the heaviest legal "
+            f"load and the fixed term F the slope is measured against shrinks."
+        )
+        # The slope divides by this span, so a fixture resize that collapsed it
+        # would be a ZeroDivisionError rather than a readable refusal.
+        assert _LARGE_STORES > _SMALL_STORES, (
+            f"store-count arms collapsed ({_SMALL_STORES} vs {_LARGE_STORES}) — "
+            f"the marginal slope needs a positive span to divide by"
         )
         small = tmp_path / "small"
         large = tmp_path / "large"
@@ -252,5 +300,6 @@ class TestRollupServeFlatness:
             f"{t_small * 1e3:.2f} ms @{_SMALL_STORES} stores → {t_large * 1e3:.2f} ms "
             f"@{_LARGE_STORES} stores over an identical {_FIXTURE_ROWS}-row union "
             f"= {slope * 1e6:.1f} µs/store (bound {_MAX_SLOPE_S_PER_STORE * 1e6:.0f} µs/store; "
-            f"measured healthy max 86.7, regressed legacy scan min 1439.9)"
+            f"measured healthy max 86.7-105.5 across sandboxes, regressed legacy "
+            f"scan min 1197.5-1439.9 — see the docstring's three-sandbox table)"
         )

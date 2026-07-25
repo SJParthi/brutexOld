@@ -14,6 +14,18 @@
 //! was therefore never separately minted. `BRUTEX_EXEC_RUST=0` is the
 //! explicit kill switch; an unrecognised value fails SAFE to OFF.
 //!
+//! HONEST GOVERNANCE RESIDUAL (Golden Rule #10): #2212's coordinator
+//! land-clearance block named FOUR pre-conditions for that flip DEC —
+//! (a) the futures executor production-wired, (b) DEC-EXEC-RUST-STAGE2-001
+//! decided, (c) DEC-EXEC-COSTS-MUTMUT-001's futures_costs mutmut pair
+//! landed, (d) the UNKNOWN payoff replaced by a measured figure. The #2215
+//! wave flipped every seam wholesale and NEITHER #2215 nor the #2252 prose
+//! reconcile records those four as discharged, so they stand OPEN against
+//! this seam. What protects the engaged path is therefore the shipped
+//! safety envelope, NOT those gates: the 16-call burn-in bit-compare with
+//! ship-the-ORACLE autorevert, the refuse-poison result gates,
+//! degrade-to-oracle on an absent/stale wheel, and the panic belt.
+//!
 //! ## ⚠ TWO money laws live in this repo — do not confuse them
 //!
 //! * **`exec::money` (THIS tree): ADVERSE CEILING** on exact integers — the

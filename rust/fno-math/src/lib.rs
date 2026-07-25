@@ -264,8 +264,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stats::pbo::stats_pbo_cscv, m)?)?;
     m.add_function(wrap_pyfunction!(stats::wfo::stats_wfo_pass_count, m)?)?;
     // DEC-RANK-CVAR-TAIL-GATE-001: the integer-exact CVaR worst-k tail fold
-    // behind the default-OFF `BRUTEX_RANK_CVAR_RUST` seam
-    // (`brutex.ranking.cvar_gate`).
+    // behind the `BRUTEX_RANK_CVAR_RUST` seam (`brutex.ranking.cvar_gate`).
+    // Default-ON since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215);
+    // `=0` is the kill switch (runtime-verified: `cvar_rust_enabled()` is
+    // True with the flag unset).
     m.add_function(wrap_pyfunction!(stats::cvar::stats_cvar_tail_fold, m)?)?;
     // DEC-ALPHA-BUYHOLD-METRIC-001 — the ALPHA-vs-BUY&HOLD benchmark scalar
     // (fenced additive registration; NO crate version bump — the #1942
@@ -275,7 +277,10 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ---- optcost module (DEC-OPTCOST-TAILS-RUST-001): options-cost tail
     // kernels (regime rates / moneyness / strike-lot-expiry rules).
     // Additive registration only; existing registrations above are
-    // untouched. Consumed by the default-OFF BRUTEX_OPTCOST_TAILS_RUST seam.
+    // untouched. Consumed by the BRUTEX_OPTCOST_TAILS_RUST seam — default-ON
+    // since DEC-RUST-DEFAULT-ON-WAVE-001 (MIGRATION.md #2215), `=0` is the
+    // kill switch (runtime-verified: `optcost_rust_enabled()` is True with
+    // the flag unset).
     m.add_function(wrap_pyfunction!(optcost::regime::optcost_regime_rate, m)?)?;
     m.add_function(wrap_pyfunction!(optcost::lots::optcost_history_lookup, m)?)?;
     m.add_function(wrap_pyfunction!(

@@ -205,8 +205,10 @@ class TestSegmentAbMeasured:
         """MEASURED A/B of the enum+prune segment at k=3 (34,220 masks).
 
         REPORTED per Golden Rule #10, deliberately NOT ratio-gated on shared
-        CI (default-OFF slice; the deterministic ON-arm proof is the
-        iteration spy above). The only assertions are sanity: both arms
+        CI — the same reason bullet 4 of the module header gives: the #2215
+        flip carried NO measured speedup claim, so a speedup GATE here would
+        gate a number nobody has committed to. The deterministic ON-arm proof
+        is the iteration spy above. The only assertions are sanity: both arms
         produce the identical survivor list.
         """
         bits = _LARGE_BITS
