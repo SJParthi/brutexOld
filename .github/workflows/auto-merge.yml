@@ -112,7 +112,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout the BASE repo's trusted tree (for pre-merge-check.sh)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DEC-CI-FORK-PR-HARDEN-001: the rollup-gate step below executes
           # scripts/ci/pre-merge-check.sh. Pin the checkout to the base
