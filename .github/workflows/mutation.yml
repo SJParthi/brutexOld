@@ -209,7 +209,7 @@ jobs:
       # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention, cf.
       # doctor-daily.yml): never persist the job token into .git/config while
       # later steps execute a broad third-party build surface.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Set up Python
@@ -948,7 +948,7 @@ jobs:
       # persist-credentials: false (DEC-CI-FORK-PR-HARDEN-001 convention): this
       # job inherits the read-only workflow token AND never needs git auth after
       # checkout, while cargo-mutants executes hundreds of third-party builds.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -975,7 +975,7 @@ jobs:
         # An unpinned `latest` could silently flip those mutants to MISSED and
         # red the gate with a mislabelled cause; version bumps are DELIBERATE
         # (mirrors the pinned RUST_VERSION above).
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/8)
@@ -1139,7 +1139,7 @@ jobs:
         working-directory: rust/trading-core
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -1157,7 +1157,7 @@ jobs:
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin (the 229-UNVIABLE python.rs
         # PyResult-alias measurement + shard budgets are 27.1.0-specific).
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
@@ -1234,7 +1234,7 @@ jobs:
         working-directory: rust/brutex-feed
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -1250,7 +1250,7 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin.
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (scan.rs decision core, in-place)
@@ -1295,7 +1295,7 @@ jobs:
         working-directory: rust/brutex-pull-state
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -1311,7 +1311,7 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin.
-        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (the 12 pull-state decision kernels, in-place)
@@ -1364,7 +1364,7 @@ jobs:
         working-directory: rust/brutex-strategies
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -1380,7 +1380,7 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin.
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (canon.rs + scan_sep.rs pure cores, in-place)
@@ -1434,7 +1434,7 @@ jobs:
         working-directory: rust/brutex-refine
     steps:
       # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -1450,7 +1450,7 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin.
-        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (the six pure Stage-3 cores, in-place)
