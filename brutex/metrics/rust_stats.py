@@ -354,6 +354,17 @@ _STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
         "custom_evaluator",
         "combination_cap",
         "flag_engine_unavailable",
+        # CLASS C, and the only one screened rather than caught: at
+        # astronomical ``n_trials`` the ``sr_max`` oracle's own AS241
+        # arguments round to exactly 1.0, outside the standard-Normal
+        # quantile's open domain. BOTH engines refuse such an input — the
+        # crate with a ``ValueError``, the oracle with the
+        # ``StatisticsError`` that IS ``expected_max_sharpe_ratio``'s
+        # documented behaviour there. Refusing it would convert a
+        # legitimate, documented ``StatisticsError`` into a
+        # ``RustFallbackRefused`` on the sweep's own DSR path, where
+        # ``n_trials`` is the search-family size.
+        "quantile_domain_refused",
     }
 )
 
@@ -1110,6 +1121,33 @@ def psr_via_kernel(
     return result
 
 
+def _as241_arguments_in_domain(n_trials: int) -> bool:
+    """Whether ``sr_max``'s two AS241 quantile arguments stay in ``(0, 1)``.
+
+    Reproduces the oracle's own two arguments — ``1 - 1/N`` and
+    ``1 - 1/(N·e)`` — in the identical f64 arithmetic, so the verdict is
+    exact rather than a heuristic. At astronomical ``N`` the tail argument
+    saturates to exactly 1.0 first (``N·e > N`` makes its epsilon the
+    smaller one), which is outside the standard-Normal quantile's open
+    domain: the crate raises ``ValueError`` and the oracle raises
+    ``StatisticsError``.
+
+    Screening BEFORE the FFI call — rather than catching the crate's
+    ``ValueError`` afterwards — is what keeps the two apart. Caught, the
+    domain refusal is indistinguishable from a genuine crate fault and
+    shares its CLASS A ``kernel_error`` token, so strict mode converts a
+    documented ``StatisticsError`` into a ``RustFallbackRefused``. Screened,
+    it carries its own exempt CLASS C token and the oracle raises exactly
+    what it always raised — ON ≡ OFF.
+
+    Cannot itself raise: the caller screens only an ``_count_as_i64``-bounded
+    value, so neither ``1.0 / n_trials`` nor ``n_trials * math.e`` can
+    overflow the float conversion (an ``n_trials`` beyond i64 has already
+    been routed to the oracle by that earlier check).
+    """
+    return 0.0 < 1.0 - 1.0 / (n_trials * math.e) < 1.0 and 0.0 < 1.0 - 1.0 / n_trials < 1.0
+
+
 def expected_max_sharpe_via_kernel(
     n_trials: int,
     trial_sharpe_variance: float,
@@ -1136,6 +1174,10 @@ def expected_max_sharpe_via_kernel(
         return None
     trials_i = _count_as_i64(fn, n_trials, arg="n_trials", minimum=2)
     if trials_i is None:
+        return None
+    if not _as241_arguments_in_domain(trials_i):
+        # CLASS C — screened, not caught. See ``_as241_arguments_in_domain``.
+        warn_fallback_once(fn, "quantile_domain_refused", n_trials=_safe_context(trials_i))
         return None
     variance_f = _numeric_as_f64(fn, trial_sharpe_variance, arg="trial_sharpe_variance")
     if variance_f is None:

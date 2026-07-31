@@ -40,6 +40,7 @@ from brutex.metrics.cpcv import (
     cpcv_pass_rate,
 )
 from brutex.metrics.rust_stats import (
+    _STRICT_EXEMPT_REASONS,  # pyright: ignore[reportPrivateUsage]
     SELF_CHECK_SAMPLES,
     STATS_RUST_DEFAULT,
     STATS_RUST_ENV,
@@ -2116,15 +2117,49 @@ def test_sr_max_gate_refusals(kwargs: dict[str, object], reason: str) -> None:
     assert reasons == [reason]
 
 
-def test_sr_max_astronomical_n_trials_kernel_error_refuses_to_oracle() -> None:
-    """The AS241 raise domain (1 - 1/N rounds to 1.0): the kernel raises
-    ValueError → warn-once → None, so the caller's oracle raises the
-    identical StatisticsError — exception parity by construction."""
+def test_sr_max_astronomical_n_trials_is_screened_before_the_ffi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The AS241 raise domain (``1 - 1/(N·e)`` rounds to 1.0) is CLASS C.
+
+    Both engines refuse such an ``n_trials`` — the crate with a
+    ``ValueError``, the oracle with the ``StatisticsError`` that IS
+    :func:`expected_max_sharpe_ratio`'s documented behaviour there. The
+    seam therefore screens the domain in PYTHON, before the FFI call, and
+    emits the strict-EXEMPT ``quantile_domain_refused`` token.
+
+    Catching the crate's ``ValueError`` instead — the shape this replaces —
+    tokenised the refusal ``kernel_error``, a CLASS A reason, so
+    ``BRUTEX_RUST_STRICT`` (default ON) converted a legitimate documented
+    ``StatisticsError`` into a ``RustFallbackRefused`` on the sweep's own
+    DSR path, where ``n_trials`` is the search-family size.
+
+    Pinned here: the token, AND that the kernel is genuinely never entered
+    (a bomb over the binding must not fire — screened, not caught).
+    """
+
+    def _bomb(*_args: object) -> float:
+        raise AssertionError("the domain screen must run BEFORE the FFI call")
+
+    monkeypatch.setattr(fno_math, "stats_expected_max_sharpe", _bomb)
     with capture_logs() as logs:
         got = _call_sr_max(n_trials=2**62)
     assert got is None
     events = [e for e in logs if e["event"] == "rust_stats.fallback"]
-    assert [e["reason"] for e in events] == ["kernel_error"]
+    assert [e["reason"] for e in events] == ["quantile_domain_refused"]
+    assert "quantile_domain_refused" in _STRICT_EXEMPT_REASONS, (
+        "a CLASS C reason must be strict-exempt or the sweep's DSR path raises"
+    )
+
+
+def test_sr_max_in_domain_n_trials_still_reaches_the_kernel() -> None:
+    """Anti-vacuity for the screen above: an ordinary ``n_trials`` is NOT
+    screened, so the kernel still serves it (the screen is a domain gate,
+    never a blanket opt-out)."""
+    with capture_logs() as logs:
+        got = _call_sr_max(n_trials=5000)
+    assert got is not None
+    assert [e["reason"] for e in logs if e["event"] == "rust_stats.fallback"] == []
 
 
 def test_sr_max_wheel_stale_and_poisoned_result(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -366,6 +366,10 @@ def test_deflated_sharpe_result_uses_slots() -> None:
 import struct  # noqa: E402  (appended PR-2 section)
 
 import fno_math  # noqa: E402
+from brutex.config.rust_strict import (  # noqa: E402
+    RUST_STRICT_ENV,
+    RustFallbackRefused,
+)
 from brutex.metrics import rust_stats  # noqa: E402
 from brutex.metrics.deflated_sharpe import (  # noqa: E402
     _expected_max_tail,  # pyright: ignore[reportPrivateUsage]
@@ -380,6 +384,28 @@ def _fresh_stats_seam() -> None:
     rust_stats-documented test-isolation seams)."""
     rust_stats.reset_self_check_for_tests()
     rust_stats.reset_observability_memo_for_tests()
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract to the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    where a Class-A (crate absent/stale/errored) or Class-B (crate answered
+    but the RESULT is structurally refused — a LATCHED kernel is exactly that
+    class) fall-back RAISES :class:`RustFallbackRefused` at the seam's choke
+    point instead of serving the retained Python tail.  The degrade machinery
+    is not deleted — it stays reachable through the documented
+    ``BRUTEX_RUST_STRICT=0`` kill switch, and THAT is the mode the test
+    requesting this fixture describes.  The strict-ON refusal for the SAME
+    induced latch is pinned positively by
+    :class:`TestStrictModeRefusesTheFallback`, so no coverage is traded away.
+
+    Uses the SHARED ``monkeypatch`` (never a module-scoped
+    ``MonkeyPatch.context()``) so set/unset ordering with the sibling
+    ``STATS_RUST_ENV`` pins in this file stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _bits(value: float) -> bytes:
@@ -426,6 +452,7 @@ def test_flag_on_dsr_full_chain_bit_equal(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_flag_on_latched_kernel_falls_through_to_the_tails(
     monkeypatch: pytest.MonkeyPatch,
+    strict_off: None,
 ) -> None:
     """A latched kernel returns None from the binding — the retained tails
     serve, bit-identical (the fallthrough dispatch arm)."""
@@ -438,6 +465,48 @@ def test_flag_on_latched_kernel_falls_through_to_the_tails(
     )
     sr0 = expected_max_sharpe_ratio(5000, 0.02)
     assert _bits(sr0) == _bits(_expected_max_tail(5000, 0.02))
+
+
+class TestStrictModeRefusesTheFallback:
+    """The no-fallback guarantee, pinned POSITIVELY on this facade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001.  Each test induces the SAME latch its
+    ``strict_off`` twin above induces, but leaves ``BRUTEX_RUST_STRICT`` at
+    its shipped default (ON) and asserts the seam RAISES rather than quietly
+    serving the retained Python tail.  Without these the ``strict_off`` pin
+    would be a coverage trade, not a relocation.
+    """
+
+    def test_disable_kernel_itself_refuses_before_writing_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Refusal fires BEFORE the latch write, so the latch is never armed.
+
+        This is why the fallthrough dispatch arm is structurally unreachable
+        under strict-ON: the process can never get INTO the latched state.
+        """
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+        with pytest.raises(RustFallbackRefused, match="self_check_mismatch"):
+            rust_stats.disable_kernel("psr", "self_check_mismatch")
+        # ...and because the raise preceded the write, the kernel still serves.
+        with capture_logs() as logs:
+            on = probabilistic_sharpe_ratio(0.15, 0.05, 250, -0.6, 5.5)
+        assert any(e["event"] == "rust_stats.engaged" and e["fn"] == "psr" for e in logs), (
+            "a refused disable_kernel must not have latched the kernel off"
+        )
+        monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
+        assert _bits(on) == _bits(probabilistic_sharpe_ratio(0.15, 0.05, 250, -0.6, 5.5))
+
+    def test_the_refusal_names_the_facade_and_the_kill_switch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            rust_stats.disable_kernel("sr_max", "self_check_mismatch")
+        text = str(excinfo.value)
+        assert "brutex.metrics.rust_stats" in text
+        assert f"{RUST_STRICT_ENV}=0" in text
 
 
 def test_flag_on_astronomical_n_trials_raises_identically(
