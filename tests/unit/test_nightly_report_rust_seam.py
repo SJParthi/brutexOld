@@ -277,28 +277,50 @@ class TestStrictRefusesTheSameArms:
             summary_lines(_FULL_OK)
         self._assert_names_facade_and_switch(excinfo)
 
-    def test_crate_fault_still_degrades_because_the_token_is_held(
+    def test_crate_fault_refuses_now_that_the_token_is_split(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``summary_lines_error`` is one of the six HELD-UNRESOLVED tokens.
+        """``summary_lines_error`` REFUSES — it is now the fault-only remainder.
 
-        It is *not* classified Class C (a legitimate Python-owned input) — it
-        is held out of the refusal set because the crate lumps a genuine
-        crate fault together with an out-of-envelope argument under one
-        token, so refusing it would crash on inputs Python was always meant
-        to serve. Splitting it crate-side is the named follow-up. Until then
-        this arm degrades even under strict, and that is pinned here so the
-        hold is visible rather than assumed.
+        This token used to be HELD UNRESOLVED because one ``ValueError``
+        class carried both a genuine crate fault and the core's
+        out-of-envelope duration refusal. The crate now stamps the latter
+        (``INPUT_REFUSED_MARKER``), so this UNMARKED ``TypeError`` — a
+        stale-wheel argument-type fault — is unambiguously CLASS A and
+        strict mode refuses it. The marked sibling below proves the other
+        half still degrades.
         """
 
         def _boom(*args: object) -> tuple[list[str], str]:
             raise TypeError("junk count value")
 
         _flag_on(monkeypatch, build_fake_crate(nightly_summary_lines=_boom))
+        with pytest.raises(RustFallbackRefused, match="summary_lines_error") as excinfo:
+            summary_lines(_FULL_OK)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_marked_input_refusal_still_degrades_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLASS C: the core's own out-of-envelope duration refusal.
+
+        ``summary_lines_impl`` Errs only when the elapsed duration is
+        non-finite or ``>= MAX_EXACT_DURATION`` (2**53) — an input the f64
+        mirror cannot represent exactly and the Python oracle has always
+        served. The FFI face marks it, so strict mode keeps degrading.
+        """
+
+        def _refuse(*args: object) -> tuple[list[str], str]:
+            raise ValueError(
+                "input outside the crate envelope: duration inf outside the "
+                "faithful mirror domain — python oracle decides"
+            )
+
+        _flag_on(monkeypatch, build_fake_crate(nightly_summary_lines=_refuse))
         with capture_logs() as logs:
             assert summary_lines(_FULL_OK) == _summary_lines_python(_FULL_OK)
         warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
-        assert warns and warns[0]["reason"] == "summary_lines_error"
+        assert warns and warns[0]["reason"] == "summary_lines_input_refused"
 
     def test_wrong_lines_refuse_at_the_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(

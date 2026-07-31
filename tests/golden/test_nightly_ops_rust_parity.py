@@ -226,3 +226,60 @@ class TestScheduleParityRealCrate:
                 assert seconds_since_scheduled_fire(
                     hour=1, minute=30, now_local=now
                 ) == _seconds_since_scheduled_fire_python(hour=1, minute=30, now_local=now)
+
+
+class TestInputRefusedMarkerRealCrate:
+    """The CLASS-C marker contract, proven against the COMPILED crate.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. The wheel-free seam suites drive this
+    split through ``tests/fakes/fake_brutex_ops.py``; these pins prove the
+    REAL crate mints exactly the same evidence, so the facade's
+    ``_degrade_reason`` classification is not a fiction of the fake:
+
+    * every core whose ``Err`` is provably input-only STAMPS
+      :data:`~brutex.nightly.nightly_rust._INPUT_REFUSED_MARKER`;
+    * every core whose ``Err`` is a facade-contract FAULT leaves it OFF, so
+      strict mode refuses it.
+    """
+
+    def test_marked_cores_stamp_the_marker(self) -> None:
+        marker = nightly_rust._INPUT_REFUSED_MARKER
+        cases: list[tuple[str, object]] = [
+            (
+                "nightly_summary_lines",
+                lambda: brutex_ops.nightly_summary_lines(
+                    "id", 0.0, float("inf"), [("collision", "ok", None)], [], [], [], False, False
+                ),
+            ),
+            ("nightly_parse_at", lambda: brutex_ops.nightly_parse_at("0٣:05")),
+            (
+                "nightly_pmset_wake_command",
+                lambda: brutex_ops.nightly_pmset_wake_command(2**70, 0, 0),
+            ),
+            (
+                "nightly_seconds_since_fire",
+                lambda: brutex_ops.nightly_seconds_since_fire(24, 0, 1, 0, 0, 0),
+            ),
+        ]
+        for name, call in cases:
+            with pytest.raises(ValueError) as excinfo:
+                call()  # type: ignore[operator]
+            assert marker in str(excinfo.value), f"{name} refusal is UNMARKED"
+
+    def test_fault_only_cores_leave_the_marker_off(self) -> None:
+        """A length mismatch is a facade BUG — the crate must not mark it."""
+        marker = nightly_rust._INPUT_REFUSED_MARKER
+        with pytest.raises(ValueError) as excinfo:
+            brutex_ops.nightly_exit_code(["ok"], [], False)
+        assert marker not in str(excinfo.value)
+        with pytest.raises(ValueError) as excinfo:
+            brutex_ops.nightly_audit_reconcile_detail("id", [], ["pull"], [], "", "", "", "")
+        assert marker not in str(excinfo.value)
+
+    def test_routed_seam_classifies_the_real_crate_refusal(self) -> None:
+        """End-to-end: a REAL crate input refusal reads ``*_input_refused``."""
+        text = "0٣:05"  # ARABIC-INDIC DIGIT THREE
+        with capture_logs() as logs:
+            assert parse_at(text) == _parse_at_python(text) == (3, 5)
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert [entry["reason"] for entry in warns] == ["parse_at_input_refused"]

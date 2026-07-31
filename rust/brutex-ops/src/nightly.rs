@@ -42,6 +42,28 @@
 //! FFI hop is a small SLOWDOWN, accepted because the seams run once per
 //! nightly run / install / status probe and ship DEFAULT-OFF.
 
+/// The stable fragment stamped on EVERY nightly-lane refusal that is an
+/// out-of-envelope INPUT rather than a crate FAULT
+/// (DEC-RUST-STRICT-NO-FALLBACK-001; the `rust/brutex-strategies`
+/// `INPUT_REFUSED_MARKER` doctrine, same literal, one lane over).
+///
+/// Four cores below decline a *legitimate* Python input they cannot mirror
+/// faithfully — a duration outside `f64`'s exactly-representable integer
+/// range, a non-ASCII `--at` candidate (CPython's un-flagged `\d` matches
+/// Unicode digits), pmset arithmetic past `i64`, an out-of-range `datetime`
+/// component. Python was always the intended handler for those, so the
+/// facade must keep degrading to the oracle even under strict mode. The
+/// same four functions can ALSO fail for real (a stale/foreign wheel, a
+/// mapped panic, a facade-contract type error) — those stay UNMARKED and
+/// strict mode REFUSES them.
+///
+/// It lives HERE (pure Rust) rather than in the `python` -gated
+/// `src/python.rs` — the sibling `brutex-strategies` placement — so the
+/// literal is pinned by a plain `cargo test` that links no libpython; the
+/// FFI faces import it. Keep the fragment stable: it is part of the facade
+/// contract (`brutex/nightly/nightly_rust.py::_INPUT_REFUSED_MARKER`).
+pub const INPUT_REFUSED_MARKER: &str = "input outside the crate envelope";
+
 // ── chain.py mirrors ────────────────────────────────────────────────────
 
 /// `chain._BREAKERS` membership — `{REFUSED, FAILED}` by StrEnum value.
@@ -199,6 +221,14 @@ const MAX_EXACT_DURATION: f64 = 9_007_199_254_740_992.0;
 /// * `counts` is `report.counts.items()` (values `int | None`);
 /// * `tripwires` rows are `(name, detail)`;
 /// * `suspect` mirrors `report.suspect` (`bool(report.tripwires)`).
+///
+/// ENVELOPE-ERR INVARIANT (DEC-RUST-STRICT-NO-FALLBACK-001): every `Err`
+/// this function returns is an out-of-envelope INPUT refusal — today the
+/// single non-finite / `>= MAX_EXACT_DURATION` duration arm — and the FFI
+/// face stamps them all with [`INPUT_REFUSED_MARKER`], so
+/// the facade keeps degrading to the oracle under strict mode. A future
+/// arm that is a crate FAULT must NOT reuse this `Err`: give it its own
+/// unmarked mapping or the fault would silently degrade.
 #[allow(clippy::too_many_arguments)]
 pub fn summary_lines_impl(
     nightly_id: &str,
@@ -398,6 +428,10 @@ fn is_python_ascii_space(byte: u8) -> bool {
 /// non-ASCII input — CPython's un-flagged `\d` matches Unicode decimal
 /// digits, which this hand-rolled ASCII matcher deliberately does not
 /// re-derive (refuse-to-guess; the oracle decides).
+///
+/// ENVELOPE-ERR INVARIANT: the non-ASCII arm is this function's ONLY `Err`
+/// and it is an INPUT refusal — the FFI face marks it (see
+/// `summary_lines_impl`'s invariant note for the full rule).
 pub fn parse_at_impl(text: &str) -> Result<Option<(i64, i64)>, String> {
     if !text.is_ascii() {
         return Err("non-ASCII --at input — python oracle decides".to_string());
@@ -437,6 +471,10 @@ pub fn parse_at_impl(text: &str) -> Result<Option<(i64, i64)>, String> {
 /// Python `%` is floored (always non-negative for a positive modulus) —
 /// mirrored by `rem_euclid`; an i64 overflow (impossible through the
 /// facade's parse_at-validated callers) refuses to the oracle.
+///
+/// ENVELOPE-ERR INVARIANT: the `checked_*` overflow is this function's ONLY
+/// `Err` and it is an INPUT refusal (Python's unbounded ints compute it) —
+/// the FFI face marks it (see `summary_lines_impl`'s invariant note).
 pub fn pmset_wake_command_impl(
     hour: i64,
     minute: i64,
@@ -468,6 +506,10 @@ pub fn pmset_wake_command_impl(
 /// correctly-rounded value CPython's `timedelta.total_seconds()` produces.
 /// Out-of-range components (Python's `replace` would raise ValueError)
 /// refuse to the oracle, which raises the genuine Python error.
+///
+/// ENVELOPE-ERR INVARIANT: the component-range check is this function's
+/// ONLY `Err` and it is an INPUT refusal — the FFI face marks it (see
+/// `summary_lines_impl`'s invariant note).
 pub fn seconds_since_fire_impl(
     hour: i64,
     minute: i64,
@@ -508,6 +550,58 @@ mod tests {
 
     fn strings(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|token| (*token).to_string()).collect()
+    }
+
+    // ── the strict-mode envelope marker (cross-language contract) ───────
+
+    /// The marker LITERAL is half of a cross-language contract — the other
+    /// half is `brutex/nightly/nightly_rust.py::_INPUT_REFUSED_MARKER`,
+    /// which classifies on it. Pinned here so a rename fails `cargo test`
+    /// (no libpython needed) as well as the Python drift pin.
+    #[test]
+    fn input_refused_marker_literal_is_the_facade_contract() {
+        assert_eq!(INPUT_REFUSED_MARKER, "input outside the crate envelope");
+    }
+
+    /// The four cores the FFI marks have EXACTLY ONE `Err` arm each, and it
+    /// is an INPUT refusal in every case (the ENVELOPE-ERR INVARIANT on
+    /// their doc comments). This drives each one's single `Err` so a new
+    /// FAULT arm smuggled into the same `Result` is visible in review as a
+    /// case this test does not cover.
+    #[test]
+    fn the_marked_cores_err_only_on_out_of_envelope_inputs() {
+        let links = vec![("collision".to_string(), "ok".to_string(), None)];
+        // 1. duration outside the exactly-representable f64 integer range.
+        assert!(
+            summary_lines_impl("n", 0.0, f64::INFINITY, &links, &[], &[], &[], false, false)
+                .is_err()
+        );
+        assert!(
+            summary_lines_impl(
+                "n",
+                0.0,
+                MAX_EXACT_DURATION,
+                &links,
+                &[],
+                &[],
+                &[],
+                false,
+                false
+            )
+            .is_err()
+        );
+        // 2. non-ASCII --at candidate.
+        assert!(parse_at_impl("0٣:05").is_err());
+        // 3. pmset arithmetic past i64.
+        assert!(pmset_wake_command_impl(i64::MAX, 0, 0).is_err());
+        // 4. out-of-range datetime component.
+        assert!(seconds_since_fire_impl(24, 0, 1, 0, 0, 0).is_err());
+        // …and the two UNMARKED cores keep refusing their facade-bug arm.
+        assert!(exit_code_impl(&strings(&["ok"]), &[], false).is_err());
+        assert!(
+            audit_reconcile_detail_impl("id", &[], &strings(&["pull"]), &[], "", "", "", "")
+                .is_err()
+        );
     }
 
     // ── break law + exit code ───────────────────────────────────────────

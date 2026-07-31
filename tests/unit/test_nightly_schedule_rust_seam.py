@@ -36,7 +36,7 @@ from structlog.testing import capture_logs
 from tests.fakes.fake_brutex_ops import build_fake_crate
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 class _BombModule(types.ModuleType):
@@ -157,13 +157,18 @@ class TestFlagOnParity:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """CPython's un-flagged \\d matches Unicode digits — the crate refuses
-        such candidates and the ORACLE (the genuine Python law) decides."""
+        such candidates and the ORACLE (the genuine Python law) decides.
+
+        The crate MARKS this refusal (``INPUT_REFUSED_MARKER``), so the
+        reason is the CLASS-C ``parse_at_input_refused`` — the token strict
+        mode must not refuse (``TestStrictRefusesTheSameArms`` below re-runs
+        this exact call with strict ON)."""
         _flag_on(monkeypatch, build_fake_crate())
         text = "0٣:05"  # ARABIC-INDIC DIGIT THREE in the hour token
         with capture_logs() as logs:
             assert parse_at(text) == _parse_at_python(text) == (3, 5)
         warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
-        assert warns and warns[0]["reason"] == "parse_at_error"
+        assert warns and warns[0]["reason"] == "parse_at_input_refused"
 
     @pytest.mark.parametrize(("hour", "minute"), [(1, 30), (0, 2), (0, 5), (23, 59), (13, 0)])
     def test_pmset_parity(self, monkeypatch: pytest.MonkeyPatch, hour: int, minute: int) -> None:
@@ -338,4 +343,94 @@ class TestStrictRefusesTheSameArms:
         )
         with pytest.raises(RustFallbackRefused, match="burn_in_mismatch") as excinfo:
             pmset_wake_command(1, 30)
+        self._assert_names_facade_and_switch(excinfo)
+
+    # ---- the CLASS-C split, per schedule law -------------------------
+    #
+    # DEC-RUST-STRICT-NO-FALLBACK-001: each of these three laws' crate core
+    # Errs ONLY on an out-of-envelope INPUT, so its FFI face stamps
+    # ``INPUT_REFUSED_MARKER`` and the facade keeps degrading even here,
+    # under the shipped strict default. The UNMARKED sibling of each pair is
+    # a crate FAULT and refuses — that pairing is the whole close.
+
+    def test_parse_at_non_ascii_input_still_degrades_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLASS C through the REAL fake-crate path (no override)."""
+        _flag_on(monkeypatch, build_fake_crate())
+        text = "0٣:05"  # ARABIC-INDIC DIGIT THREE
+        with capture_logs() as logs:
+            assert parse_at(text) == _parse_at_python(text) == (3, 5)
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert [entry["reason"] for entry in warns] == ["parse_at_input_refused"]
+
+    def test_seconds_out_of_range_input_still_degrades_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLASS C: the crate declines hour=24; the ORACLE's own ValueError
+        (the genuine Python law surface) propagates — never a refusal."""
+        _flag_on(monkeypatch, build_fake_crate())
+        now = datetime(2026, 7, 19, 2, 0, 0)
+        with capture_logs() as logs, pytest.raises(ValueError, match="hour must be in 0..23"):
+            seconds_since_scheduled_fire(hour=24, minute=0, now_local=now)
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert [entry["reason"] for entry in warns] == [
+            "seconds_since_scheduled_fire_input_refused"
+        ]
+
+    def test_pmset_marked_overflow_still_degrades_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLASS C: the core's ``checked_mul``/``add``/``sub`` overflow arm."""
+
+        def _refuse(*args: object) -> str:
+            raise ValueError(
+                "input outside the crate envelope: pmset arithmetic overflow — "
+                "python oracle decides"
+            )
+
+        _flag_on(monkeypatch, build_fake_crate(nightly_pmset_wake_command=_refuse))
+        with capture_logs() as logs:
+            assert pmset_wake_command(1, 30) == _pmset_wake_command_python(1, 30, 5)
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert [entry["reason"] for entry in warns] == ["pmset_wake_command_input_refused"]
+
+    @pytest.mark.parametrize(
+        ("kernel_name", "reason", "call"),
+        [
+            ("nightly_parse_at", "parse_at_error", lambda: parse_at("01:30")),
+            (
+                "nightly_pmset_wake_command",
+                "pmset_wake_command_error",
+                lambda: pmset_wake_command(1, 30),
+            ),
+            (
+                "nightly_seconds_since_fire",
+                "seconds_since_scheduled_fire_error",
+                lambda: seconds_since_scheduled_fire(
+                    hour=1, minute=30, now_local=datetime(2026, 7, 19, 2, 0, 0)
+                ),
+            ),
+        ],
+    )
+    def test_unmarked_crate_fault_refuses_on_every_marked_law(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        kernel_name: str,
+        reason: str,
+        call: Callable[[], object],
+    ) -> None:
+        """CLASS A: the SAME three laws, an UNMARKED message → REFUSE.
+
+        Before the crate stamped its input refusals these three tokens were
+        held unresolved and this exact call degraded silently. The marker is
+        the only difference between this test and the three above.
+        """
+
+        def _boom(*args: object) -> object:
+            raise ValueError("stale wheel: unexpected argument arity")
+
+        _flag_on(monkeypatch, build_fake_crate(**{kernel_name: _boom}))
+        with pytest.raises(RustFallbackRefused, match=reason) as excinfo:
+            call()
         self._assert_names_facade_and_switch(excinfo)

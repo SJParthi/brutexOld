@@ -23,6 +23,16 @@ _BREAKERS: Final[frozenset[str]] = frozenset({"refused", "failed"})
 
 _AT_RE: Final[re.Pattern[str]] = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$", re.ASCII)
 
+#: The crate's input-envelope refusal marker, mirrored VERBATIM from
+#: ``rust/brutex-ops/src/nightly.rs::INPUT_REFUSED_MARKER`` (and from the
+#: FFI face's ``format!("{INPUT_REFUSED_MARKER}: {detail}")`` shape), so the
+#: wheel-free arm exercises the SAME CLASS-C classification path the real
+#: crate does (DEC-RUST-STRICT-NO-FALLBACK-001,
+#: ``brutex/nightly/nightly_rust.py::_INPUT_REFUSED_MARKER``). Drift here
+#: would silently turn a CLASS-C degrade into a CLASS-A refusal in the
+#: wheel-free suites, so the literal is pinned on both sides.
+_INPUT_REFUSED_MARKER: Final[str] = "input outside the crate envelope"
+
 
 def nightly_first_breaker_index(statuses: list[str]) -> int | None:
     """Index of the first breaker status, else None."""
@@ -205,7 +215,7 @@ def nightly_render_launchd_plist(
 def nightly_parse_at(text: str) -> tuple[int, int] | None:
     """The parse decision — None on a clean no-match; ValueError on non-ASCII."""
     if not text.isascii():
-        raise ValueError("non-ASCII --at input — python oracle decides")
+        raise ValueError(f"{_INPUT_REFUSED_MARKER}: non-ASCII --at input — python oracle decides")
     match = _AT_RE.match(text.strip())
     if match is None:
         return None
@@ -236,7 +246,7 @@ def nightly_seconds_since_fire(
         (now_microsecond, 0, 999_999),
     ):
         if not low <= value <= high:
-            raise ValueError(f"component {value} outside {low}..={high}")
+            raise ValueError(f"{_INPUT_REFUSED_MARKER}: component {value} outside {low}..={high}")
     now_us = (now_hour * 3600 + now_minute * 60 + now_second) * 1_000_000 + now_microsecond
     fire_us = (hour * 3600 + minute * 60) * 1_000_000
     delta = now_us - fire_us
