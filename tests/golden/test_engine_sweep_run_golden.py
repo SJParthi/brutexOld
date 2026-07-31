@@ -31,6 +31,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
@@ -602,7 +603,16 @@ def test_golden_rust_metrics_domain_invalid_poison_is_refused_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A domain-invalid kernel result is REFUSED at runtime — the sweep lands
-    on the pinned Python-era bytes (never adopts the poison) and says so."""
+    on the pinned Python-era bytes (never adopts the poison) and says so.
+
+    Pins the WARN-AND-DEGRADE mode, so it opts out of strict mode
+    (DEC-RUST-STRICT-NO-FALLBACK-001): with ``BRUTEX_RUST_STRICT`` ON the
+    injected poison RAISES instead of degrading. The assertion below — that
+    the sweep reproduces the frozen Python-era bytes — is unchanged; only the
+    mode it runs under is made explicit. The un-poisoned goldens in this file
+    run under production strict mode and are unaffected (Rust serves them,
+    so there is no fall-back to refuse)."""
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     import math
 
@@ -704,6 +714,7 @@ def test_golden_rust_metrics_domain_valid_poison_in_burn_in_is_autoreverted(
     bytes (the oracle value ships — the poison never persists), one
     kernel_autoreverted ERROR fires, and the kernel stays latched OFF
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001 — the default-ON safety net)."""
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")  # pins warn-and-degrade (see sibling)
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     import fno_math
     from brutex.engine.rust_metrics import (

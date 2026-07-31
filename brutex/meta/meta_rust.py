@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.meta.abstain import ABSTAIN_REASON_ORDER, abstain_masks_python
 from brutex.meta.logistic import score_logistic as _score_logistic_oracle
@@ -114,8 +115,31 @@ def reset_meta_rust_for_tests() -> None:
     _STATE["latched"] = False
 
 
+def _refuse_if_strict(reason: str, **fields: object) -> None:
+    """Strict-mode gate — DEC-RUST-STRICT-NO-FALLBACK-001.
+
+    This facade has THREE announcement choke points, not one (a
+    ``_warn_once`` funnel, the flag-junk arm inside
+    :func:`meta_gate_enabled` which logs directly and keeps its OWN
+    ``_WARNED`` entry, and :func:`_latch_autorevert`); every one of them
+    calls this helper, so no announced fall-back bypasses strict mode.
+    """
+    refuse_if_strict("brutex.meta.meta_rust", reason, **fields)
+
+
 def _warn_once(reason: str, **fields: object) -> None:
-    """Log ONE :data:`META_RUST_FALLBACK_EVENT` per *reason* per process."""
+    """Refuse under strict mode; else log ONE :data:`META_RUST_FALLBACK_EVENT` per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Every reason funnelled here is CLASS A
+    (the wheel is absent/stale or the kernel raised — ``wheel_missing``,
+    ``wheel_stale``, ``kernel_error``) or CLASS B (the kernel ran and its
+    output failed the refuse-poison gate — ``kernel_invalid``); both refuse,
+    so the gate is UNCONDITIONAL and this module carries no exemption set.
+    There is no class-C reason: structural input junk raises ``ValueError``
+    from the ORACLE on every arm (the routed entries' documented
+    arm-independent contract), it never degrades through here.
+    """
+    _refuse_if_strict(reason, **fields)
     # Unlocked check-then-add (the feed_rust precedent): a racing thread can
     # at worst double-log one line — never a storm, never a miss.
     if reason in _WARNED:
@@ -141,6 +165,13 @@ def meta_gate_enabled(raw: str | None = None) -> bool:
     if verdict is not None:
         return verdict
     if value.strip():
+        # CHOKE POINT 2 (the direct-log arm — it does NOT route through
+        # _warn_once, so strict mode is wired HERE too). CLASS A: an
+        # operator typo disarms the Rust path, which under
+        # DEC-RUST-STRICT-NO-FALLBACK-001 must refuse rather than silently
+        # serve Python. Fires BEFORE the _WARNED write, so the warn-once
+        # early-return can never shadow a later refusal.
+        _refuse_if_strict("flag_unrecognised", env=META_GATE_ENV, value=repr(value))
         if META_RUST_FLAG_EVENT not in _WARNED:
             _WARNED.add(META_RUST_FLAG_EVENT)
             # The env VALUE is operator-typed junk — repr() it (the #907 law).
@@ -173,7 +204,17 @@ def _resolve_kernel() -> object | None:
 
 
 def _latch_autorevert(kernel_name: str) -> None:
-    """Latch the facade OFF for the process + log ONE ERROR (autorevert)."""
+    """Refuse under strict mode; else latch the facade OFF + log ONE ERROR.
+
+    CHOKE POINT 3 (the burn-in autorevert — it logs directly, it does NOT
+    route through :func:`_warn_once`). DEC-RUST-STRICT-NO-FALLBACK-001:
+    CLASS B — the kernel ran and DISAGREED with the oracle bit-for-bit.
+    The refusal fires BEFORE the latch write, so under strict mode
+    ``_STATE["latched"]`` can never be set and the latched early-returns in
+    :func:`score_probabilities` / :func:`abstain_reason_masks` are
+    structurally unreachable.
+    """
+    _refuse_if_strict("burn_in_mismatch", kernel=kernel_name)
     _STATE["latched"] = True
     _LOG.error(META_RUST_AUTOREVERT_EVENT, kernel=kernel_name)
 

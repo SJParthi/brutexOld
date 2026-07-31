@@ -85,6 +85,29 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+
+    Uses the SAME shared ``monkeypatch`` object as the sibling autouse fixtures
+    (never its own ``MonkeyPatch.context()``): one object means one LIFO undo
+    stack, so a ``TestStrictRefusal`` ``delenv`` on that same object cannot be
+    restored out of order and leak the value past this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Fresh latch/burn-in/memo state + flag unset around every test."""
     monkeypatch.delenv(wlr.LAKE_RUST_WINDOW_LEDGER_ENV, raising=False)

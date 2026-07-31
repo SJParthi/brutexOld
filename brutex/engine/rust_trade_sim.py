@@ -143,6 +143,7 @@ from brutex.calendars.nse import (
     get_session_checked,
     is_forced_exit_bar,
 )
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, U64_MASK, mask_to_entry_signals
 from brutex.engine.exec_grid import ExecGridMap, build_exec_grid_map
 from brutex.engine.exit_index import bars_strictly_increasing
@@ -191,6 +192,55 @@ _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
 #: 1-minute EXECUTION stream, never per mask and never inside the walker's
 #: ``_close`` (the DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
 _TAIL_HOLE_WARN_CAP: Final[int] = 20
+
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.engine.rust_trade_sim"
+
+#: CLASS-C fall-back reasons — the INPUT sits outside BOTH compiled kernels'
+#: FFI envelope, so the pure-Python oracle was ALWAYS the intended handler
+#: (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note"). Refusing here would crash a
+#: legitimate call; widening the crate's envelope — never refusing — is the
+#: real fix for each. Every one is produced by
+#: :func:`_construction_fallback_reason` / :func:`_call_fallback_reason`, i.e.
+#: decided BEFORE any kernel is reached — the crate never ran:
+#:
+#: * ``bar_bits_beyond_u128`` — a ``bar_bits`` word outside ``[0, 2**128-1]``;
+#:   beyond even ``Vec<u128>`` (the real fix is a wider kernel word).
+#: * ``mask_beyond_u128`` — the per-call twin for a batch mask.
+#: * ``price_out_of_envelope`` / ``stop_loss_out_of_envelope`` /
+#:   ``take_profit_out_of_envelope`` — a paisa magnitude past the kernel's
+#:   overflow-safe ``MAX_PRICE_PAISA = i64::MAX / 8`` ceiling (#1090); the real
+#:   fix is a wider kernel accumulator, not a crash on a legal price.
+#:
+#: NOT exempt (CLASS A — the crate is absent or stale, which is never a
+#: legitimate input shape): ``wheel_missing`` (**the u64 production degrade** —
+#: today's 69-bit vocabulary keeps every real batch on the u64 kernel, so this
+#: is the arm that actually fires in production), ``wheel_missing_u128``,
+#: ``wheel_missing_exit_counts``, ``exec_grid_kernel_stale``,
+#: ``fill_law_kernel_stale``.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "bar_bits_beyond_u128",
+        "mask_beyond_u128",
+        "price_out_of_envelope",
+        "stop_loss_out_of_envelope",
+        "take_profit_out_of_envelope",
+    }
+)
+
+
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a Python fall-back under strict mode unless *reason* is CLASS C.
+
+    The module's ONE strict-mode choke point (DEC-RUST-STRICT-NO-FALLBACK-001).
+    This facade has no named ``warn_fallback_once`` — it warns inline at two
+    sites (construction demotion + per-call demotion), so both call this helper
+    BEFORE their warn-once memo write, making an already-warned repeat
+    structurally unable to slip past.
+    """
+    if reason in _STRICT_EXEMPT_REASONS:
+        return
+    refuse_if_strict(_STRICT_FACADE, reason, **context)
 
 
 def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]) -> None:
@@ -733,6 +783,17 @@ class ResidentTradeSim:
             self._rust = None
             reason = "fill_law_kernel_stale"
         if self._rust is None:
+            # Structurally: ``self._rust is None`` here IFF a reason was set
+            # above (every branch that leaves it None assigns one) — the
+            # narrowing guard keeps that visible to mypy --strict without an
+            # ignore. Strict mode refuses BEFORE the WARNING is emitted.
+            if reason is not None:
+                _refuse_if_strict(
+                    reason,
+                    n_bars=len(self._decision_bars),
+                    n_exec_bars=len(self._exec_bars),
+                    tf_minutes=tf_minutes,
+                )
             # The width reason additionally NAMES the offending word (value +
             # bit) — spec PR-1, DEC-SWEEP-RUST-WIRE-001 part 1; other reasons
             # carry no width offender.
@@ -1159,6 +1220,10 @@ class ResidentTradeSim:
             ):
                 call_reason = "wheel_missing_exit_counts"
             if call_reason is not None:
+                # Strict mode refuses BEFORE the warn-once memo write, so a
+                # repeat of an already-warned sticky reason cannot degrade
+                # silently past the early return below.
+                _refuse_if_strict(call_reason, n_masks=len(masks))
                 if call_reason not in self._call_fallback_warned:
                     self._call_fallback_warned.add(call_reason)
                     # The width reason additionally NAMES the offending mask
@@ -1251,6 +1316,15 @@ class ResidentTradeSim:
                 # A non-monotonic stream on a CERTIFIED window is a kernel
                 # ordering regression — refuse the indices LOUDLY (once per
                 # instance) and let the dict path serve the mask.
+                #
+                # Deliberately NOT wired to strict mode
+                # (DEC-RUST-STRICT-NO-FALLBACK-001): this is NOT an arm
+                # switch. RUST still serves the trades — only the O(trades)
+                # index FAST PATH is withheld, and the bit-identical
+                # timestamp-dict path in the metrics tail produces the SAME
+                # values. There is no Python fall-back here to refuse. Its
+                # distinct event name (``exit_indices_uncertified``, not
+                # ``call_fallback``) records exactly that.
                 if "exit_indices_not_monotonic" not in self._call_fallback_warned:
                     self._call_fallback_warned.add("exit_indices_not_monotonic")
                     _LOG.warning(

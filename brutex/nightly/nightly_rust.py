@@ -65,6 +65,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import env_flag_tristate
 
 if TYPE_CHECKING:

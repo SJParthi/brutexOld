@@ -215,8 +215,42 @@ def reset_crossverify_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> Non
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Strict-mode gate for both announcement choke points.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Imported FUNCTION-LOCALLY on purpose:
+    this module's docstring pins a deliberate import-minimalism law (no
+    engine import, no ``brutex.data.lake_rust_render`` dependency for one
+    helper), and a module-scope import of the gate would pull the
+    ``brutex.config`` package chain — and with it ``brutex.data`` — into
+    every crossverify import. The observability_rust precedent.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.crossverify.rust_seam", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``crossverify_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``crossverify_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Every reason funnelled here is CLASS A
+    (the crate is absent/stale/raised — ``flag_unrecognised``,
+    ``csv_render_error``, ``canonical_error``, ``s3_key_error``) or CLASS B
+    (the crate ran and its answer was structurally refused —
+    ``csv_refusal_or_poison``, ``canonical_result_refused``,
+    ``s3_key_result_refused``); both refuse, so the gate is UNCONDITIONAL
+    and this module carries no exemption set.
+
+    There is NO class-C reason here. ``csv_refusal_or_poison`` looks
+    overloaded but is not: the crate's own refusal conditions
+    (``rust/brutex-ops/src/crossverify.rs`` ``render_csv_bytes`` — empty
+    rows, wrong arity, non-increasing timestamps, metachar cells) are ALL
+    pre-rejected by the Python belt at the single production call site
+    (``brutex/crossverify/csv_render.py`` ``_validated_cell_rows``), so a
+    value reaching this reason means the crate refused an input Python had
+    already blessed — a crate/contract bug, CLASS B.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -224,12 +258,21 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
 
     ``error=True`` logs ``crossverify_rust.autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``crossverify_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: reasons here are CLASS A
+    (``crate_unavailable``, ``crate_stale``, ``crate_panic``) or CLASS B
+    (``burn_in_mismatch_{law}`` — the crate DISAGREED with the oracle). The
+    refusal fires BEFORE the latch is written, so under strict mode the
+    latch can never be set and every latched early-return in the routed
+    laws is structurally unreachable — wiring these two functions therefore
+    covers every announced fall-back this facade takes.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

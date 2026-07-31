@@ -82,6 +82,7 @@ import structlog
 # ``brutex.config.env_flags`` leaf (the vocabulary home since
 # DEC-PREBUILD-FRAME-WRITE-001) and are consumed through the sweep-flag
 # module's PUBLIC re-exported classifier — never copied (CLAUDE.md §11).
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -252,13 +253,24 @@ def disable_kernel(reason: str, **context: object) -> None:
 
 
 def warn_fallback_once(reason: str, **context: object) -> None:
-    """Log ``rust_stage1a.fallback`` (WARNING) once per process per *reason*.
+    """Refuse under strict mode; else log ``rust_stage1a.fallback`` warn-once.
 
-    The seam runs once per kernel BUILD (up to thousands per grid sweep), so a
-    sticky reason (a stale wheel, a latched kernel) would otherwise flood the
-    logs. The fallback itself is bit-exact regardless — the Python oracle
-    serves the build.
+    This is the ONE choke point every Stage-1A fall-back funnels through, so
+    :func:`~brutex.config.rust_strict.refuse_if_strict` here is a *complete*
+    block on the Python oracle — there is no unannounced path around it
+    (DEC-RUST-STRICT-NO-FALLBACK-001). Every reason this facade can emit
+    (``flag_unrecognised`` / ``kernel_disabled`` / ``wheel_missing`` /
+    ``kernel_refused``) means Rust is absent, latched, or gave a structurally
+    refused answer — never "this input is outside the crate's envelope" — so
+    refusing them all is exactly the intent, with no legitimate input turned
+    into a crash.
+
+    With strict mode OFF the historic behaviour is byte-identical: the seam
+    runs once per kernel BUILD (up to thousands per grid sweep), so a sticky
+    reason (a stale wheel, a latched kernel) would otherwise flood the logs,
+    and the fallback itself is bit-exact — the Python oracle serves the build.
     """
+    refuse_if_strict("brutex.engine.rust_stage1a", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)

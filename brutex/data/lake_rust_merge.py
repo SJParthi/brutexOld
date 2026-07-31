@@ -124,6 +124,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import (
     BURN_IN_SAMPLES,
     degrade_errors,
@@ -263,7 +264,25 @@ def reset_lake_rust_merge_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None
 
 
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``lake_rust_merge.fallback`` WARN once per process per *reason*."""
+    """Log ``lake_rust_merge.fallback`` WARN once per process per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Every reason funnelled here is CLASS A (``flag_unrecognised`` — the
+    junk-flag arm; ``merge_error`` — the crate raised, or polars is absent
+    for the version probe) or CLASS B (``decision_refused`` — the layer-4
+    refuse-poison rejected the crate's action list). There is NO class-C
+    reason at this choke point, so no exemption set: the seam takes a bar
+    dict + a bar list the crate always claims — the merge kernel declares no
+    input envelope it can decline. Strict-OFF is byte-identical to the prior
+    behaviour.
+
+    STORED-BYTE SAFETY: this facade decides a MERGE, it renders nothing. A
+    refusal propagates out of ``_merge_write``'s guarded block with the
+    caller's dict untouched (the Rust arm works on a COPY — ``work``), so no
+    partition is written at all; a stored byte is never rewritten, only
+    absent.
+    """
+    refuse_if_strict("brutex.data.lake_rust_merge", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -276,7 +295,17 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``lake_rust_merge.merge_autoreverted`` at ERROR (the
     burn-in autorevert); guard latches log
     ``lake_rust_merge.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` /
+    ``crate_metadata_error`` / ``polars_version_mismatch`` / ``crate_panic``)
+    or CLASS B (``burn_in_fold_mismatch`` — the crate's fold disagreed with
+    the oracle's); none is class C, so none is exempt. The refusal fires
+    BEFORE the latch is written, so under strict mode the latch is never set
+    and every ``rust_merge_disabled()`` early-return is structurally
+    unreachable. Strict-OFF is byte-identical to the prior behaviour.
     """
+    refuse_if_strict("brutex.data.lake_rust_merge", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

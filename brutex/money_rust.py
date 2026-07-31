@@ -87,6 +87,48 @@ Fail-closed layers, in order (every path returns the PYTHON-law value):
 paths whose upstream policy treats an OOM as a global stop — this seam
 must not launder one into a fallback.
 
+## Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001)
+
+Layers 1 (junk flag), 3, 4, 5 and 6 all funnel through exactly TWO choke
+points — :func:`_warn_once` and :func:`_disable` — so
+:func:`~brutex.config.rust_strict.refuse_if_strict` at those two points is
+a *complete* block on the Python arm: there is no unannounced path around
+them. Every reason that reaches them means **Rust is absent, latched,
+broke, or answered wrongly** (``flag_unrecognised`` / ``crate_unavailable``
+/ ``crate_stale`` / ``crate_panic`` / ``<law>_error`` /
+``<law>_result_refused`` / ``burn_in_mismatch_<law>``) — so this facade
+needs NO per-reason exemption allowlist, and refusing all of them turns no
+legitimate input into a crash.
+
+**Why layer 2 is deliberately NOT wired** — the ELIGIBILITY GATE
+(:func:`_eligible_rupees` / :func:`_eligible_paisa`, law below) is the
+CLASS-C case the ``rust_strict`` docstring names: an input the crate
+deliberately cannot represent (a non-``Decimal``, a ``NaN``, an armed
+``Inexact`` trap, a narrowed exponent window …) was ALWAYS meant to be
+served by the Python oracle — it is not a Rust failure, and refusing it
+would turn a legitimate call into a crash. The gate needs no exemption
+list because it is structurally outside the choke points: ``route_*``
+returns ``python_law(...)`` *before* any warn/latch, so an ineligible
+input reaches neither :func:`_warn_once` nor :func:`_disable`. That
+silence is also why the fall-back census cannot see the gate — a
+pre-existing, deliberate property of layer 2, unchanged here.
+
+Because :func:`_disable` refuses before it latches, the process-local
+``money_rust_disabled()`` short-circuit in ``route_*`` is UNREACHABLE
+under strict mode (every call re-attempts and re-refuses, loudly) — there
+is no silently-latched steady state for Python to serve through.
+
+The ``rust_strict`` import is DELIBERATELY function-scope. ``brutex.money``
+is a ROOT leaf: at module scope ``brutex.config.rust_strict`` executes
+``brutex/config/__init__`` → ``config.runtime`` → ``brutex.data.atomic_io``
+→ ``brutex/data/__init__`` → ``data.parquet_writer``, which imports
+``brutex.money`` — a genuine cycle, executed + confirmed
+(``ImportError: cannot import name 'round_money' from partially
+initialized module 'brutex.money'``). Deferring the import to the
+fall-back path (already a warn-once-rare, already-degraded path) keeps the
+module-scope import surface stdlib + structlog, exactly as the AST leaf
+pin requires.
+
 ## The ELIGIBILITY GATE LAW (layer 2 — the strings-only FFI contract)
 
 Only values whose oracle outcome is a PLAIN VALUE under the AMBIENT
@@ -290,8 +332,35 @@ def reset_money_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Raise :class:`~brutex.config.rust_strict.RustFallbackRefused` if strict.
+
+    The ONE strict-mode adapter for this facade, shared by both choke points
+    (:func:`_warn_once`, :func:`_disable`) — DEC-RUST-STRICT-NO-FALLBACK-001.
+    Every reason reaching either choke point means Rust is absent / latched /
+    broke / answered wrongly, so there is no exemption allowlist here; the
+    Class-C eligibility gate never reaches this function (module docstring).
+
+    The import is function-scope BY NECESSITY, not style: at module scope it
+    closes an executed-and-confirmed ``brutex.money`` ⇄ ``brutex.data``
+    circular import (module docstring). A ``sys.modules`` hit on an already
+    degraded path is a non-cost.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.money_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``money_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``money_rust.fallback`` warn-once.
+
+    One of the TWO choke points every Python fall-back funnels through
+    (:func:`_disable` is the other), so refusing here is a *complete* block —
+    see the module docstring's strict-mode section for the reason census and
+    for why the eligibility gate is deliberately exempt by construction.
+    With strict mode OFF the historic warn-once behaviour is byte-identical.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -305,7 +374,13 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     autorevert — a genuine wrongness signal on a stored-bytes-critical
     law); guard latches log ``money_rust.rust_path_disabled`` at WARN.
     Repeats are no-ops.
+
+    Under strict mode this REFUSES before latching (the second choke point —
+    DEC-RUST-STRICT-NO-FALLBACK-001), which is why the latched state is
+    unreachable there: every later call re-attempts and re-refuses rather
+    than degrading silently behind ``money_rust_disabled()``.
     """
+    _refuse_if_strict(reason, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

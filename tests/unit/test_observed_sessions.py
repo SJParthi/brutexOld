@@ -988,9 +988,22 @@ class TestCalendarRustObservedSeam:
         return [e["reason"] for e in logs if e["event"] == "calendar_rust.fallback"]
 
     @pytest.fixture(autouse=True)
-    def _fresh_calendar_rust(self) -> Generator[None]:
-        from brutex.calendars import calendar_rust as _cr
+    def _fresh_calendar_rust(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+        """Fresh facade state + ``BRUTEX_RUST_STRICT=0`` for this degrade class.
 
+        DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so the
+        class-B refuse-poison reasons pinned below (``observed_shape`` /
+        ``classify_shape`` — the crate returned a structurally invalid answer)
+        now RAISE ``RustFallbackRefused`` instead of quietly serving the Python
+        oracle. These tests exercise the still-supported ``BRUTEX_RUST_STRICT=0``
+        mode, so the mode is DECLARED here rather than by weakening any
+        assertion; the strict-ON refusal for this facade is pinned in
+        ``tests/unit/test_calendar_rust.py::TestStrictRefusal``.
+        """
+        from brutex.calendars import calendar_rust as _cr
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
         _cr.reset_calendar_rust_for_tests()
         yield
         _cr.reset_calendar_rust_for_tests()

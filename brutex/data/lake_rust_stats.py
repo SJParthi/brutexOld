@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import env_flag_tristate
 
 if TYPE_CHECKING:
@@ -165,7 +166,24 @@ def reset_lake_rust_stats_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None
 
 
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``lake_rust_stats.fallback`` WARN once per process per *reason*."""
+    """Log ``lake_rust_stats.fallback`` WARN once per process per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Every reason funnelled here is CLASS A (``flag_unrecognised`` — the
+    junk-flag arm; ``render_error`` — the crate raised) or CLASS B
+    (``render_result_refused`` — a non-``str`` crate return). There is NO
+    class-C reason at this choke point, so no exemption set: the seam takes
+    ints + pre-``isoformat``-ed strings the crate always claims (the Python
+    side owns every timestamp render, so no value can be outside the crate's
+    envelope). Strict-OFF is byte-identical to the prior behaviour.
+
+    STORED-BYTE SAFETY: the shard body this renders is written by the
+    caller's own ``atomic_write_simple``, and every hook is best-effort — a
+    refusal removes a shard WRITE, it never rewrites a shard byte. The shard
+    is a read-accelerator whose absence degrades to the legacy live scan
+    (DEC-LAKE-STATS-MANIFEST-001), never to a wrong number.
+    """
+    refuse_if_strict("brutex.data.lake_rust_stats", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -178,7 +196,17 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``lake_rust_stats.render_autoreverted`` at ERROR
     (the burn-in autorevert — a genuine wrongness signal); guard latches
     log ``lake_rust_stats.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` — absent/foreign install;
+    ``crate_panic``) or CLASS B (``burn_in_byte_mismatch`` — the crate's
+    shard body disagreed with the stdlib oracle's); none is class C, so none
+    is exempt. The refusal fires BEFORE the latch is written, so under strict
+    mode the latch is never set and every ``rust_stats_disabled()``
+    early-return is structurally unreachable. Strict-OFF is byte-identical
+    to the prior behaviour.
     """
+    refuse_if_strict("brutex.data.lake_rust_stats", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

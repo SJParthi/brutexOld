@@ -275,16 +275,17 @@ class TestGateFragmentParity:
 
 
 class TestGateFragmentBeyondCrateRouting:
-    """The train-b tier-2 seam routing gate (#1699 knob × #1665 facade).
+    """The RETIREMENT of the beyond-crate routing gate.
 
-    A SET ``max_sl_hit_rate`` (DEC-METRICS-KELLY-GROWTH-001) is OUTSIDE the
-    crate fragment law's domain — the crate predates the field — so the
-    WHOLE computation routes to the Python oracle (warn-once
-    ``gate_fragment_beyond_crate``): never a burn-in autorevert, never a
-    post-burn-in silent key drop. The unset-knob routing is UNCHANGED.
+    DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001 taught the crate the
+    ``max_sl_hit_rate`` (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) and ``cvar``
+    (DEC-RANK-CVAR-TAIL-GATE-001) legs, so neither knob bounces the WHOLE
+    computation back to the Python oracle any more: both are served IN
+    RUST with the identity keys intact, and ``gate_fragment_beyond_crate``
+    is emitted by nothing. The unset-knob routing is UNCHANGED.
     """
 
-    def test_set_knob_routes_to_oracle_crate_never_called(
+    def test_set_knob_is_crate_served_against_the_real_wheel(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[tuple[object, ...]] = []
@@ -305,11 +306,31 @@ class TestGateFragmentBeyondCrateRouting:
         assert result == _gate_config_fragment_python(grid)
         assert result is not None
         assert result["max_sl_hit_rate"] == 0.35  # the identity key survives
-        assert calls == []  # the crate fragment fn is NEVER consulted
-        assert sweep_ops_rust_disabled() is False  # a refusal, never an autorevert
-        warns = [e for e in logs if e.get("reason") == "gate_fragment_beyond_crate"]
-        assert len(warns) == 1
-        assert warns[0]["leg"] == "max_sl_hit_rate"
+        assert len(calls) == 1  # the REAL crate fragment fn IS consulted now
+        assert calls[0][1] == 0.35  # …with the ceiling across the FFI
+        assert sweep_ops_rust_disabled() is False
+        assert [e for e in logs if e.get("reason") == "gate_fragment_beyond_crate"] == []
+
+    def test_set_cvar_is_crate_served_against_the_real_wheel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cvar half — previously an UNANNOUNCED oracle arm in the caller."""
+        calls: list[tuple[object, ...]] = []
+        real = brutex_sweep_ops.gate_config_fragment
+
+        def _spy(*args: object) -> object:
+            calls.append(args)
+            return real(*args)
+
+        monkeypatch.setattr(brutex_sweep_ops, "gate_config_fragment", _spy)
+        grid = _FragmentGrid(cvar_gate=CvarGateConfig(threshold_paisa=25_000, alpha_bps=1))
+        with capture_logs() as logs:
+            result = _gate_config_fragment(grid)
+        assert result == _gate_config_fragment_python(grid) == {"cvar": [1, 25_000]}
+        assert len(calls) == 1
+        assert calls[0][2] == (1, 25_000)
+        assert [e for e in logs if e.get("event") == "sweep_ops_rust.fallback"] == []
+        assert sweep_ops_rust_disabled() is False
 
     def test_unset_knob_still_routes_to_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls: list[tuple[object, ...]] = []
@@ -326,13 +347,22 @@ class TestGateFragmentBeyondCrateRouting:
         assert sweep_ops_rust_disabled() is False
 
     def test_post_burn_in_set_knob_keeps_identity_key(self) -> None:
-        """The latent divergence the gate kills: post-burn-in (remaining=0 —
-        no oracle in the crate path) a SET knob must STILL carry the
-        ``max_sl_hit_rate`` identity key; pre-gate the crate fragment
-        silently dropped it (a run-identity-class divergence)."""
+        """The divergence the WIDENING kills: post-burn-in (remaining=0 — no
+        oracle cushion in the crate path) a SET knob must STILL carry the
+        ``max_sl_hit_rate`` identity key. Pre-widening the crate fragment
+        silently dropped it (a run-identity-class divergence), which is why
+        the whole computation had to route to Python; the crate now emits
+        the leg, so the SHIPPED value is the Rust one and the key survives."""
         reset_sweep_ops_rust_for_tests(remaining=0)
         fragment = _gate_config_fragment(_FragmentGrid(max_sl_hit_rate=0.25))
         assert fragment == {"max_sl_hit_rate": 0.25}
+        assert sweep_ops_rust_disabled() is False
+
+    def test_post_burn_in_set_cvar_keeps_identity_key(self) -> None:
+        """The cvar twin of the pin above (same run-identity-class hazard)."""
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        grid = _FragmentGrid(cvar_gate=CvarGateConfig(threshold_paisa=1000))
+        assert _gate_config_fragment(grid) == {"cvar": [500, 1000]}
         assert sweep_ops_rust_disabled() is False
 
     def test_flag_off_set_knob_byte_identical_and_crate_free(

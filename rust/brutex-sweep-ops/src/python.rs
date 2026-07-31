@@ -34,13 +34,22 @@ fn join_path_segments(base: &str, segments: Vec<String>) -> String {
 #[allow(clippy::type_complexity)] // The FFI tuple IS the law's shape.
 fn gate_config_fragment(
     overfit: Option<(f64, f64, f64, f64)>,
+    max_sl_hit_rate: Option<f64>,
+    cvar: Option<(i64, i64)>,
     stage3_enable: bool,
     stage3_top_k: i64,
     stage3_max_fevals: i64,
     stage3_max_restarts: i64,
-) -> (Option<(f64, f64, f64, f64)>, Option<(i64, i64, i64)>) {
+) -> (
+    Option<(f64, f64, f64, f64)>,
+    Option<f64>,
+    Option<(i64, i64)>,
+    Option<(i64, i64, i64)>,
+) {
     leaves::gate_config_fragment(
         overfit,
+        max_sl_hit_rate,
+        cvar,
         stage3_enable,
         stage3_top_k,
         stage3_max_fevals,

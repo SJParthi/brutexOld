@@ -132,6 +132,50 @@ _FOLD_RESULT_ARITY: Final[int] = 3
 #: Memo key suffix for the engaged-once INFO (namespaced apart from reasons).
 _ENGAGED_KEY: Final[str] = "__engaged__"
 
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.ranking.cvar_gate"
+
+#: CLASS-C fall-back reasons — the Rust arm still SERVES (or was never
+#: offered the call), so refusing would crash a legitimate path
+#: (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note"):
+#:
+#: * ``flag_engine_unavailable`` — the engine package (whose ``__init__``
+#:   pulls the ``trading_core`` wheel) is unimportable, so the flag
+#:   CLASSIFIER is unavailable. The resolver then returns
+#:   :data:`CVAR_RUST_DEFAULT` = ``True``: the RUST arm still serves. This is
+#:   an advisory, not a fall-back — the exact
+#:   :mod:`brutex.metrics.rust_stats` precedent, whose
+#:   ``_STRICT_EXEMPT_REASONS`` carries the same token.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({"flag_engine_unavailable"})
+
+#: OVERLOADED reason tokens — HELD, not classified (the honest posture the
+#: DEC mandates for a token that is genuinely two classes at once). Strict
+#: mode does NOT refuse these, because refusing would crash the CLASS-C half:
+#:
+#: * ``kernel_error`` — emitted by ONE
+#:   ``except (ValueError, TypeError, OverflowError)`` around
+#:   ``kernel(list(pnls), alpha_bps)``, which catches BOTH:
+#:
+#:   - **CLASS A/B**: the kernel's own structural ``Err`` arms, mapped to
+#:     ``PyValueError`` — ``rust/fno-math/src/stats/cvar.rs:72`` (empty
+#:     ``pnls``) and ``:79`` (``alpha_bps`` outside ``[1, 10_000]``). Rust ran
+#:     and refused; a quiet Python re-run papers that over.
+#:   - **CLASS C**: PyO3's ``Vec<i64>`` / ``u32`` extraction failing at the
+#:     FFI edge before ANY kernel code runs — a non-int element
+#:     (``TypeError``) or an int past i64 range (``OverflowError``), i.e. the
+#:     signature ``stats_cvar_tail_fold(pnls: Vec<i64>, alpha_bps: u32)`` at
+#:     ``rust/fno-math/src/stats/cvar.rs:114``. This module's own honest
+#:     envelope documents that arm as the intended Python-serves path
+#:     ("A non-int element makes the kernel's ``Vec<i64>`` extraction raise
+#:     ``TypeError`` → the oracle serves the call with Python's own
+#:     semantics").
+#:
+#:   Splitting the token (a distinct ``kernel_input_refused`` for the
+#:   extraction half, e.g. by pre-gating element types Python-side) is the
+#:   real fix; guessing a class here would either crash a legal call or hide
+#:   a genuine kernel refusal.
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset({"kernel_error"})
+
 #: Once-per-process-per-reason fallback memo + the engaged-once latch.
 #: LOG-VOLUME state ONLY — results never depend on it (the documented
 #: no-global-mutable-state exception, module docstring).
@@ -279,6 +323,20 @@ def reset_cvar_observability_for_tests() -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a Python fall-back under strict mode, honouring the two sets.
+
+    Function-local import: :mod:`brutex.ranking` is imported BY the engine, so
+    a module-scope ``brutex.config`` import here would risk the same cycle
+    class the flag resolver already dodges (module docstring).
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    if reason in _STRICT_EXEMPT_REASONS or reason in _STRICT_UNRESOLVED_REASONS:
+        return
+    refuse_if_strict(_STRICT_FACADE, reason, fn=_FN, **context)
+
+
 def _warn_fallback_once(reason: str, **context: object) -> None:
     """Log ``cvar_gate.fallback`` (WARNING) once per process per *reason*.
 
@@ -286,7 +344,12 @@ def _warn_fallback_once(reason: str, **context: object) -> None:
     reason (a stale wheel, a latched kernel) would flood the logs; repeats
     fall back silently. The fallback itself is bit-exact regardless — the
     Python oracle serves the call.
+
+    Choke point #1 of two. Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001)
+    refuses BEFORE the memo write, so an already-warned sticky reason cannot
+    slip through the early return.
     """
+    _refuse_if_strict(reason, **context)
     key = f"{_FN}:{reason}"
     if key in _OBSERVABILITY_MEMO:
         return
@@ -295,7 +358,14 @@ def _warn_fallback_once(reason: str, **context: object) -> None:
 
 
 def _disable_kernel(reason: str, **context: object) -> None:
-    """Latch the kernel OFF for the process (burn-in mismatch autorevert)."""
+    """Latch the kernel OFF for the process (burn-in mismatch autorevert).
+
+    Choke point #2 of two. Strict mode refuses BEFORE the latch write, which
+    makes the latched ``kernel_disabled`` early-return in
+    :func:`_cvar_tail_fold_rust` structurally unreachable — the wiring is
+    complete by construction, not by sampling.
+    """
+    _refuse_if_strict(reason, **context)
     if _FN not in _KERNEL_DISABLED_REASON:
         _KERNEL_DISABLED_REASON[_FN] = reason
         _LOG.error("cvar_gate.kernel_autoreverted", fn=_FN, reason=reason, **context)
@@ -389,6 +459,10 @@ def _fold_via_kernel(pnls: Sequence[int], alpha_bps: int) -> CvarTailFold | None
         _warn_fallback_once("kernel_error", error=repr(exc)[:200])
         return None
     if not _valid_fold_result(result, len(pnls)):
+        # CLASS B under strict mode — Rust RAN and returned a structurally
+        # refused shape; the Python re-run must not paper over it. Refuse
+        # BEFORE the memo write so a repeat cannot slip past.
+        _refuse_if_strict("kernel_result_refused", result=repr(result)[:200])
         key = f"{_FN}:kernel_result_refused"
         if key not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add(key)

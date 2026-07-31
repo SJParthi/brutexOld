@@ -195,7 +195,19 @@ def resolve_stall_policy(
                 "per_tuple_estimate_s must be a positive, finite number of seconds; "
                 f"got {per_tuple_estimate_s!r}"
             )
-        estimate = per_tuple_estimate_s
+        # Normalise to an EXACT float (DEC-RUST-STRICT-NO-FALLBACK-001). The
+        # other two operands are already exact floats by construction
+        # (:data:`DEFAULT_STALL_FACTOR` / :data:`DEFAULT_STALL_BASE_SECONDS`
+        # are float literals and `_parse_positive_finite` returns `float(raw)`),
+        # so this caller-supplied one was the only way to reach
+        # `routed_stall_timeout`'s exact-``float`` gate and announce
+        # ``stall_timeout_input_refused`` — a CLASS-C "outside the crate's
+        # envelope" degrade that a plain `float()` removes rather than
+        # tolerates. Value-neutral: `factor * 60` and `factor * 60.0` are the
+        # same IEEE double (CPython converts the int operand with the same
+        # `PyLong_AsDouble` this call uses), and the `isfinite`/`> 0` gate
+        # above already rejected every shape `float()` could not carry.
+        estimate = float(per_tuple_estimate_s)
     if sweep_ops_rust_enabled():
         timeout_seconds, scaled_above_base = routed_stall_timeout(
             factor,

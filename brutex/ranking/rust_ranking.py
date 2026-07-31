@@ -39,6 +39,14 @@ ON arm every kernel step runs under its float-parity class's policy
   divergent bit can never reach a leaderboard, a persisted row, or a redo
   comparison — on ANY call, not just during burn-in.
 
+The ``ranking.term_inputs`` family additionally carries the facade's ONE
+CLASS-C input-envelope arm: the crate's ``cr_div_i64`` risk-efficiency
+division serves only operands within 2**53 paisa, so a survivor beyond that
+ceiling is PRE-SCREENED in Python and served from the oracle under the
+distinct ``term_inputs_beyond_crate`` reason — a legitimate input, never a
+broken crate, and therefore exempt from the strict refusal
+(:data:`_TERM_INPUTS_BEYOND_CRATE`).
+
 Everything the ruling table keeps in Python stays in Python here:
 ``pool_sharpe_dispersion`` (exact-rational — PR-2), ``deflated_sharpe_for``
 (the slice-6 seam, including the ``excess + 3.0`` exact-input add),
@@ -104,24 +112,85 @@ RANKING_RUST_ENV: Final[str] = "BRUTEX_RANKING_RUST"
 #: safety layers untouched. The explicit ``0`` env value is the kill switch.
 RANKING_RUST_DEFAULT: Final[bool] = True
 
+#: DEC-RUST-STRICT-NO-FALLBACK-001: this facade opts EVERY family into strict
+#: mode. Almost every reason the families announce is class A
+#: (``flag_unrecognised``, ``wheel_missing``, ``wheel_stale``,
+#: ``kernel_error``) or class B (``kernel_disabled``,
+#: ``kernel_result_refused``, ``divergence``) — those REFUSE. The ONE class-C
+#: arm is :data:`_TERM_INPUTS_BEYOND_CRATE` (see its comment).
+_STRICT_FACADE: Final[str] = "brutex.ranking.rust_ranking"
+
+#: The f64-exactness ceiling of the crate's ``cr_div_i64`` FAST path — the
+#: literal twin of ``ranking::MAX_EXACT_DIV_OPERAND``
+#: (``rust/fno-math/src/ranking.rs``). Every integer with ``|x| <= 2**53``
+#: converts to ``f64`` EXACTLY, so the hardware division of the two exact
+#: operands is the correctly-rounded quotient — CPython's ``int / int``
+#: bit-for-bit. Past it the ``as f64`` casts round BEFORE the division and
+#: the result double-rounds off CPython's answer, so the crate refuses rather
+#: than serve a divergent bit.
+_MAX_EXACT_DIV_OPERAND: Final[int] = 1 << 53
+
+#: CLASS-C reason (DEC-RUST-STRICT-NO-FALLBACK-001) — the ONE
+#: outside-the-crate's-envelope arm in this facade.
+#:
+#: The 7th composite term is ``risk_efficiency`` =
+#: ``avg_mfe_paisa / max(avg_mae_paisa, 1)``, which the crate computes with
+#: ``cr_div_i64`` (``rust/fno-math/src/ranking.rs``). That kernel serves ONLY
+#: operands within :data:`_MAX_EXACT_DIV_OPERAND`; outside it the crate's own
+#: docstring says "the Python wrapper serves an out-of-envelope call from the
+#: bit-exact oracle". So a survivor whose ``|avg_mfe_paisa|`` or
+#: ``max(|avg_mae_paisa|, 1)`` exceeds 2**53 paisa is a LEGITIMATE ranking
+#: input that Python was ALWAYS the intended handler for — never a broken
+#: crate. Refusing it would convert a valid leaderboard into a crash, the
+#: exact inverse of this DEC's intent, so it stays exempt.
+#:
+#: Honest long-term fix: WIDEN the crate — a correctly-rounded big-integer
+#: division (the u128 RNE slow path the kernel's docstring parks in PR-2) —
+#: then this arm becomes unreachable and the entry is deleted. Exempting is
+#: the honest interim, not the destination.
+_TERM_INPUTS_BEYOND_CRATE: Final[str] = "term_inputs_beyond_crate"
+
+#: The facade's CLASS-C allowlist, handed to the ONE family that owns the
+#: envelope arm. Class A / class B reasons are deliberately absent.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({_TERM_INPUTS_BEYOND_CRATE})
+
 #: The seam-level family: carries the flag/wheel warn-once memos (no kernel
 #: of its own — policy is irrelevant, burn-in chosen as the neutral label).
-_SEAM: Final[ParityFamily] = ParityFamily("ranking.seam", policy=POLICY_BURN_IN)
+_SEAM: Final[ParityFamily] = ParityFamily(
+    "ranking.seam", policy=POLICY_BURN_IN, strict_facade=_STRICT_FACADE
+)
 
 #: Class (a) — gate verdicts (comparisons only). Burn-in tripwire.
-_GATES: Final[ParityFamily] = ParityFamily("ranking.gates", policy=POLICY_BURN_IN)
+_GATES: Final[ParityFamily] = ParityFamily(
+    "ranking.gates", policy=POLICY_BURN_IN, strict_facade=_STRICT_FACADE
+)
 #: Class (b) — term inputs (sub, mul, correctly-rounded div). Burn-in.
-_TERMS: Final[ParityFamily] = ParityFamily("ranking.term_inputs", policy=POLICY_BURN_IN)
+#: The ONLY family carrying a class-C envelope arm (the ``cr_div_i64``
+#: risk-efficiency operand ceiling — see :data:`_TERM_INPUTS_BEYOND_CRATE`).
+_TERMS: Final[ParityFamily] = ParityFamily(
+    "ranking.term_inputs",
+    policy=POLICY_BURN_IN,
+    strict_facade=_STRICT_FACADE,
+    strict_exempt_reasons=_STRICT_EXEMPT_REASONS,
+)
 #: Class (b*) — the composite pipeline EMBEDS ``_zscores`` (pow-identity
 #: sites), so the whole kernel runs always-on (the strictest embedded class
 #: governs the family).
-_COMPOSITE: Final[ParityFamily] = ParityFamily("ranking.composite", policy=POLICY_ALWAYS)
+_COMPOSITE: Final[ParityFamily] = ParityFamily(
+    "ranking.composite", policy=POLICY_ALWAYS, strict_facade=_STRICT_FACADE
+)
 #: Class (b*) — the DSR z-term embeds ``_zscores`` too. Always-on.
-_DSR_Z: Final[ParityFamily] = ParityFamily("ranking.dsr_z", policy=POLICY_ALWAYS)
+_DSR_Z: Final[ParityFamily] = ParityFamily(
+    "ranking.dsr_z", policy=POLICY_ALWAYS, strict_facade=_STRICT_FACADE
+)
 #: Class (a) — the `(-score, mask)` index-permutation sort. Burn-in.
-_ORDER: Final[ParityFamily] = ParityFamily("ranking.order", policy=POLICY_BURN_IN)
+_ORDER: Final[ParityFamily] = ParityFamily(
+    "ranking.order", policy=POLICY_BURN_IN, strict_facade=_STRICT_FACADE
+)
 #: Class (a) — the batched overfit verdict (one `>=` per survivor). Burn-in.
-_OVERFIT: Final[ParityFamily] = ParityFamily("ranking.overfit_verdict", policy=POLICY_BURN_IN)
+_OVERFIT: Final[ParityFamily] = ParityFamily(
+    "ranking.overfit_verdict", policy=POLICY_BURN_IN, strict_facade=_STRICT_FACADE
+)
 
 #: Every family, for the test-reset seam (order irrelevant).
 _ALL_FAMILIES: Final[tuple[ParityFamily, ...]] = (
@@ -250,6 +319,34 @@ def _row_streak_threshold(m: ResultMetrics) -> int:
     if lr is None or not math.isfinite(lr):
         return _MAX_CONSECUTIVE_LOSSES
     return streak_door_threshold(m.total_trades, lr)
+
+
+def _term_inputs_within_crate_envelope(survivors: Sequence[tuple[int, ResultMetrics]]) -> bool:
+    """``True`` iff EVERY survivor's risk-efficiency operands fit the crate.
+
+    The literal Python twin of the crate's ``cr_div_i64`` guard
+    (``rust/fno-math/src/ranking.rs``) evaluated on the operands
+    ``composite_term_inputs_core`` feeds it — ``avg_mfe_paisa`` over
+    ``max(avg_mae_paisa, 1)``, magnitudes compared against
+    :data:`_MAX_EXACT_DIV_OPERAND` (Rust's ``unsigned_abs()`` is Python's
+    ``abs()`` on the same value, ``i64::MIN`` included).
+
+    BATCH-level by construction, matching the kernel: ``composite_term_inputs``
+    is one call over the whole column set and its ``?`` aborts the ENTIRE call
+    on the first out-of-envelope row, so one such survivor puts the whole
+    leaderboard's term step on the oracle either way. Screening here — rather
+    than letting the kernel raise — is what separates this legitimate CLASS-C
+    input from a CLASS-A broken crate (:data:`_TERM_INPUTS_BEYOND_CRATE`); it
+    also skips a doomed FFI round trip. The served VALUE is the oracle's on
+    both sides of the screen, so no ranked order and no persisted value moves.
+    """
+    limit = _MAX_EXACT_DIV_OPERAND
+    for _, m in survivors:
+        if abs(m.avg_mfe_paisa) > limit:
+            return False
+        if abs(max(m.avg_mae_paisa, 1)) > limit:
+            return False
+    return True
 
 
 def _gate_verdicts(kernels: _Kernels, metrics_list: Sequence[ResultMetrics]) -> tuple[bool, ...]:
@@ -398,26 +495,37 @@ def rank_combos_via_rust(
         return []
 
     n = len(survivors)
-    term_rows = run_with_parity(
-        _TERMS,
-        kernel=lambda: cast(
-            list[list[float]],
-            kernels.composite_term_inputs(
-                [m.sharpe_ratio for _, m in survivors],
-                [m.sortino_ratio for _, m in survivors],
-                [m.calmar_ratio for _, m in survivors],
-                [m.profit_factor for _, m in survivors],
-                [m.recovery_factor for _, m in survivors],
-                [m.win_rate for _, m in survivors],
-                [m.win_loss_ratio for _, m in survivors],
-                [m.avg_mfe_paisa for _, m in survivors],
-                [m.avg_mae_paisa for _, m in survivors],
+
+    def term_oracle() -> list[list[float]]:
+        return [list(composite_term_inputs(m)) for _, m in survivors]
+
+    if _term_inputs_within_crate_envelope(survivors):
+        term_rows = run_with_parity(
+            _TERMS,
+            kernel=lambda: cast(
+                list[list[float]],
+                kernels.composite_term_inputs(
+                    [m.sharpe_ratio for _, m in survivors],
+                    [m.sortino_ratio for _, m in survivors],
+                    [m.calmar_ratio for _, m in survivors],
+                    [m.profit_factor for _, m in survivors],
+                    [m.recovery_factor for _, m in survivors],
+                    [m.win_rate for _, m in survivors],
+                    [m.win_loss_ratio for _, m in survivors],
+                    [m.avg_mfe_paisa for _, m in survivors],
+                    [m.avg_mae_paisa for _, m in survivors],
+                ),
             ),
-        ),
-        oracle=lambda: [list(composite_term_inputs(m)) for _, m in survivors],
-        key=pack_float_rows,
-        validate=lambda rows: _is_term_rows(rows, n, N_COMPOSITE_TERMS),
-    )
+            oracle=term_oracle,
+            key=pack_float_rows,
+            validate=lambda rows: _is_term_rows(rows, n, N_COMPOSITE_TERMS),
+        )
+    else:
+        # CLASS C — an out-of-envelope risk-efficiency operand. A legitimate
+        # input the Python oracle has always served; NEVER a broken crate, so
+        # it is exempt from the strict refusal (_TERM_INPUTS_BEYOND_CRATE).
+        _TERMS.warn_fallback_once(_TERM_INPUTS_BEYOND_CRATE)
+        term_rows = term_oracle()
     term_columns = tuple([row[term] for row in term_rows] for term in range(N_COMPOSITE_TERMS))
 
     if dsr_by_survivor is None:

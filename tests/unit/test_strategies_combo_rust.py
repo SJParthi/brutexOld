@@ -28,6 +28,7 @@ from typing import Any
 
 import brutex.strategies.combo_rust as cr
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.data import lake_rust_render
 from brutex.engine import sweep_lookahead
 from brutex.strategies.combo import _first_offending_field, _stdlib_canonical_json
@@ -119,6 +120,23 @@ def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     cr.reset_combo_rust_for_tests()
 
 
+@pytest.fixture
+def _strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable strict mode for tests that exercise the DEGRADE contract.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` ON by
+    default, so a CLASS-A/B fall-back (absent/stale/panicking crate, a
+    poisoned return, a burn-in mismatch) now RAISES instead of degrading.
+    Warn-and-degrade remains a fully supported, kill-switched mode — these
+    tests pin THAT mode, so they opt into it explicitly rather than having
+    their assertions weakened. Tests of the CLASS-C exemption
+    (``nonexact_key_refused``) and of the unresolved-pending-ruling pair
+    (``canonical_json_error`` / ``scan_error``) deliberately do NOT use this
+    fixture: those degrade under strict mode too, which is the point.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
+
 class TestFlagResolution:
     def test_default_unset_is_on_without_warn(self) -> None:
         # DEC-RUST-DEFAULT-ON-WAVE-001: unset ⇒ the Rust path is ON.
@@ -136,6 +154,7 @@ class TestFlagResolution:
             assert cr.combo_rust_enabled() is False
         assert logs == []
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_junk_is_loud_off_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(cr.STRATEGIES_RUST_COMBO_ENV, "banana")
         with capture_logs() as logs:
@@ -262,6 +281,7 @@ class TestOffArmInertness:
 
         assert cr.routed_first_offending_field(_gen(), python_law=_first_offending_field) == "a"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_latched_process_serves_oracle_without_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -281,6 +301,7 @@ class TestOffArmInertness:
 
 
 class TestCrateGuards:
+    @pytest.mark.usefixtures("_strict_off")
     def test_crate_absent_latches_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
 
@@ -296,6 +317,7 @@ class TestCrateGuards:
         assert len(events) == 1
         assert events[0]["reason"] == "crate_unavailable"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_crate_absent_scan_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
 
@@ -313,6 +335,7 @@ class TestCrateGuards:
         assert cr.routed_first_offending_field(_gen(), python_law=_first_offending_field) == "a"
         assert cr.rust_combo_disabled() is True
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_crate_stale_missing_symbol_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
         crate = _fake_crate()
@@ -325,6 +348,7 @@ class TestCrateGuards:
         events = [e for e in logs if e["event"] == "combo_rust.rust_path_disabled"]
         assert events[0]["reason"] == "crate_stale"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_crate_stale_noncallable_symbol_latches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
         crate = _fake_crate()
@@ -336,11 +360,13 @@ class TestCrateGuards:
         assert result == "b"
         assert cr.rust_combo_disabled() is True
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_disable_repeat_is_noop(self) -> None:
         cr._disable("first")
         cr._disable("second")
         assert cr._DISABLED_REASON[0] == "first"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_reset_seam_restores_live_state(self) -> None:
         cr._disable("test_latch")
         cr._warn_once("some_reason")
@@ -353,6 +379,7 @@ class TestCrateGuards:
 
 
 class TestCanonicalRouting:
+    @pytest.mark.usefixtures("_strict_off")
     @pytest.mark.parametrize(
         "exc_factory",
         [ValueError, RuntimeError, OverflowError, AttributeError],
@@ -360,6 +387,9 @@ class TestCanonicalRouting:
     def test_degrade_error_serves_oracle_with_one_warn(
         self, monkeypatch: pytest.MonkeyPatch, exc_factory: type[Exception]
     ) -> None:
+        # UNMARKED crate errors ⇒ CLASS A/B ``canonical_json_error`` — the
+        # warn-and-degrade arm, which strict mode refuses (pinned in
+        # TestStrictMode), so this pins the kill-switched mode explicitly.
         _flag_on(monkeypatch)
 
         def _boom(tree: Mapping[str, Any]) -> str:
@@ -374,9 +404,11 @@ class TestCanonicalRouting:
         assert warns[0]["reason"] == "canonical_json_error"
         assert cr.rust_combo_disabled() is False  # degrade, not latch
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_type_error_without_marker_is_generic_degrade(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # No marker at all ⇒ a genuine crate FAULT, not an input refusal.
         _flag_on(monkeypatch)
 
         def _boom(tree: Mapping[str, Any]) -> str:
@@ -387,6 +419,33 @@ class TestCanonicalRouting:
             assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
         warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
         assert warns[0]["reason"] == "canonical_json_error"
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [ValueError, TypeError, OverflowError],
+        ids=["value_error", "type_error", "overflow_error"],
+    )
+    def test_input_refused_marker_gets_its_own_reason(
+        self, monkeypatch: pytest.MonkeyPatch, exc_factory: type[Exception]
+    ) -> None:
+        # DEC-RUST-STRICT-NO-FALLBACK-001 task #8: the crate MARKS every
+        # input-envelope refusal it raises, across all three degrade-set
+        # classes it can use — so the facade classifies on crate-minted
+        # evidence, not on the exception class.
+        _flag_on(monkeypatch)
+
+        def _refuse(tree: Mapping[str, Any]) -> str:
+            raise exc_factory(
+                f"canonical_json: int outside the i128 routing range — "
+                f"{cr._INPUT_REFUSED_MARKER}: OverflowError"
+            )
+
+        _install_crate(monkeypatch, _fake_crate(canonical=_refuse))
+        with capture_logs() as logs:
+            assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
+        warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
+        assert warns[0]["reason"] == "canonical_json_input_refused"
+        assert cr.rust_combo_disabled() is False  # refuse the INPUT, never latch
 
     def test_nonexact_key_marker_gets_its_own_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
@@ -417,6 +476,7 @@ class TestCanonicalRouting:
             cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json)
         assert cr.rust_combo_disabled() is False
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_panic_belt_latches_crate_panic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
 
@@ -431,6 +491,7 @@ class TestCanonicalRouting:
         assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
         assert cr._DISABLED_REASON[0] == "crate_panic"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_non_str_result_refused_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
 
@@ -444,6 +505,7 @@ class TestCanonicalRouting:
         assert warns[0]["reason"] == "canonical_result_refused"
         assert warns[0]["result_type"] == "bytes"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_burn_in_mismatch_ships_oracle_and_autoreverts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -544,7 +606,10 @@ class TestScanRouting:
                 python_law=_first_offending_field,
             )
         warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
-        assert warns[0]["reason"] == "scan_error"
+        # CLASS C: the malformed pair never reaches the crate — the Python
+        # oracle is the intended handler, so strict mode does NOT refuse
+        # (this test deliberately runs with strict ON, the default).
+        assert warns[0]["reason"] == "scan_input_refused"
 
     def test_offender_before_malformed_pair_returns_name(
         self, monkeypatch: pytest.MonkeyPatch
@@ -562,7 +627,10 @@ class TestScanRouting:
         )
         assert result == "b"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_crate_degrade_error_serves_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # UNMARKED ⇒ CLASS A/B ``scan_error`` — the warn-and-degrade arm
+        # (strict mode refuses it; pinned in TestStrictMode).
         _flag_on(monkeypatch)
 
         def _boom(values: list[str]) -> int | None:
@@ -578,6 +646,30 @@ class TestScanRouting:
         assert warns[0]["reason"] == "scan_error"
         assert cr.rust_combo_disabled() is False
 
+    def test_crate_input_refused_marker_gets_its_own_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The crate's ``Vec<String>`` extraction declining a non-str /
+        # lone-surrogate / non-sequence argument is CLASS C — marked at the
+        # raise site, so it keeps degrading with strict ON (the default).
+        _flag_on(monkeypatch)
+
+        def _refuse(values: list[str]) -> int | None:
+            raise TypeError(
+                f"first_unit_separator: values — {cr._INPUT_REFUSED_MARKER}: "
+                "'int' object is not an instance of 'str'"
+            )
+
+        _install_crate(monkeypatch, _fake_crate(scan=_refuse))
+        with capture_logs() as logs:
+            result = cr.routed_first_offending_field(
+                OFFENDING_FIELDS, python_law=_first_offending_field
+            )
+        assert result == "b"
+        warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
+        assert warns[0]["reason"] == "scan_input_refused"
+        assert cr.rust_combo_disabled() is False
+
     @pytest.mark.parametrize("escape", [KeyboardInterrupt, SystemExit, MemoryError])
     def test_escape_set_reraises_raw(
         self, monkeypatch: pytest.MonkeyPatch, escape: type[BaseException]
@@ -591,6 +683,7 @@ class TestScanRouting:
         with pytest.raises(escape):
             cr.routed_first_offending_field(OFFENDING_FIELDS, python_law=_first_offending_field)
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_panic_belt_latches_crate_panic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(monkeypatch)
 
@@ -613,6 +706,7 @@ class TestScanRouting:
         ["0", True, -1, 3],  # non-int / bool / negative / out-of-range (len == 3)
         ids=["str_index", "bool_index", "negative_index", "past_end_index"],
     )
+    @pytest.mark.usefixtures("_strict_off")
     def test_poison_index_refused_to_oracle(
         self, monkeypatch: pytest.MonkeyPatch, poison: object
     ) -> None:
@@ -627,6 +721,7 @@ class TestScanRouting:
         assert warns[0]["reason"] == "scan_result_refused"
         assert cr.rust_combo_disabled() is False
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_burn_in_mismatch_ships_oracle_and_autoreverts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -673,6 +768,224 @@ class TestScanRouting:
             )
         assert [e for e in logs if e["event"] == "combo_rust.burn_in_complete"] == []
         assert cr._BURN_IN_REMAINING[cr._LAW_SCAN] == 1
+
+
+class TestStrictMode:
+    """DEC-RUST-STRICT-NO-FALLBACK-001: Class A/B refuse, the allowlist does not.
+
+    The exemption is an ENUMERATED module-level frozenset, not an ``if``
+    buried in the choke point — so the split is reviewable and pinned here.
+    """
+
+    def test_exempt_reason_sets_are_pinned(self) -> None:
+        # CLASS C — every member is an input the crate itself declines (or,
+        # for the scan unpack, one it never sees): the Python oracle is the
+        # intended handler and answers byte-equally, so refusing would crash
+        # a legitimate call.
+        ruled_exempt = {
+            "nonexact_key_refused",
+            "canonical_json_input_refused",
+            "scan_input_refused",
+        }
+        # EMPTY since DEC-RUST-STRICT-NO-FALLBACK-001 task #8: the two
+        # formerly-mixed tokens (canonical_json_error / scan_error) were
+        # split along the A/B-vs-C line by marking the input refusals in the
+        # crate, so nothing is held out of the taxonomy any more.
+        held_unresolved: set[str] = set()
+        assert ruled_exempt == cr._STRICT_EXEMPT_REASONS
+        assert held_unresolved == cr._STRICT_UNRESOLVED_REASONS
+        assert not cr._STRICT_UNRESOLVED_REASONS
+        # The genuine-fault remainder is NOT exempt — it refuses.
+        assert not ({"canonical_json_error", "scan_error"} & cr._STRICT_NOT_REFUSED)
+        assert (ruled_exempt | held_unresolved) == cr._STRICT_NOT_REFUSED
+        # Immutable by construction — the allowlist is not a mutable global.
+        for allowlist in (
+            cr._STRICT_EXEMPT_REASONS,
+            cr._STRICT_UNRESOLVED_REASONS,
+            cr._STRICT_NOT_REFUSED,
+        ):
+            assert isinstance(allowlist, frozenset)
+
+    def test_absent_crate_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Strict is ON by default — the fixture never sets the env at all.
+        _flag_on(monkeypatch)
+
+        def _import(name: str) -> object:
+            raise ImportError(name)
+
+        monkeypatch.setattr(cr.importlib, "import_module", _import)
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json)
+        message = str(excinfo.value)
+        assert "brutex.strategies.combo_rust" in message
+        assert "crate_unavailable" in message
+        assert RUST_STRICT_ENV in message
+        # Refused BEFORE the latch — no silently-degraded steady state.
+        assert cr.rust_combo_disabled() is False
+
+    def test_junk_flag_refuses_under_strict_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(cr.STRATEGIES_RUST_COMBO_ENV, "banana")
+        with pytest.raises(RustFallbackRefused, match="flag_unrecognised"):
+            cr.combo_rust_enabled()
+
+    def test_poisoned_canonical_result_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate(canonical=lambda tree: b'{"a":1}'))
+        with pytest.raises(RustFallbackRefused, match="canonical_result_refused"):
+            cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json)
+
+    def test_poisoned_scan_result_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate(scan=lambda values: -1))
+        with pytest.raises(RustFallbackRefused, match="scan_result_refused"):
+            cr.routed_first_offending_field(OFFENDING_FIELDS, python_law=_first_offending_field)
+
+    def test_burn_in_mismatch_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate(scan=lambda values: None))
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch_scan"):
+            cr.routed_first_offending_field(OFFENDING_FIELDS, python_law=_first_offending_field)
+
+    def test_nonexact_key_still_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # CLASS C (ruled): the exact-type gate declined a key it never
+        # claimed to handle — refusing would crash a legitimate input.
+        _flag_on(monkeypatch)
+
+        def _refuse(tree: Mapping[str, Any]) -> str:
+            raise TypeError(
+                "canonical_json: dict key is a str subclass (non-exact str) — refused to the oracle"
+            )
+
+        _install_crate(monkeypatch, _fake_crate(canonical=_refuse))
+        assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
+        assert cr.rust_combo_disabled() is False
+
+    def test_marked_input_refusals_still_serve_the_oracle_under_strict(self) -> None:
+        # CLASS C, RESOLVED (task #8): the crate MARKS the inputs it
+        # declines, so those calls keep degrading byte-equally under strict
+        # mode — refusing them would crash inputs the oracle is documented
+        # to answer (out-of-i128 ints, lone surrogates, bare floats,
+        # malformed scan pairs). Nested MonkeyPatch context: never a
+        # module-level autouse env fixture (teardown-ordering leak class).
+        with pytest.MonkeyPatch.context() as mp:
+            _flag_on(mp)
+
+            def _refuse(tree: Mapping[str, Any]) -> str:
+                raise OverflowError(
+                    f"canonical_json: int outside the i128 routing range — "
+                    f"{cr._INPUT_REFUSED_MARKER}: too large"
+                )
+
+            _install_crate(mp, _fake_crate(canonical=_refuse))
+            assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
+
+            cr.reset_combo_rust_for_tests()
+
+            def _scan_refuse(values: list[str]) -> int | None:
+                raise TypeError(
+                    f"first_unit_separator: values — {cr._INPUT_REFUSED_MARKER}: not a str"
+                )
+
+            _install_crate(mp, _fake_crate(scan=_scan_refuse))
+            assert (
+                cr.routed_first_offending_field(
+                    OFFENDING_FIELDS, python_law=_first_offending_field
+                )
+                == "b"
+            )
+
+            cr.reset_combo_rust_for_tests()
+            _install_crate(mp, _fake_crate())
+            assert (
+                cr.routed_first_offending_field(
+                    (("b", "x\x1fy"), ("bad", "x", "y")),  # type: ignore[arg-type]
+                    python_law=_first_offending_field,
+                )
+                == "b"
+            )
+            assert cr.rust_combo_disabled() is False
+
+    def test_unmarked_canonical_fault_refuses_under_strict_default(self) -> None:
+        # CLASS B: a caught render panic (RuntimeError) / broken wheel
+        # internals arrive UNMARKED — a genuine Rust failure, so strict mode
+        # refuses instead of silently serving Python.
+        with pytest.MonkeyPatch.context() as mp:
+            _flag_on(mp)
+
+            def _boom(tree: Mapping[str, Any]) -> str:
+                raise RuntimeError(
+                    "brutex-strategies canonical render panicked (caught at the FFI boundary)"
+                )
+
+            _install_crate(mp, _fake_crate(canonical=_boom))
+            with pytest.raises(RustFallbackRefused, match="canonical_json_error"):
+                cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json)
+            assert cr.rust_combo_disabled() is False
+
+    def test_unmarked_scan_fault_refuses_under_strict_default(self) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            _flag_on(mp)
+
+            def _scan_boom(values: list[str]) -> int | None:
+                raise ValueError("scan blew up")
+
+            _install_crate(mp, _fake_crate(scan=_scan_boom))
+            with pytest.raises(RustFallbackRefused, match="scan_error"):
+                cr.routed_first_offending_field(
+                    OFFENDING_FIELDS, python_law=_first_offending_field
+                )
+            assert cr.rust_combo_disabled() is False
+
+    def test_marked_refusals_warn_and_degrade_with_strict_off(self) -> None:
+        # The kill-switched mode keeps the historic warn-once behaviour for
+        # the CLASS-C tokens too — the reasons are identical either way,
+        # only the strict gate differs.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(RUST_STRICT_ENV, "0")
+            _flag_on(mp)
+
+            def _refuse(tree: Mapping[str, Any]) -> str:
+                raise ValueError(f"canonical_json: str value — {cr._INPUT_REFUSED_MARKER}: x")
+
+            _install_crate(mp, _fake_crate(canonical=_refuse))
+            with capture_logs() as logs:
+                for _ in range(2):
+                    assert (
+                        cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json)
+                        == CANON
+                    )
+            warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
+            assert len(warns) == 1  # the warn-once memo
+            assert warns[0]["reason"] == "canonical_json_input_refused"
+
+    def test_kill_switch_restores_the_degrade_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+        _flag_on(monkeypatch)
+
+        def _import(name: str) -> object:
+            raise ImportError(name)
+
+        monkeypatch.setattr(cr.importlib, "import_module", _import)
+        assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
+        assert cr.rust_combo_disabled() is True
+
+    def test_engaged_success_arm_is_untouched_by_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate())
+        assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
+        assert cr.rust_combo_disabled() is False
 
 
 class TestConftestBelt:

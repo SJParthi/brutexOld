@@ -226,3 +226,34 @@ class TestSweepOpsRouting:
             assert unscaled == StallPolicy(timeout_seconds=300.0, source="default")
         finally:
             self._reset_facade()
+
+
+class TestClassCFallbackUnreachable:
+    """The caller-supplied estimate reaches the crate — no CLASS-C degrade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. ``routed_stall_timeout`` gates its three
+    operands on ``type(v) is float``, so before the call-site normalisation an
+    ``int`` estimate (``per_tuple_estimate_s=60`` — a perfectly ordinary
+    operator value) announced ``stall_timeout_input_refused`` and served the
+    Python oracle: a fall-back on an input the law handles EXACTLY. The fix is
+    a plain ``float()`` at the call site, which makes the refusal unreachable
+    for every normal operator input rather than merely tolerated.
+    """
+
+    def test_int_estimate_reaches_the_crate(self) -> None:
+        """An ``int`` estimate routes with ZERO fall-backs (crate engaged)."""
+        from tests.fakes.sweep_ops_crate import routed_fallback_reasons
+
+        policy, reasons, engaged = routed_fallback_reasons(
+            lambda: resolve_stall_policy(per_tuple_estimate_s=60, workers=1, env={})
+        )
+        assert reasons == []
+        assert engaged == 1  # anti-vacuity: the crate genuinely ran
+        assert policy == StallPolicy(timeout_seconds=600.0, source="scaled")
+
+    def test_int_estimate_is_value_identical_to_its_float_twin(self) -> None:
+        """Normalisation is value-neutral — ``60`` and ``60.0`` resolve identically."""
+        as_int = resolve_stall_policy(per_tuple_estimate_s=60, workers=1, env={})
+        as_float = resolve_stall_policy(per_tuple_estimate_s=60.0, workers=1, env={})
+        assert as_int == as_float
+        assert type(as_int.timeout_seconds) is float

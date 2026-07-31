@@ -100,6 +100,7 @@ from typing import TYPE_CHECKING, Final, cast
 import structlog
 
 from brutex.backup.errors import BackupError
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import degrade_errors, panic_belt_errors
 
 if TYPE_CHECKING:
@@ -236,7 +237,25 @@ def reset_backup_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
 
 
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``backup_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``backup_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Every reason funnelled here is CLASS A
+    (the crate is absent/stale/raised — ``flag_unrecognised``, ``law_error``)
+    or CLASS B (the crate ran and its output was structurally refused —
+    ``result_refused``); both refuse under ``BRUTEX_RUST_STRICT``, so the
+    refusal is UNCONDITIONAL and this module carries no exemption set.
+
+    There is NO class-C reason at this choke point. The one input-envelope
+    arm — the :data:`USE_ORACLE` abstain contract (layer 3: a crate decision
+    whose Python spelling embeds a CPython repr, or an input serde parses
+    differently than CPython's ``json`` — ``NaN``/``Infinity`` literals,
+    lone surrogates, ``\\x1c``-class whitespace) — returns the Python oracle
+    from :func:`route_law` WITHOUT announcing, so those inputs still reach
+    Python under strict mode exactly as they do today. That is deliberate:
+    refusing there would break backup rendering on a legitimate input; the
+    honest fix is widening the crate until the abstain is unreachable.
+    """
+    refuse_if_strict("brutex.backup.backup_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -244,12 +263,21 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
 
     ``error=True`` logs ``backup_rust.autoreverted`` at ERROR (the burn-in
     autorevert — a genuine wrongness signal); guard latches log
     ``backup_rust.rust_path_disabled`` at WARN. Repeat calls are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: reasons here are CLASS A
+    (``crate_unavailable``, ``crate_panic``) or CLASS B
+    (``burn_in_mismatch`` — the crate DISAGREED with the oracle), so the
+    refusal is UNCONDITIONAL. It fires BEFORE the latch is written, so under
+    strict mode the latch can never be set and the latched early-return in
+    :func:`route_law` is structurally unreachable — wiring these two
+    functions therefore covers every announced fall-back this facade takes.
     """
+    refuse_if_strict("brutex.backup.backup_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

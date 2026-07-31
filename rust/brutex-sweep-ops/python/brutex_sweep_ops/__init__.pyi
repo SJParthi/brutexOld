@@ -10,11 +10,18 @@ __build_crate_version__: str
 def join_path_segments(base: str, segments: Sequence[str]) -> str: ...
 def gate_config_fragment(
     overfit: tuple[float, float, float, float] | None,
+    max_sl_hit_rate: float | None,
+    cvar: tuple[int, int] | None,
     stage3_enable: bool,
     stage3_top_k: int,
     stage3_max_fevals: int,
     stage3_max_restarts: int,
-) -> tuple[tuple[float, float, float, float] | None, tuple[int, int, int] | None]: ...
+) -> tuple[
+    tuple[float, float, float, float] | None,
+    float | None,
+    tuple[int, int] | None,
+    tuple[int, int, int] | None,
+]: ...
 def stall_scaled_timeout(factor: float, estimate: float, base: float) -> tuple[float, bool]: ...
 def progress_derived(
     enumerated: int,

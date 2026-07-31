@@ -217,6 +217,8 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
+
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Mapping
     from types import ModuleType
@@ -444,7 +446,28 @@ def _warn_once(reason: str, **context: object) -> None:
     repeats fall through silently (the Python bytes serve regardless). The
     event name is a LITERAL with the reason as a field — the
     ``rust_metrics.fallback`` grep-able convention.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Every reason funnelled here is CLASS A (``flag_unrecognised`` — the
+    junk-flag arm; ``profile_unknown`` — the caller named a render profile
+    this facade does not implement, so there is no crate callable to run;
+    ``render_error`` — the crate raised) or CLASS B
+    (``render_result_refused`` — refuse-poison rejected a non-``bytes``
+    crate return). There is NO class-C reason at this choke point, so no
+    exemption set: the seam's inputs are a frame the crate always claims
+    plus facade-minted tokens — no caller can hand it a value the crate
+    legitimately declines. Strict-OFF is byte-identical to the prior
+    behaviour.
+
+    STORED-BYTE SAFETY (this facade renders persisted parquet): the refusal
+    can only ever REPLACE a Python-oracle byte string with an exception —
+    it can never change a byte that is written. A guard-clean, burn-in-clean
+    call returns the crate bytes as before; a burn-in MATCH still ships the
+    crate bytes; a refusal propagates out of the caller's
+    ``lake_write_guard`` block before ``os.replace``, so the destination is
+    untouched (no partial write, no corruption).
     """
+    refuse_if_strict("brutex.data.lake_rust_render", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -459,7 +482,19 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     below the operator's view); guard latches log
     ``lake_rust_render.rust_path_disabled`` at WARN. Repeat calls are
     no-ops (the latch is already set).
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` / ``crate_metadata_error``
+    / ``polars_version_mismatch`` / ``crate_panic`` — the install is absent,
+    stale, foreign or broke) or CLASS B (``burn_in_byte_mismatch`` — the
+    crate's bytes disagreed with the oracle's); none is class C, so none is
+    exempt. The refusal fires BEFORE the latch is written, so under strict
+    mode the latch is never set and every ``rust_render_disabled()``
+    early-return is structurally unreachable. Strict-OFF is byte-identical
+    to the prior behaviour; see :func:`_warn_once` for the stored-byte
+    safety argument (a refusal removes a write, never rewrites one).
     """
+    refuse_if_strict("brutex.data.lake_rust_render", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

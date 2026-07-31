@@ -94,6 +94,8 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
+
 # §11 COMMON — ONE flag vocabulary + ONE panic belt for the brutex-lake
 # facades. `env_flag_tristate` is the sibling's public helper;
 # `_panic_belt_errors` is a same-package private import (the underscore is
@@ -276,8 +278,42 @@ def _flag_enabled(env_var: str) -> bool:
     return True
 
 
+#: CLASS-C reasons EXEMPT from the strict-mode refusal
+#: (DEC-RUST-STRICT-NO-FALLBACK-001). Enumerated + reviewable here, never
+#: buried in an inline condition. Everything NOT listed refuses.
+#:
+#: * ``partial_window_abstain`` — the crate's OWN declared ABSTAIN contract
+#:   for :func:`routed_classify_partial_window`: a ``None`` return means a
+#:   session walk stepped OFF the Python-built trading-flag grid (the span
+#:   the caller supplied does not cover the day the law must reach). That is
+#:   an INPUT outside the crate's envelope, not a fault — the crate's
+#:   ``SessionGrid`` returns ``None`` for an off-grid day BY DESIGN
+#:   (``rust/brutex-lake/src/detectors.rs``), while every genuine crate
+#:   fault surfaces as a ``RuntimeError`` from the ``catch_unwind`` boundary
+#:   (→ ``partial_window_error``) or as a malformed tuple (→
+#:   ``partial_window_result_refused``), so the token is NOT overloaded. The
+#:   Python oracle was always the intended handler for an off-grid span;
+#:   refusing would crash a legitimate caller. The honest fix is to widen
+#:   the grid the caller builds (or the crate's walk) until the abstain is
+#:   unreachable, then delete the entry — not to refuse.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({"partial_window_abstain"})
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``detectors_rust.fallback`` WARN once per process per *reason*."""
+    """Log ``detectors_rust.fallback`` WARN once per process per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``
+    unless *reason* is in :data:`_STRICT_EXEMPT_REASONS`. The refused set is
+    CLASS A (``flag_unrecognised:<env var>`` — the junk-flag arm, whose
+    token carries the variable name; ``hash_error`` /
+    ``interior_runs_error`` / ``partial_window_error`` — the crate raised)
+    and CLASS B (``hash_result_refused`` /
+    ``interior_runs_result_refused`` / ``partial_window_result_refused`` —
+    refuse-poison rejected the crate's return shape). Strict-OFF is
+    byte-identical to the prior behaviour.
+    """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        refuse_if_strict("brutex.data.detectors_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -290,7 +326,17 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``detectors_rust.autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``detectors_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` / ``crate_stale`` /
+    ``crate_panic``) or CLASS B (``burn_in_mismatch_<law>`` — the crate
+    disagreed with the oracle); none is class C, so none is exempt. The
+    refusal fires BEFORE the latch is written, so under strict mode the
+    latch is never set and every ``rust_detectors_disabled()`` early-return
+    is structurally unreachable. Strict-OFF is byte-identical to the prior
+    behaviour.
     """
+    refuse_if_strict("brutex.data.detectors_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

@@ -129,6 +129,26 @@ def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Any:
     compute_rust.reset_observability_memo_for_tests()
 
 
+@pytest.fixture
+def _degrade_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn the strict-Rust gate OFF for one test (the fall-back arm).
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` **ON**, so
+    every fall-back this facade reports RAISES
+    :class:`~brutex.config.rust_strict.RustFallbackRefused` instead of
+    returning its historic sentinel. Degrade-to-Python remains a SUPPORTED
+    mode behind that kill switch, and the tests below are exactly the tests
+    that exercise it — so they opt into the kill switch rather than weaken
+    what they assert.
+
+    Deliberately NOT autouse: strict mode must keep its teeth for every
+    other test in this module (the flag matrix's armed/disarmed arms, the
+    parity corpus, the validator suites, the never-routes bomb spies), so
+    the opt-out is visible in each degrade test's own signature.
+    """
+    monkeypatch.setenv("BRUTEX_RUST_STRICT", "0")
+
+
 def _valid_wire() -> tuple[Any, ...]:
     """A structurally valid kernel wire tuple for the pin fixture."""
     returns = [t.pnl_paisa / _PIN_START for t in _PIN_TRADES]
@@ -185,6 +205,7 @@ class TestFlagMatrix:
         monkeypatch.setenv(_FLAG, "   ")
         assert compute_rust.metrics_rust_fold_enabled() is compute_rust.METRICS_RUST_FOLD_DEFAULT
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_junk_is_off_with_one_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "ture")
         with capture_logs() as logs:
@@ -216,6 +237,7 @@ class TestResolveKernel:
         kernel = compute_rust._resolve_kernel()
         assert kernel is fno_math.metrics_fold_trades
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_wheel_missing_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "fno_math", None)
         with capture_logs() as logs:
@@ -225,6 +247,7 @@ class TestResolveKernel:
         assert len(warns) == 1
         assert warns[0]["reason"] == "wheel_missing"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_wheel_stale_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "fno_math", types.SimpleNamespace())
         with capture_logs() as logs:
@@ -233,6 +256,7 @@ class TestResolveKernel:
         assert len(warns) == 1
         assert warns[0]["reason"] == "wheel_stale"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_wheel_stale_on_both_faces_names_each_symbol_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -265,6 +289,7 @@ class TestFoldViaKernelDegrades:
     compare, so a degrade path must never touch it (pinned here).
     """
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_kernel_disabled_short_circuits(self) -> None:
         compute_rust.disable_kernel("test_latch")
         with capture_logs() as logs:
@@ -276,6 +301,7 @@ class TestFoldViaKernelDegrades:
         assert len(warns) == 1
         assert warns[0]["reason"] == "kernel_disabled"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_wheel_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "fno_math", None)
         assert (
@@ -286,6 +312,7 @@ class TestFoldViaKernelDegrades:
     @pytest.mark.parametrize(
         "exc", [ValueError("boundary"), TypeError("conversion"), RuntimeError("poisoned")]
     )
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_kernel_raise_degrades(self, monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
         def _bomb(*_args: object) -> object:
             raise exc
@@ -309,6 +336,7 @@ class TestFoldViaKernelDegrades:
         with pytest.raises(MemoryError):
             compute_rust.fold_wire_via_kernel(_PIN_TRADES, _PIN_START, oracle_wire=_oracle_bomb)
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_beyond_i64_pnl_degrades_via_real_kernel(self) -> None:
         """A pnl outside i64 fails PyO3 conversion → OverflowError → oracle."""
         trades = [_trade(2**70), _trade(-1)]
@@ -323,6 +351,7 @@ class TestFoldViaKernelDegrades:
         folds = _fold_trades(trades, 1_000)
         assert folds.net_pnl_paisa == 2**70 - 1
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_invalid_wire_refused_loudly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _plant_kernel(monkeypatch, lambda *_a: ("junk",))
         with capture_logs() as logs:
@@ -490,6 +519,7 @@ class TestBurnIn:
             )
         assert len(_events(logs, "metrics_rust_fold.engaged")) == 1
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_mismatch_ships_oracle_and_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         wire = _valid_wire()
         floats = list(wire[3])
@@ -517,6 +547,7 @@ class TestBurnIn:
             )
         assert _events(logs, "metrics_rust_fold.fallback")[0]["reason"] == "kernel_disabled"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_disable_kernel_repeat_is_noop(self) -> None:
         with capture_logs() as logs:
             compute_rust.disable_kernel("first")
@@ -586,6 +617,7 @@ class TestDispatchChokepoint:
         assert isinstance(folds, TradeFolds)
         assert isinstance(folds.moments, Moments)
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_flag_on_kernel_unavailable_falls_to_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -920,6 +952,7 @@ class TestValidRecencyWire:
 class TestRecencyViaKernelDegrades:
     """Every recency kernel fault serves the row from the Python oracle."""
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_kernel_disabled_short_circuits(self) -> None:
         compute_rust.disable_kernel("test_latch")
         with capture_logs() as logs:
@@ -928,12 +961,14 @@ class TestRecencyViaKernelDegrades:
         assert len(warns) == 1
         assert warns[0]["reason"] == "kernel_disabled"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_wheel_missing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "fno_math", None)
         with capture_logs() as logs:
             assert _recency_via_kernel() is None
         assert _events(logs, "metrics_rust_fold.fallback")[0]["reason"] == "wheel_missing"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_pre_c2_wheel_degrades_as_stale(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A wheel carrying the FOLD face but not the recency face (the
         # pre-C2 shape) degrades wheel_stale, naming the missing symbol.
@@ -947,6 +982,7 @@ class TestRecencyViaKernelDegrades:
     @pytest.mark.parametrize(
         "exc", [ValueError("boundary"), TypeError("conversion"), RuntimeError("poisoned")]
     )
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_kernel_raise_degrades(self, monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
         def _bomb(*_args: object) -> object:
             raise exc
@@ -966,6 +1002,7 @@ class TestRecencyViaKernelDegrades:
         with pytest.raises(MemoryError):
             _recency_via_kernel()
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_beyond_i64_anchor_degrades_via_real_kernel(self) -> None:
         """An anchor outside i64 fails PyO3 conversion → OverflowError → oracle."""
         with capture_logs() as logs:
@@ -982,6 +1019,7 @@ class TestRecencyViaKernelDegrades:
         warns = _events(logs, "metrics_rust_fold.fallback")
         assert warns[0]["reason"] == "kernel_error"
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_invalid_wire_refused_loudly_once_own_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1008,6 +1046,7 @@ class TestRecencyBurnIn:
         assert compute_rust._SELF_CHECK_REMAINING[0] == fold_before
         assert not compute_rust.kernel_disabled()
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_mismatch_ships_oracle_and_latches_the_shared_kernel(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1120,6 +1159,7 @@ class TestRecencyDispatchChokepoint:
         assert folds.trailing is None
         assert folds == fold_recency(outside, _PIN_START, trailing_anchor=_ANCHOR)
 
+    @pytest.mark.usefixtures("_degrade_mode")
     def test_flag_on_kernel_unavailable_falls_to_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

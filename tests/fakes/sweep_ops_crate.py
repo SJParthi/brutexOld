@@ -18,10 +18,13 @@ loudly instead.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
+from typing import TypeVar
 
 import blake3
+
+_T = TypeVar("_T")
 
 
 def _join_path_segments(base: str, segments: list[str]) -> str:
@@ -36,17 +39,26 @@ def _join_path_segments(base: str, segments: list[str]) -> str:
 
 def _gate_config_fragment(
     overfit: tuple[float, float, float, float] | None,
+    max_sl_hit_rate: float | None,
+    cvar: tuple[int, int] | None,
     stage3_enable: bool,
     top_k: int,
     max_fevals: int,
     max_restarts: int,
 ) -> tuple[
     tuple[float, float, float, float] | None,
+    float | None,
+    tuple[int, int] | None,
     tuple[int, int, int] | None,
 ]:
-    """The sweep_identity gate-config fragment emission law (fake twin)."""
+    """The sweep_identity gate-config fragment emission law (fake twin).
+
+    Four legs since DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001 — the
+    ``max_sl_hit_rate`` + ``cvar`` legs ride through verbatim (the facade's
+    exact-type gates guarantee a bit-exact f64/i64 roundtrip).
+    """
     stage3 = (top_k, max_fevals, max_restarts) if stage3_enable else None
-    return (overfit, stage3)
+    return (overfit, max_sl_hit_rate, cvar, stage3)
 
 
 def _stall_scaled_timeout(factor: float, estimate: float, base: float) -> tuple[float, bool]:
@@ -535,6 +547,63 @@ def _grid_tuple_count(axes: Sequence[int]) -> int:
     if product >= 2**64:
         raise ValueError("axis product exceeds u64")
     return product
+
+
+def routed_fallback_reasons(call: Callable[[], _T]) -> tuple[_T, list[str], int]:
+    """Run *call* with the FAKE crate ARMED; return ``(result, reasons, engaged)``.
+
+    The ONE §11-COMMON probe every "the CLASS-C fall-back is unreachable"
+    regression pin drives (DEC-RUST-STRICT-NO-FALLBACK-001). It answers the
+    only question those pins ask: did the routed call reach the crate, or did
+    the facade's exact-type gate bounce it to the Python oracle and announce?
+
+    * ``reasons`` — every ``sweep_ops_rust.fallback`` reason token emitted
+      during *call*, sorted. An empty list is the pin's assertion.
+    * ``engaged`` — the count of ``sweep_ops_rust.engaged`` INFO events. It
+      is the ANTI-VACUITY half: without it, a fake that failed the symbol
+      handshake (latching ``crate_stale`` for the process) or a flag that
+      never armed would also emit zero *fallback* events and the pin would
+      pass while proving nothing. Assert ``engaged == 1``.
+
+    The facade is reset to the POST-burn-in steady state
+    (``remaining=0``) so the routed call is genuinely served by the crate
+    rather than by the burn-in's shadow-compare arm.
+
+    Environment discipline: the flag env + the ``importlib`` patch are
+    installed inside a NESTED :meth:`pytest.MonkeyPatch.context` that unwinds
+    before this helper returns — never a module-level autouse fixture (that
+    pattern leaked env across test modules).
+    """
+    import pytest
+    import structlog
+    from structlog.testing import LogCapture
+
+    from brutex.engine import sweep_ops_rust
+
+    crate = build_fake_sweep_ops_crate(version="fake")
+    capture = LogCapture()
+    saved = structlog.get_config()
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                sweep_ops_rust,
+                "importlib",
+                SimpleNamespace(import_module=lambda name: crate),
+            )
+            patch.setenv(sweep_ops_rust.SWEEP_OPS_RUST_ENV, "1")
+            sweep_ops_rust.reset_sweep_ops_rust_for_tests(remaining=0)
+            structlog.configure(processors=[capture])
+            result = call()
+    finally:
+        structlog.configure(**saved)
+        sweep_ops_rust.reset_sweep_ops_rust_for_tests()
+    reasons = sorted(
+        str(entry.get("reason"))
+        for entry in capture.entries
+        if entry.get("event") == "sweep_ops_rust.fallback"
+    )
+    engaged = sum(1 for entry in capture.entries if entry.get("event") == "sweep_ops_rust.engaged")
+    return result, reasons, engaged
 
 
 def build_fake_sweep_ops_crate(*, version: str = "0.1.0-fake") -> SimpleNamespace:

@@ -341,3 +341,83 @@ class TestSweepOpsRouting:
             assert probes == [4242]  # probed exactly once
         finally:
             self._reset_facade()
+
+
+class TestClassCFallbackUnreachable:
+    """All three clock operands reach the crate — no CLASS-C degrade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. ``routed_liveness_tail`` gates on
+    ``type(v) is float``, so before the call-site normalisation an ``int``
+    ``now_wall`` (a whole epoch second) or ``fresh_seconds`` (``600``)
+    announced ``liveness_tail_input_refused`` and served the Python oracle —
+    a fall-back on an input the tail (one subtraction, one comparison) handles
+    exactly. ``wall_time_utc`` arrives from JSON and the payload guard admits
+    ``int | float``, so it needed normalising too. All three now go through
+    ``float()``, which is the same conversion CPython's mixed ``int``/``float``
+    arithmetic performed implicitly.
+    """
+
+    _PAYLOAD: Final[dict[str, Any]] = {
+        "running": True,
+        "wall_time_utc": 1000.0,
+        "pid": 4321,
+    }
+
+    def test_int_clock_operands_reach_the_crate(self) -> None:
+        """``int`` ``now_wall``/``fresh_seconds`` route with ZERO fall-backs."""
+        from tests.fakes.sweep_ops_crate import routed_fallback_reasons
+
+        verdict, reasons, engaged = routed_fallback_reasons(
+            lambda: progress_verdict(
+                self._PAYLOAD,
+                now_wall=2000,
+                fresh_seconds=600,
+                pid_alive=lambda _pid: True,
+            )
+        )
+        assert reasons == []
+        assert engaged == 1  # anti-vacuity: the crate genuinely ran
+        assert verdict is RunVerdict.STALE
+
+    def test_int_wall_time_payload_reaches_the_crate(self) -> None:
+        """An ``int`` ``wall_time_utc`` (legal per the payload guard) routes too."""
+        from tests.fakes.sweep_ops_crate import routed_fallback_reasons
+
+        payload = {"running": True, "wall_time_utc": 1000, "pid": 4321}
+        verdict, reasons, engaged = routed_fallback_reasons(
+            lambda: progress_verdict(
+                payload, now_wall=1100.0, fresh_seconds=600.0, pid_alive=lambda _pid: True
+            )
+        )
+        assert reasons == []
+        assert engaged == 1
+        assert verdict is RunVerdict.RUNNING
+
+    def test_int_operands_are_value_identical_to_their_float_twins(self) -> None:
+        """Normalisation is value-neutral on both sides of the strict boundary."""
+        for now_wall, fresh in ((1600, 600), (1601, 600)):
+            as_int = progress_verdict(
+                self._PAYLOAD,
+                now_wall=now_wall,
+                fresh_seconds=fresh,
+                pid_alive=lambda _pid: True,
+            )
+            as_float = progress_verdict(
+                self._PAYLOAD,
+                now_wall=float(now_wall),
+                fresh_seconds=float(fresh),
+                pid_alive=lambda _pid: True,
+            )
+            assert as_int is as_float
+        # The strict `>` boundary is preserved: exactly-at-window is RUNNING.
+        assert (
+            progress_verdict(
+                self._PAYLOAD, now_wall=1600, fresh_seconds=600, pid_alive=lambda _pid: True
+            )
+            is RunVerdict.RUNNING
+        )
+
+    def test_fresh_seconds_still_fails_loud_on_junk(self) -> None:
+        """Validation is untouched — a non-finite window still raises."""
+        with pytest.raises(ValueError, match="fresh_seconds"):
+            progress_verdict(self._PAYLOAD, now_wall=1.0, fresh_seconds=math.nan)
