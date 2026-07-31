@@ -28,12 +28,15 @@ from typing import Final
 
 import pytest
 from brutex.observability.rust_census import (
+    CONFIGURED,
     DEGRADED,
     ENGAGED,
     OFF,
+    PROVEN,
     REQUIRED,
     UNKNOWN,
     FacadeStatus,
+    _accepted_events,
     _classify,
     _crate_for_source,
     _crate_names,
@@ -42,7 +45,9 @@ from brutex.observability.rust_census import (
     _source_of,
     census,
     discover_facades,
+    engaged_events,
     main,
+    prove,
     render_table,
     strict_failures,
     summarize,
@@ -606,3 +611,200 @@ class TestCrateNamesFallback:
             ).strip()
         )
         assert _crate_names() == frozenset({"renamed_lib"})
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Call-level proof — DEC-RUST-ENGAGEMENT-CENSUS-002
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _row(module: str, verdict: str) -> FacadeStatus:
+    return FacadeStatus(
+        module=module,
+        env_var="BRUTEX_X",
+        flag_on=True,
+        crate="some_crate",
+        crate_present=True,
+        verdict=verdict,
+    )
+
+
+class TestEngagedEvents:
+    """``engaged_events`` reads who answered, from the log stream itself."""
+
+    def test_collects_only_engaged_suffixed_events(self) -> None:
+        import structlog
+
+        def workload() -> None:
+            log = structlog.get_logger("probe")
+            log.info("money_rust.engaged", crate_version="0.4.0")
+            log.info("lake_rust_render.engaged")
+            log.warning("lake_rust_merge.degraded", reason="wheel_missing")
+            log.info("some.unrelated.event")
+
+        assert engaged_events(workload) == {"money_rust", "lake_rust_render"}
+
+    def test_empty_when_nothing_answered(self) -> None:
+        assert engaged_events(lambda: None) == frozenset()
+
+    def test_non_string_event_is_ignored_not_crashed(self) -> None:
+        """A non-str ``event`` is malformed input, not a reason to explode.
+
+        The capture list is other people's data; a defensive read keeps a
+        stray structlog processor from taking the whole preflight down.
+        """
+        import structlog
+
+        def workload() -> None:
+            structlog.get_logger("probe").info(12345)
+
+        assert engaged_events(workload) == frozenset()
+
+    def test_capture_is_restored_even_when_the_workload_raises(self) -> None:
+        """The exception propagates AND the global config is put back.
+
+        Swallowing it would report a half-populated set as if it were a
+        complete measurement -- "these facades are not engaged" when the
+        truth is "we never got that far".
+        """
+        import structlog
+
+        before = structlog.get_config()
+        with pytest.raises(RuntimeError, match="boom"):
+            engaged_events(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert structlog.get_config() == before
+
+    def test_capture_is_restored_on_the_happy_path_too(self) -> None:
+        import structlog
+
+        before = structlog.get_config()
+        engaged_events(lambda: None)
+        assert structlog.get_config() == before
+
+
+class TestProve:
+    """``prove`` re-verdicts ENGAGED rows from measured behaviour."""
+
+    def test_engaged_that_answered_becomes_proven(self) -> None:
+        import structlog
+
+        rows = [_row("brutex.money_rust", ENGAGED)]
+        out = prove(lambda: structlog.get_logger("p").info("money_rust.engaged"), rows)
+        assert [r.verdict for r in out] == [PROVEN]
+        assert "money_rust.engaged observed" in out[0].detail
+
+    def test_engaged_that_stayed_silent_becomes_configured(self) -> None:
+        rows = [_row("brutex.money_rust", ENGAGED)]
+        out = prove(lambda: None, rows)
+        assert [r.verdict for r in out] == [CONFIGURED]
+        assert "uncalled" in out[0].detail
+
+    @pytest.mark.parametrize("verdict", [REQUIRED, DEGRADED, OFF, UNKNOWN])
+    def test_non_engaged_rows_pass_through_untouched(self, verdict: str) -> None:
+        """Already decided by stronger evidence than a workload trace.
+
+        A silent REQUIRED facade in particular is not a finding -- it has
+        no Python arm to fall back to, so silence proves nothing about it.
+        """
+        rows = [_row("brutex.feed_rust", verdict)]
+        out = prove(lambda: None, rows)
+        assert out == rows
+
+    def test_rows_default_to_a_live_census(self) -> None:
+        """Omitting *rows* censuses this process rather than inventing one."""
+        out = prove(lambda: None)
+        assert out, "a live census must find facades"
+        assert not any(r.verdict == ENGAGED for r in out), (
+            "every ENGAGED row must be re-verdicted PROVEN or CONFIGURED"
+        )
+
+    def test_the_dotted_path_is_never_the_join_key(self) -> None:
+        """The event name is a short token, never the module's dotted path."""
+        rows = [_row("brutex.data.lake_rust_render", ENGAGED)]
+        import structlog
+
+        out = prove(lambda: structlog.get_logger("p").info("lake_rust_render.engaged"), rows)
+        assert out[0].verdict == PROVEN
+
+    def test_a_different_facade_answering_does_not_prove_this_one(self) -> None:
+        import structlog
+
+        rows = [_row("brutex.money_rust", ENGAGED)]
+        out = prove(lambda: structlog.get_logger("p").info("models_rust.engaged"), rows)
+        assert out[0].verdict == CONFIGURED
+
+
+class TestAcceptedEvents:
+    """The join key is DERIVED from source, because the leaf name is wrong.
+
+    Measured on the live census: 10 of 32 ENGAGED facades emit under a name
+    that is not their module leaf. A leaf join reported CONFIGURED for
+    facades that had genuinely answered, so the derivation below is the
+    load-bearing part of :func:`prove`, not a refinement.
+    """
+
+    def test_source_literals_win_over_the_leaf_name(self) -> None:
+        got = _accepted_events(
+            "brutex.config.hardware_envelope_rust",
+            'x = 1\n_LOG.info("hwenv_rust.engaged", crate_version=v)\n',
+        )
+        assert got == frozenset({"hwenv_rust"})
+        assert "hardware_envelope_rust" not in got, "the leaf must not leak in as well"
+
+    def test_multiple_literals_are_all_accepted(self) -> None:
+        got = _accepted_events("brutex.x.multi", '"a_rust.engaged"\n"b_rust.engaged"\n')
+        assert got == frozenset({"a_rust", "b_rust"})
+
+    def test_leaf_is_the_fallback_when_source_holds_no_literal(self) -> None:
+        """``ConfigRustSeam`` renders ``f"{seam}_rust.engaged"`` == the leaf."""
+        got = _accepted_events("brutex.config.paths_rust", "no literal here\n")
+        assert got == frozenset({"paths_rust"})
+
+    def test_unreadable_source_still_yields_the_leaf(self) -> None:
+        assert _accepted_events("brutex.a.b_rust", "") == frozenset({"b_rust"})
+
+    @pytest.mark.parametrize(
+        ("module", "event"),
+        [
+            ("brutex.config.hardware_envelope_rust", "hwenv_rust"),
+            ("brutex.crossverify.rust_seam", "crossverify_rust"),
+            ("brutex.engine.rust_enum", "sweep_rust_enum"),
+            ("brutex.engine.rust_metrics", "sweep_rust_metrics"),
+            ("brutex.metrics.compute_rust", "metrics_rust_fold"),
+        ],
+    )
+    def test_real_name_mismatched_facades_are_provable(self, module: str, event: str) -> None:
+        """The five facades a leaf join would have silently missed.
+
+        Each is a REAL module read from its REAL source, so a rename that
+        breaks the derivation fails here rather than degrading ``prove``
+        into a permanent CONFIGURED for that seam.
+        """
+        import structlog
+
+        pytest.importorskip("brutex.observability.rust_census")
+        importlib.import_module(module)
+        out = prove(
+            lambda: structlog.get_logger("p").info(f"{event}.engaged"),
+            [_row(module, ENGAGED)],
+        )
+        assert out[0].verdict == PROVEN, f"{module} must be provable via {event}.engaged"
+        assert out[0].detail == f"{event}.engaged observed"
+
+    def test_named_unprovable_residuals_read_configured_not_proven(self) -> None:
+        """The two conservative false-negatives, pinned so they stay honest.
+
+        ``rust_ranking`` delegates to the SHARED ``rust_parity.engaged`` and
+        ``meta_rust`` emits no first-answer event at all. Both must read
+        CONFIGURED — never PROVEN — even when a shared event fires, because
+        a false PROVEN is the one direction this gate must never fail in.
+        """
+        import structlog
+
+        for module in ("brutex.ranking.rust_ranking", "brutex.meta.meta_rust"):
+            importlib.import_module(module)
+            out = prove(
+                lambda: structlog.get_logger("p").info("rust_parity.engaged", family="other"),
+                [_row(module, ENGAGED)],
+            )
+            assert out[0].verdict == CONFIGURED, f"{module} must not be falsely PROVEN"

@@ -53,7 +53,7 @@ WHAT THIS DOES NOT DO (stated so the guarantee is not oversold).
   loud ERROR that is *not* rate-limited, so unlike a silent degrade it
   cannot pass unnoticed.
 * It says nothing about COMPLEXITY. A facade can be fully ENGAGED and
-  still be O(n) — see DEC-LAKE-SCAN-CHILD-DIRS-O1-001 (#2256), where a
+  still be O(n) — see DEC-LAKE-SCAN-CHILD-DIRS-O1-001 (#2261), where a
   Rust function on the hot path was measured at 94.46x growth. Engagement
   and complexity are independent properties with independent gates; this
   module is the engagement half only.
@@ -67,7 +67,8 @@ import inspect
 import pkgutil
 import re
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Final
@@ -193,6 +194,116 @@ class FacadeStatus:
     def is_rust_running(self) -> bool:
         """True only when Rust genuinely executes on the next call."""
         return self.verdict in (ENGAGED, REQUIRED)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Call-level proof — DEC-RUST-ENGAGEMENT-CENSUS-002
+# ──────────────────────────────────────────────────────────────────────
+#
+# The flag-level verdicts above answer "is Rust configured to run, and does
+# its crate import?". That is strictly weaker than "did Rust answer", and
+# the gap is not academic: every facade's remaining guards fire at CALL
+# time, inside the work function, not at flag resolution. The sharpest
+# example is the lake family's polars lockstep guard, which lives inside
+# ``render_parquet_bytes`` (brutex/data/lake_rust_render.py): it reads the
+# crate's pinned polars version, compares it against the installed wheel's,
+# and on any difference disables the facade with ``polars_version_mismatch``
+# and returns the Python render.
+#
+# So a wheel/crate version drift (a one-line dependency bump moving
+# ``polars==`` without moving the crate rev) silently routes the WHOLE
+# ``BRUTEX_LAKE_RUST_*`` family back to the Python oracle while every
+# flag-level verdict still reads ENGAGED. Measured, not reasoned: patching
+# ``polars.__version__`` before import leaves :func:`census` reporting
+# ``ENGAGED=32 DEGRADED=0``.
+#
+# The fix is to stop inferring and start observing. Each facade emits
+# exactly one ``<name>.engaged`` structlog event the first time its crate
+# genuinely answers, and a degrade/disable event otherwise. Those events
+# are per-process warn-once, which is precisely why they are useless for
+# reading a long-running log — and precisely why they are reliable when
+# captured from a COLD start around a known workload: at that point every
+# first decision is still unlatched, so the event stream is a complete
+# record of who answered.
+#
+# :func:`engaged_events` captures that stream. A facade whose event fires
+# is PROVEN — Rust ran, measured on this machine, this build, this wheel
+# set. A facade that stays silent is CONFIGURED: the flags are right and
+# the crate imports, but nothing in the workload called it, so this run
+# says nothing either way about it. Keeping those two apart is the whole
+# point; collapsing them is how "Rust is on" becomes a claim nobody
+# checked.
+
+PROVEN: Final[str] = "PROVEN"
+CONFIGURED: Final[str] = "CONFIGURED"
+
+#: The uniform per-facade first-answer event suffix.
+_ENGAGED_EVENT_SUFFIX: Final[str] = ".engaged"
+
+#: Literal ``"<name>.engaged"`` occurrences in a facade's own source.
+_ENGAGED_LITERAL_RE: Final[re.Pattern[str]] = re.compile(r"""["']([a-z_0-9]+)\.engaged["']""")
+
+
+def _accepted_events(module_name: str, source: str) -> frozenset[str]:
+    """Event names that count as proof for this facade, DERIVED from source.
+
+    The obvious join -- "the module's leaf name is the event name" -- is
+    WRONG for a third of the census, and measurably so: 10 of 32 ENGAGED
+    facades emit under a different name (``hardware_envelope_rust`` emits
+    ``hwenv_rust.engaged``, ``compute_rust`` emits ``metrics_rust_fold``,
+    ``rust_enum`` emits ``sweep_rust_enum``, and so on). Joining on the leaf
+    would have reported CONFIGURED for facades that genuinely answered.
+
+    Two rules, in order, each derived rather than listed:
+
+    * The literals in the facade's OWN source. This is exact and covers
+      every direct emitter.
+    * Failing that, the leaf name. This is not a guess: the config trio
+      (``paths_rust`` / ``dotenv_rust`` / ``backup_env_rust``) holds no
+      literal because ``ConfigRustSeam`` renders ``f"{seam}_rust.engaged"``
+      on their behalf -- which evaluates to exactly the leaf.
+
+    TWO facades stay structurally unprovable by this mechanism, named here
+    rather than papered over, and BOTH fail in the conservative direction
+    (they read CONFIGURED when Rust may in fact have answered -- never a
+    false PROVEN):
+
+    * ``ranking.rust_ranking`` delegates to ``ParityFamily``, whose event is
+      the SHARED ``rust_parity.engaged``. Accepting a shared name would let
+      one family's answer prove another's, so it is deliberately refused.
+    * ``meta.meta_rust`` emits no ``.engaged`` event at all; it has a
+      fallback, a flag and an autorevert event, but no first-answer one.
+    """
+    literals = frozenset(_ENGAGED_LITERAL_RE.findall(source))
+    return literals or frozenset({module_name.rsplit(".", 1)[-1]})
+
+
+def engaged_events(workload: Callable[[], object]) -> frozenset[str]:
+    """Run *workload* and return the ``<name>`` of every facade that answered.
+
+    Captures structlog centrally for the duration of the call, then keeps
+    the events whose name ends in ``.engaged`` — the house convention for
+    "the crate genuinely answered, first time this process". The capture is
+    restored even when *workload* raises, and the exception propagates: a
+    workload that blew up measured nothing, and silently returning a
+    half-populated set would read as "these facades are not engaged" when
+    the truth is "we never got that far".
+    """
+    import structlog
+    from structlog.testing import LogCapture
+
+    capture = LogCapture()
+    saved = structlog.get_config()
+    structlog.configure(processors=[capture])
+    try:
+        workload()
+    finally:
+        structlog.configure(**saved)
+    return frozenset(
+        event[: -len(_ENGAGED_EVENT_SUFFIX)]
+        for entry in capture.entries
+        if isinstance(event := entry.get("event"), str) and event.endswith(_ENGAGED_EVENT_SUFFIX)
+    )
 
 
 def _crate_for_source(source: str, crates: frozenset[str]) -> str | None:
@@ -470,8 +581,58 @@ def strict_failures(rows: list[FacadeStatus]) -> list[FacadeStatus]:
       with its Python oracle is dropped mid-run. That path is not silent
       -- it logs an ERROR that is not rate-limited -- but it happens
       after this gate has already passed.
+    * **Call-time guards.** Every remaining guard fires inside the work
+      function, not at flag resolution -- the lake family's polars
+      lockstep check most of all. Use :func:`prove` for that half;
+      ENGAGED here means "configured and importable", never "answered".
     """
     return [row for row in rows if row.verdict in _STRICT_FAILING]
+
+
+def prove(
+    workload: Callable[[], object], rows: list[FacadeStatus] | None = None
+) -> list[FacadeStatus]:
+    """Re-verdict *rows* from what actually happened while *workload* ran.
+
+    Upgrades each ENGAGED row to :data:`PROVEN` when that facade's
+    ``.engaged`` event fired during the workload, and downgrades it to
+    :data:`CONFIGURED` when it stayed silent. REQUIRED, DEGRADED, OFF and
+    UNKNOWN rows pass through untouched -- they were already decided by
+    stronger evidence than a workload trace, and a silent REQUIRED facade
+    is not a finding (it has no Python arm to fall back to).
+
+    The distinction is the honest one: PROVEN is a measurement, CONFIGURED
+    is an expectation nothing exercised. A run that reports CONFIGURED has
+    not found a defect -- it has found an untested seam, which is a
+    different and much less alarming thing, and conflating the two would
+    manufacture either false alarm or false comfort depending on which way
+    you rounded.
+    """
+    base = census() if rows is None else rows
+    answered = engaged_events(workload)
+    out: list[FacadeStatus] = []
+    for row in base:
+        if row.verdict != ENGAGED:
+            out.append(row)
+            continue
+        # ``sys.modules``, never a fresh import: an ENGAGED row was imported
+        # by the census that produced it, and importing here would change
+        # the very state being measured (the same reason the crate resolver
+        # source-scans instead of import-triggering).
+        module = sys.modules.get(row.module)
+        source = _source_of(module) if module is not None else ""
+        accepted = _accepted_events(row.module, source)
+        fired = sorted(accepted & answered)
+        out.append(
+            replace(
+                row,
+                verdict=PROVEN if fired else CONFIGURED,
+                detail=(
+                    f"{fired[0]}.engaged observed" if fired else "flag on, crate imports, uncalled"
+                ),
+            )
+        )
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
