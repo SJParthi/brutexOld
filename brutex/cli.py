@@ -306,12 +306,16 @@ def parse_condition_ids(raw: str) -> list[int]:
 #: byte-identical arm; exactly ONE token, no aliases.
 EXTINCTION_K_TOKEN: Final[str] = "extinction"  # noqa: S105 — a --k mode token, not a credential
 
-#: The Apriori frontier's single-``uint64``-limb width — the maximum (exclusive)
-#: condition-bit index the frozen generator accepts (mirrors
-#: ``sweep_apriori._U64_BITS``; a ``>= 64`` bit on the DEFAULT path falls back
-#: to legacy, ruling 10 — the explicit-``--k`` paths keep the generator's own
-#: graceful per-tuple refusal).
-_APRIORI_U64_BITS: Final[int] = 64
+#: The Apriori frontier mask width — the maximum (exclusive) condition-bit index
+#: the generator accepts. Mirrors ``sweep_apriori._MASK_BITS`` and the Rust
+#: kernel's ``verify::MASK_BITS``; an over-width bit on the DEFAULT path falls
+#: back to legacy (ruling 10) — the explicit-``--k`` paths keep the generator's
+#: own graceful per-tuple refusal.
+#:
+#: WAS 64 (one ``uint64`` limb) until DEC-APRIORI-U128-WIDEN-001. At 64 the
+#: guard was NOT dormant: the shipped vocabulary is 74 bits, so every full-vocab
+#: extinction run tripped it and silently ran Apriori-OFF on a static k=[1, 2].
+_APRIORI_MASK_BITS: Final[int] = 128
 
 #: The pair level — the k=2 rung whose worst-case work is EXACTLY computable at
 #: launch (``C(n, 2) × n_bars``); deeper levels are data-dependent.
@@ -456,27 +460,36 @@ def resolve_sweep_exploration(
             "(n_unique=0) — pass --conditions with at least one bit, or an "
             "explicit --k"
         )
-    over_width = sorted(bit for bit in set(condition_bits) if bit >= _APRIORI_U64_BITS)
+    over_width = sorted(bit for bit in set(condition_bits) if bit >= _APRIORI_MASK_BITS)
     if over_width:
-        # u128 forward guard (ruling 10) — dormant at today's 60-bit vocabulary.
+        # u128 width guard (DEC-APRIORI-U128-WIDEN-001). DORMANT at the shipped
+        # 74-bit vocabulary — the frontier mask is u128 on BOTH arms (the Rust
+        # kernel's ``verify::MASK_BITS`` and the Python oracle's ``_MASK_BITS``),
+        # so this branch needs a >=128-bit vocabulary to fire.
+        #
+        # It was NOT dormant before the widening: the ceiling was 64, the
+        # vocabulary is 74, so EVERY full-vocab extinction run fell through
+        # here and silently ran with Apriori OFF on a hardcoded k=[1, 2] —
+        # the exact "dynamic k is actually static" defect this closes.
         note = (
-            f"condition bit {over_width[0]} >= 64: the Apriori frontier is "
-            "u64-only (the frozen generator refuses >=64-bit vocabularies "
-            "per tuple), so the extinction default falls back to the legacy "
-            "k=1,2 for this run — pass an explicit --k to choose the ladder."
+            f"condition bit {over_width[0]} >= {_APRIORI_MASK_BITS}: the Apriori "
+            f"frontier mask is u{_APRIORI_MASK_BITS} (the generator refuses a "
+            f">={_APRIORI_MASK_BITS}-bit vocabulary per tuple), so the extinction "
+            "default falls back to the legacy k=1,2 for this run — pass an "
+            "explicit --k to choose the ladder."
         )
         if raw is not None and raw.strip():
             # Reaching here with a set-and-nonblank env means it classified
             # TRUTHY above (falsy returned, junk raised) — and a truthy env
             # makes the ENGINE's own apriori_enabled() read ON regardless of
-            # this legacy fallback, so every >=64-bit tuple would STILL
+            # this legacy fallback, so every over-width tuple would STILL
             # TUPLE_FAIL at the generator's per-tuple guard. Say so honestly
             # (review fix round 1 n2) instead of implying the fallback alone
             # yields a clean legacy run.
             note += (
                 f" NOTE: {SWEEP_APRIORI_ENV}={raw!r} is set truthy, so the engine's "
-                "generator still refuses >=64-bit tuples (TUPLE_FAILED) — unset it "
-                "for a clean legacy run."
+                f"generator still refuses >={_APRIORI_MASK_BITS}-bit tuples "
+                "(TUPLE_FAILED) — unset it for a clean legacy run."
             )
         return SweepExplorationPlan(apriori=False, k_values=[1, 2], notes=(note,))
     k_values = list(range(1, n_unique + 1))

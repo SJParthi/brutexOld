@@ -2939,7 +2939,7 @@ class TestRoutedAprioriJoinPrune:
             [(0, 0)],  # duplicate bit (not strictly ascending)
             [(1,), (0,)],  # not lex-sorted
             [(0,), (0,)],  # duplicate tuple (not STRICTLY sorted)
-            [(64,)],  # bit out of range
+            [(128,)],  # bit out of range (u128 ceiling, DEC-APRIORI-U128-WIDEN-001)
             [(True,)],  # bool bit
         ],
     )
@@ -2966,7 +2966,7 @@ class TestRoutedAprioriJoinPrune:
             (1, (), 10, 100, 65_536),  # int drop_conflicts
             (False, [5], 10, 100, 65_536),  # list conflict_masks
             (False, (0,), 10, 100, 65_536),  # zero pair-mask
-            (False, (2**64,), 10, 100, 65_536),  # beyond u64
+            (False, (2**128,), 10, 100, 65_536),  # beyond u128
             (False, (), -1, 100, 65_536),  # negative n_bars
             (False, (), 10, 0, 65_536),  # zero limit
             (False, (), 10, 100, 0),  # zero stride
@@ -3102,9 +3102,20 @@ class TestSliceFiveDriftPins:
         assert produced == sweep_ops_rust._RECOUNT_VERDICT_TOKENS
 
     def test_apriori_max_bit_mirrors_the_module_guard(self) -> None:
-        from brutex.engine.sweep_apriori import _U64_BITS
+        # THREE-WAY drift pin (DEC-APRIORI-U128-WIDEN-001): the Python oracle's
+        # ceiling, the seam's refuse-poison gate, and the Rust kernel's
+        # ``verify::MASK_BITS`` must move in ONE commit — a widened kernel with
+        # a stale Python guard would refuse tuples Rust can serve, and the
+        # reverse would hand the kernel an over-width bit.
+        from brutex.engine.sweep_apriori import _MASK_BITS
 
-        assert _U64_BITS == sweep_ops_rust._APRIORI_MAX_BIT
+        assert _MASK_BITS == sweep_ops_rust._APRIORI_MAX_BIT == 128
+
+        kernel = pytest.importorskip("brutex_sweep_ops")
+        # The kernel's own ceiling, read from its refusal message (the only
+        # surface it exposes) — proves the crate was rebuilt alongside Python.
+        with pytest.raises(ValueError, match=r"out of range \[0, 128\)"):
+            kernel.apriori_join_prune([[128]], False, [], 10, 100, 65_536)
 
     def test_conflict_pair_masks_mirror_the_canonical_pairs(self) -> None:
         from brutex.engine.sweep_apriori import _CONFLICT_PAIR_MASKS

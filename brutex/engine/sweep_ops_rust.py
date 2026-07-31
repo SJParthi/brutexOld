@@ -614,10 +614,21 @@ _RECOUNT_VERDICT_TOKENS: Final[frozenset[str]] = frozenset(
         "cell_inconclusive",
     }
 )
-#: The Apriori frontier bit ceiling (`sweep_apriori._U64_BITS` — drift-pinned
-#: by the facade suite; the generator refuses ``>= 64`` bits before any join).
-_APRIORI_MAX_BIT: Final[int] = 64
-#: The u64 exclusive ceiling for conflict pair-masks crossing the FFI.
+#: The Apriori frontier bit ceiling (`sweep_apriori._MASK_BITS` — drift-pinned
+#: by the facade suite; the generator refuses ``>= 128`` bits before any join).
+#: 128 since DEC-APRIORI-U128-WIDEN-001 — the 74-bit vocabulary does not fit
+#: one u64 limb, so the old 64 ceiling refused every real production tuple.
+_APRIORI_MAX_BIT: Final[int] = 128
+#: The exclusive ceiling for a CONFLICT PAIR-MASK crossing the FFI. The kernel
+#: types this argument ``Vec<u128>`` (DEC-APRIORI-U128-WIDEN-001), so the gate
+#: is 2**128 — DELIBERATELY WIDER than :data:`_U64_CEILING` below.
+_APRIORI_MASK_CEILING: Final[int] = 2**128
+#: The exclusive ceiling for every argument the kernel types ``u64``: the
+#: Apriori ``n_bars``/``limit``/``stride`` scalars and the grid-tuple-count
+#: axes. MUST STAY 2**64 — widening it hands the crate a value that overflows
+#: its own parameter type. Kept separate from
+#: :data:`_APRIORI_MASK_CEILING` precisely so a mask widening can never
+#: silently widen these too.
 _U64_CEILING: Final[int] = 2**64
 
 #: Once-per-process-per-reason log memo.
@@ -2004,7 +2015,7 @@ def _apriori_frontier_refused(frontier: Sequence[tuple[int, ...]]) -> bool:
     The crate's contiguous-prefix bucketing and bit-drop subset walk are
     equivalent to the oracle's insertion-ordered dict bucketing and
     index-drop walk ONLY over the constructed frontier shape — uniform-length
-    tuples of strictly-ascending bits in ``[0, 64)``, strictly lex-sorted
+    tuples of strictly-ascending bits in ``[0, 128)``, strictly lex-sorted
     (so equal prefixes are contiguous and no duplicates exist). Anything
     else refuses to the oracle.
     """
@@ -2070,7 +2081,10 @@ def routed_apriori_join_prune(
         _apriori_frontier_refused(frontier)
         or type(drop_conflicts) is not bool
         or type(conflict_masks) is not tuple
-        or any(type(mask) is not int or not 1 <= mask < _U64_CEILING for mask in conflict_masks)
+        or any(
+            type(mask) is not int or not 1 <= mask < _APRIORI_MASK_CEILING
+            for mask in conflict_masks
+        )
         or any(type(value) is not int for value in (n_bars, limit, stride))
         or not 0 <= n_bars < _U64_CEILING
         or not 1 <= limit < _U64_CEILING

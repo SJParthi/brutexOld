@@ -417,7 +417,7 @@ fn recount_verdict(
 fn apriori_join_prune(
     frontier: Vec<Vec<u16>>,
     drop_conflicts: bool,
-    conflict_masks: Vec<u64>,
+    conflict_masks: Vec<u128>,
     n_bars: u64,
     limit: u64,
     stride: u64,
@@ -425,13 +425,14 @@ fn apriori_join_prune(
     // u16 at the FFI face (a pyo3 `Vec<u8>` output would render as Python
     // `bytes`, not `list[int]`); range-gate BEFORE the u8 narrowing so an
     // out-of-range bit can never truncate silently.
+    let ceiling = u16::from(verify::MASK_BITS);
     let mut frontier_u8: Vec<Vec<u8>> = Vec::with_capacity(frontier.len());
     for tuple in &frontier {
         let mut row: Vec<u8> = Vec::with_capacity(tuple.len());
         for &bit in tuple {
-            if bit >= 64 {
+            if bit >= ceiling {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "frontier bit {bit} out of range [0, 64)"
+                    "frontier bit {bit} out of range [0, {ceiling})"
                 )));
             }
             row.push(bit as u8);

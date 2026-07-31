@@ -192,16 +192,29 @@ class TestResolverExtinctionArm:
         )
         assert plan.apriori is False  # the kill switch was read from os.environ
 
-    def test_u128_bit_falls_back_to_legacy_with_a_warn(self) -> None:
-        # Ruling 10 — dormant at today's 60-bit vocabulary, armed for u128.
+    def test_bit_64_now_arms_after_the_u128_widening(self) -> None:
+        # DEC-APRIORI-U128-WIDEN-001: bit 64 was the OLD ceiling and forced the
+        # legacy k=[1, 2] fallback. The frontier mask is u128 on BOTH arms now,
+        # so a 65th-bit vocabulary ARMS with the full ladder. This is the
+        # fails-before pin for the "dynamic k was actually static" defect.
         plan = resolve_sweep_exploration(
             EXTINCTION_K_TOKEN, condition_bits=[0, 1, 64], max_combos=None, env={}
+        )
+        assert plan.apriori is True
+        assert plan.k_values == [1, 2, 3]
+        assert plan.notes == ()
+
+    def test_over_width_bit_falls_back_to_legacy_with_a_warn(self) -> None:
+        # Ruling 10 — DORMANT at the shipped 74-bit vocabulary, armed for a
+        # future >=128-bit one (the guard moved 64 -> 128 with the mask).
+        plan = resolve_sweep_exploration(
+            EXTINCTION_K_TOKEN, condition_bits=[0, 1, 128], max_combos=None, env={}
         )
         assert plan.apriori is False
         assert plan.k_values == [1, 2]
         assert len(plan.notes) == 1
-        assert "64" in plan.notes[0]
-        assert "u64-only" in plan.notes[0]
+        assert "128" in plan.notes[0]
+        assert "u128" in plan.notes[0]
 
 
 class TestResolverLadderTrim:
@@ -254,38 +267,37 @@ class TestSweepAllEnvSetdefault:
     lake I/O — proven by driving the REAL dispatch against a NONEXISTENT lake
     root (the loud refusal fires AFTER the resolver + env write).
 
-    TWO-WORLD split since the train (DEC-SUPERTREND-CONDITIONS-001 #2203):
-    the DEFAULT vocabulary now carries bits >= 64, so a bare default-k
-    invocation takes the resolver's u64-only frontier fallback
-    (``apriori=False`` — the env write is GATED off, nothing to arm) and the
-    plan/engine still agree: ``apriori_enabled()`` reads unset/blank/
-    whitespace all OFF, matching the plan's legacy k=1,2. The original
-    DEC-SWEEP-APRIORI-DEFAULT-001 (#1850) ARMING law keeps failing-capable
-    teeth through the SAME default-k token path over an explicit sub-64
-    ``--conditions`` pool (the real resolver path — no monkeypatching)."""
+    ONE-WORLD again since DEC-APRIORI-U128-WIDEN-001: the #2203 TWO-WORLD
+    split existed only because the frontier mask was u64 while the default
+    vocabulary is 74 bits, so a bare default-k invocation took the over-width
+    fallback and silently ran Apriori-OFF on a hardcoded k=[1, 2]. The mask is
+    u128 on BOTH arms now, so the DEFAULT pool ARMS like any other — the
+    original DEC-SWEEP-APRIORI-DEFAULT-001 (#1850) law holds on the real
+    default path again, with no ``--conditions`` crutch."""
 
-    #: A sub-64 pool that keeps the extinction default ARMED on the 74-bit
-    #: head (the #1850 teeth carrier — the u64-only fallback needs a >= 64
-    #: bit to fire, DEC-SUPERTREND-CONDITIONS-001 #2203).
+    #: The #2203-era sub-64 pool. KEPT (not deleted) as the independent
+    #: narrow-pool control: the arming law must hold on both a sub-64 pool
+    #: and the full 74-bit default pool, and a future re-narrowing of the
+    #: mask would break exactly one of the two.
     _SUB64 = ("--conditions", "0,1,2,3")
 
-    def test_default_k_on_the_74bit_default_pool_falls_back_and_never_arms(
+    def test_default_k_on_the_74bit_default_pool_arms_the_full_ladder(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # Re-derived (#1850 pin -> the #2203 interim law): the DEFAULT 74-bit
-        # vocabulary carries bits >= 64, so the extinction default falls back
-        # to legacy k=1,2 with ONE loud WARN and the env is NOT written —
-        # plan and engine agree (both legacy: apriori_enabled() reads unset
-        # as OFF).
+        # FAILS-BEFORE pin for DEC-APRIORI-U128-WIDEN-001. Under the old
+        # 64-bit ceiling this exact invocation emitted the "u64-only" WARN and
+        # left the env unwritten — Apriori OFF, k frozen at [1, 2] on EVERY
+        # production full-vocabulary run. It must now arm silently.
         _delenv_recorded(monkeypatch)
         rc = main(_sweep_all_argv(tmp_path / "no-such-lake"))
         assert rc == EXIT_USER_ERROR  # the missing-lake refusal, not a sweep
         err = capsys.readouterr().err
-        assert "u64-only" in err  # the fallback WARN fired (before lake I/O)
-        assert SWEEP_APRIORI_ENV not in os.environ  # nothing armed
+        assert "u64-only" not in err  # the retired fallback must not fire
+        assert "falls back to the legacy k=1,2" not in err
+        assert os.environ[SWEEP_APRIORI_ENV] == "1"  # armed before lake I/O
 
     def test_default_k_sets_the_env_before_lake_io(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -298,15 +310,16 @@ class TestSweepAllEnvSetdefault:
         assert rc == EXIT_USER_ERROR  # the missing-lake refusal, not a sweep
         assert os.environ[SWEEP_APRIORI_ENV] == "1"
 
-    def test_blank_env_on_the_74bit_default_pool_is_left_untouched(
+    def test_blank_env_on_the_74bit_default_pool_is_overwritten(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Re-derived (#2203): on the fallback path there is NO disagreement
-        # window to close — the plan is legacy AND apriori_enabled() reads a
-        # blank env OFF — so the gated write correctly leaves "" alone.
+        # Re-derived (DEC-APRIORI-U128-WIDEN-001): the default pool no longer
+        # takes the fallback, so the #1850 split-brain window is back in force
+        # on it — the plan says extinction while apriori_enabled() reads "" as
+        # OFF, and the setdefault write must close that by overwriting.
         monkeypatch.setenv(SWEEP_APRIORI_ENV, "")
         main(_sweep_all_argv(tmp_path / "no-such-lake"))
-        assert os.environ[SWEEP_APRIORI_ENV] == ""
+        assert os.environ[SWEEP_APRIORI_ENV] == "1"
 
     def test_blank_env_is_overwritten_so_plan_and_engine_agree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -517,31 +530,34 @@ class TestResolverEmptyLadder:
 
 
 class TestResolverU128NoteHonesty:
-    """Review fix round 1 n2: the u128 fallback note tells the WHOLE truth when
-    the env is preset truthy — the legacy k=1,2 fallback alone cannot yield a
-    clean run because the engine's own apriori_enabled() still reads ON and
-    the frozen generator refuses >=64-bit tuples per tuple."""
+    """Review fix round 1 n2: the over-width fallback note tells the WHOLE
+    truth when the env is preset truthy — the legacy k=1,2 fallback alone
+    cannot yield a clean run because the engine's own apriori_enabled() still
+    reads ON and the generator refuses over-width tuples per tuple.
+
+    Retargeted 64 -> 128 by DEC-APRIORI-U128-WIDEN-001: the honesty law is
+    unchanged, only the width the guard fires at moved with the mask."""
 
     def test_env_unset_keeps_the_plain_fallback_note(self) -> None:
         plan = resolve_sweep_exploration(
-            EXTINCTION_K_TOKEN, condition_bits=[0, 1, 64], max_combos=None, env={}
+            EXTINCTION_K_TOKEN, condition_bits=[0, 1, 128], max_combos=None, env={}
         )
         assert len(plan.notes) == 1
-        assert "u64-only" in plan.notes[0]
+        assert "u128" in plan.notes[0]
         assert "NOTE:" not in plan.notes[0]  # nothing to warn about — env unset
 
     def test_truthy_env_appends_the_engine_refusal_honesty_sentence(self) -> None:
         plan = resolve_sweep_exploration(
             EXTINCTION_K_TOKEN,
-            condition_bits=[0, 1, 64],
+            condition_bits=[0, 1, 128],
             max_combos=None,
             env={SWEEP_APRIORI_ENV: "1"},
         )
         assert plan.apriori is False
         assert plan.k_values == [1, 2]
         assert len(plan.notes) == 1
-        assert "u64-only" in plan.notes[0]
-        assert "still refuses >=64-bit tuples (TUPLE_FAILED)" in plan.notes[0]
+        assert "u128" in plan.notes[0]
+        assert "still refuses >=128-bit tuples (TUPLE_FAILED)" in plan.notes[0]
         assert "unset it" in plan.notes[0]
 
 
@@ -549,15 +565,15 @@ class TestWhitespaceEnvSetdefault:
     """Review fix round 1 m1: a WHITESPACE-ONLY env value is classified like
     unset by the resolver, so the setdefault write must overwrite it too —
     the bare truthiness guard treated "   " as set, leaving apriori_enabled()
-    OFF under an extinction banner (a plan↔engine split-brain). Sub-64 pool
-    on the sweep-all arm since #2203 (the 74-bit default pool takes the
-    fallback — the write is gated off, no split-brain to close there)."""
+    OFF under an extinction banner (a plan↔engine split-brain). The #2203
+    sub-64 crutch is retired by DEC-APRIORI-U128-WIDEN-001 — the 74-bit
+    default pool arms too, so the law is pinned on BOTH pools."""
 
     def test_whitespace_env_is_overwritten_on_sweep_all(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The #1850 m1 law, teeth-preserved on a sub-64 --conditions pool
-        # (DEC-SUPERTREND-CONDITIONS-001 #2203).
+        # The #1850 m1 law on the narrow-pool control (kept as the independent
+        # second arm alongside the default-pool twin below).
         monkeypatch.setenv(SWEEP_APRIORI_ENV, "   ")
         main(
             [
@@ -567,14 +583,14 @@ class TestWhitespaceEnvSetdefault:
         )
         assert os.environ[SWEEP_APRIORI_ENV] == "1"
 
-    def test_whitespace_env_on_the_74bit_default_pool_is_left_untouched(
+    def test_whitespace_env_on_the_74bit_default_pool_is_overwritten(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Re-derived (#2203): the fallback plan is legacy and
-        # apriori_enabled() reads "   " OFF — agreement without a write.
+        # Re-derived (DEC-APRIORI-U128-WIDEN-001): the default pool arms now,
+        # so the split-brain window is live on it and the write must fire.
         monkeypatch.setenv(SWEEP_APRIORI_ENV, "   ")
         main(_sweep_all_argv(tmp_path / "no-such-lake"))
-        assert os.environ[SWEEP_APRIORI_ENV] == "   "
+        assert os.environ[SWEEP_APRIORI_ENV] == "1"
 
     def test_whitespace_env_is_overwritten_on_sweep_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

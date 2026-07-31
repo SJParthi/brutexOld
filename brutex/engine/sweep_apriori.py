@@ -51,29 +51,33 @@ the leaderboard is bit-identical, not merely set-equal. (The locked design's
 orders coincide; lex order is the correct invariant for arbitrary bit sets and
 is what the parity gate requires.)
 
-## Frontier storage + the <64-bit guard
+## Frontier storage + the <128-bit guard (u128 since DEC-APRIORI-U128-WIDEN-001)
 
 Each intermediate frequent frontier's membership authority is a **sorted numpy
-``uint64`` array** (8 bytes/mask, subset lookup via ``np.searchsorted``) — never
-a Python ``set`` (per-element object overhead). Because a single ``uint64`` limb
-holds the mask, the generator REQUIRES every chosen condition bit ``< 64``; with
-the flag ON a ``>= 64`` bit raises
+structured array of ``(hi, lo)`` ``uint64`` limb pairs** (16 bytes/mask, subset
+lookup via ``np.searchsorted``) — never a Python ``set`` (per-element object
+overhead), and never a sorted ``list[int]`` (~40 bytes/mask for u128-wide
+Python ints). numpy has no ``uint128``; a structured dtype compares
+LEXICOGRAPHICALLY in field order, so ascending ``(hi, lo)`` order is exactly
+ascending u128 numeric order and the search stays an ``O(log n)`` binary search.
+
+The generator therefore accepts every condition bit ``< 128``. **This is the
+fix for the real defect:** the frontier was a single ``uint64`` limb, so it
+refused every bit ``>= 64`` — and the ACTIVE vocabulary is 74 bits
+(``IMPLEMENTED_MASK.bit_length() == 74``). Apriori could not run AT ALL on the
+production vocabulary: every tuple carrying a high bit refused (TUPLE_FAILED),
+and the ``--k extinction`` default silently fell back to ``k=1,2``. Deep
+drill-down with Apriori pruning was unreachable. The two-limb frontier makes
+the whole 74-bit vocabulary Apriori-admissible.
+
+Below 64 bits every packed mask, membership answer and emitted candidate is
+bit-identical to the u64 era (byte-parity pinned), so no pre-existing sweep
+changes. A ``>= 128`` bit still raises
 :class:`brutex.engine.sweep_run.SweepAprioriUnsupportedError` — a
 :class:`~brutex.engine.sweep_run.SweepComboError` subclass, so the grid
 GRACEFULLY skips that tuple (TUPLE_FAILED) rather than crashing on a raw
-``ValueError`` if the flag is ever left ON over a ``>= 64``-bit vocabulary
-(unset the flag to use the byte-identical brute-force path, which has no
-bit-width limit). Since the SuperTrend implemented-flip
-(DEC-SUPERTREND-CONDITIONS-001, crate 0.5.0) the ACTIVE vocabulary is 64 bits
-INCLUDING bits 64/65, so this guard is now the PRODUCTION story for
-Apriori-ON sweeps whose chosen bits include the SuperTrend pair — in
-particular the DEFAULT condition pool (all implemented bits) — each such
-tuple refuses gracefully (TUPLE_FAILED, counted, non-zero verdict, never a
-crash/corruption), and the remediation is either dropping bits 64/65 from
-the tuple's ``condition_bits`` or unsetting the flag. The u128 (two-limb)
-Apriori frontier is a NAMED follow-up (DEC-SUPERTREND-CONDITIONS-001 records
-the refusal as the accepted interim law); a ``< 64``-bit tuple over the same
-grid still prunes exactly as before.
+``ValueError``; the remediation is unsetting the flag to use the
+byte-identical brute-force path, which has no bit-width limit.
 
 ## The deterministic mask·bar breaker (pure integer, MODELED limit)
 
@@ -205,8 +209,8 @@ guards a value).
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
-from typing import Final, NoReturn
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Final, NoReturn
 
 import numpy as np
 import numpy.typing as npt
@@ -252,9 +256,41 @@ MAX_MASK_BARS_ENV: Final[str] = "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS"
 #: Python↔Rust (Golden Rule #7); env-tunable via :data:`MAX_MASK_BARS_ENV`.
 DEFAULT_MAX_MASK_BARS: Final[int] = 1_159_200_000_000
 
-#: The single ``uint64`` limb width — the maximum (exclusive) condition-bit index
-#: the sorted-array frontier can represent.
-_U64_BITS: Final[int] = 64
+#: The frontier mask width — the maximum (exclusive) condition-bit index the
+#: sorted-array frontier can represent.
+#:
+#: **128 since DEC-APRIORI-U128-WIDEN-001.** It was ``64`` (a single ``uint64``
+#: limb) while the vocabulary fit one limb. The vocabulary is now 74 bits
+#: (``IMPLEMENTED_MASK.bit_length() == 74``), so the u64 frontier refused EVERY
+#: tuple carrying a ``>= 64`` bit — Apriori could not run at all on the real
+#: vocabulary and the ``--k extinction`` default silently fell back to
+#: ``k=1,2``. The frontier is stored as a TWO-LIMB ``(hi, lo)`` structured
+#: ``uint64`` array (16 B/mask vs the former 8 B; a sorted ``list[int]`` of
+#: Python ints would be ~40 B/mask, so the structured array keeps the
+#: no-Python-set memory law). Below 64 bits every packed mask, membership
+#: answer and emitted candidate is bit-identical to the u64 era.
+_MASK_BITS: Final[int] = 128
+
+#: Back-compat alias for the pre-widening name (external drift pins import it).
+_U64_BITS: Final[int] = _MASK_BITS
+
+#: The single-limb mask — the low/high 64-bit halves of a u128 frontier mask.
+_U64_MAX: Final[int] = (1 << 64) - 1
+
+#: The two-limb frontier dtype — BIG-ENDIAN ``(hi, lo)`` ``uint64`` pairs.
+#:
+#: numpy has no ``uint128``. Big-endian is LOAD-BEARING, not cosmetic: the
+#: array is viewed as :data:`_FRONTIER_VIEW` (16 raw bytes) and searched with
+#: ``np.searchsorted``, and BYTE-lexicographic order over big-endian
+#: ``(hi, lo)`` is exactly ascending u128 NUMERIC order. A *structured*
+#: searchsorted does NOT work — numpy's ``less`` ufunc has no loop for void
+#: dtypes and raises ``_UFuncNoLoopError`` — and little-endian bytes would
+#: compare in the wrong order. The bytes view keeps membership a single
+#: ``O(log n)`` binary search at 16 B/mask.
+_FRONTIER_DTYPE: Final[np.dtype[Any]] = np.dtype([("hi", ">u8"), ("lo", ">u8")])
+
+#: The raw-bytes view the binary search runs over (two big-endian u64 limbs).
+_FRONTIER_VIEW: Final[str] = "|S16"
 
 #: Stride between incremental breaker checks during candidate accumulation — a
 #: pure DECISION-PRESERVING MEMORY optimization, so a degenerate cell trips BEFORE
@@ -468,18 +504,49 @@ def _mask_of(positions: Sequence[int]) -> int:
     return mask
 
 
-def _in_sorted(arr: npt.NDArray[np.uint64], value: int) -> bool:
-    """Return whether ``value`` is present in the ascending ``uint64`` array.
+def _split_limbs(value: int) -> tuple[int, int]:
+    """Split a u128 mask into its ``(hi, lo)`` ``uint64`` limbs.
 
-    Membership via ``np.searchsorted`` — ``O(log n)`` per query, no Python set.
+    The inverse of ``(hi << 64) | lo``. Ascending ``(hi, lo)`` tuple order is
+    exactly ascending u128 numeric order, which is what makes the structured
+    ``searchsorted`` in :func:`_in_sorted` a correct binary search.
     """
-    idx = int(np.searchsorted(arr, np.uint64(value)))
-    return idx < arr.size and int(arr[idx]) == value
+    return (value >> 64) & _U64_MAX, value & _U64_MAX
 
 
-def _all_subsets_frequent(
-    candidate: tuple[int, ...], frontier_masks: npt.NDArray[np.uint64]
-) -> bool:
+def _frontier_array(masks: Iterable[int]) -> npt.NDArray[Any]:
+    """Pack ascending u128 masks into the sorted two-limb frontier array.
+
+    *masks* must already be ascending (every caller sorts); big-endian limb
+    packing is order-preserving, so the returned bytes view is ascending in
+    byte-lexicographic order — which IS ascending u128 numeric order.
+    """
+    return np.array([_split_limbs(m) for m in masks], dtype=_FRONTIER_DTYPE).view(_FRONTIER_VIEW)
+
+
+def _frontier_probe(value: int) -> np.generic:
+    """Pack one u128 mask into the frontier's 16-byte search key."""
+    packed: npt.NDArray[Any] = np.array([_split_limbs(value)], dtype=_FRONTIER_DTYPE)
+    probe: np.generic = packed.view(_FRONTIER_VIEW)[0]
+    return probe
+
+
+def _in_sorted(arr: npt.NDArray[Any], value: int) -> bool:
+    """Return whether ``value`` is present in the ascending two-limb array.
+
+    Membership via ``np.searchsorted`` over the 16-byte big-endian view —
+    ``O(log n)`` per query, no Python set. Byte-lexicographic order over
+    big-endian ``(hi, lo)`` limbs is exactly ascending u128 numeric order, so
+    this is a true u128 binary search.
+    """
+    if arr.size == 0:
+        return False
+    probe = _frontier_probe(value)
+    idx = int(np.searchsorted(arr, probe))
+    return idx < arr.size and bool(arr[idx] == probe)
+
+
+def _all_subsets_frequent(candidate: tuple[int, ...], frontier_masks: npt.NDArray[Any]) -> bool:
     """Return ``True`` iff every ``(len-1)``-subset mask of *candidate* is frequent.
 
     Drops each position in turn, packs the remaining ascending positions into a
@@ -496,7 +563,7 @@ def _all_subsets_frequent(
 
 def _join_and_prune(
     frontier_tuples: list[tuple[int, ...]],
-    frontier_masks: npt.NDArray[np.uint64],
+    frontier_masks: npt.NDArray[Any],
     *,
     drop_conflicts: bool,
     on_count: Callable[[int], None],
@@ -581,7 +648,7 @@ class _BudgetTrip(Exception):
 
 def _join_result_python(
     frontier_tuples: list[tuple[int, ...]],
-    frontier_masks: npt.NDArray[np.uint64],
+    frontier_masks: npt.NDArray[Any],
     *,
     drop_conflicts: bool,
     n_bars: int,
@@ -613,7 +680,7 @@ def _join_result_python(
 
 def _join_and_prune_checked(
     frontier_tuples: list[tuple[int, ...]],
-    frontier_masks: npt.NDArray[np.uint64],
+    frontier_masks: npt.NDArray[Any],
     *,
     drop_conflicts: bool,
     n_bars: int,
@@ -699,9 +766,9 @@ def _raise_unsupported_bit(bit: int) -> None:
     from brutex.engine.sweep_run import SweepAprioriUnsupportedError
 
     raise SweepAprioriUnsupportedError(
-        f"generate_apriori_candidates: Apriori frontier requires <64-bit masks "
-        f"(vocab bit {bit} >= {_U64_BITS}); unset {SWEEP_APRIORI_ENV} for u128 "
-        f"vocabularies."
+        f"generate_apriori_candidates: Apriori frontier requires <{_MASK_BITS}-bit "
+        f"masks (vocab bit {bit} >= {_MASK_BITS}); unset {SWEEP_APRIORI_ENV} for "
+        f"wider vocabularies."
     )
 
 
@@ -830,10 +897,10 @@ def generate_apriori_candidates(
         if bit < 0:
             raise ValueError(
                 f"generate_apriori_candidates: condition bit {bit} is negative "
-                f"(out of range [0, {_U64_BITS}))"
+                f"(out of range [0, {_MASK_BITS}))"
             )
-        if bit >= _U64_BITS:
-            # A ``>= 64``-bit vocabulary (u128) — a GRACEFUL per-tuple refusal
+        if bit >= _MASK_BITS:
+            # Beyond the two-limb frontier — a GRACEFUL per-tuple refusal
             # (SweepComboError subclass → TUPLE_FAILED), never a raw ValueError
             # that would crash the whole grid with the flag left ON.
             _raise_unsupported_bit(bit)
@@ -897,9 +964,7 @@ def generate_apriori_candidates(
     frontier_tuples: list[tuple[int, ...]] = [
         (bit,) for bit, count in zip(singleton_bits, counts, strict=True) if count >= min_hits
     ]
-    frontier_masks: npt.NDArray[np.uint64] = np.array(
-        [1 << bit for (bit,) in frontier_tuples], dtype=np.uint64
-    )
+    frontier_masks: npt.NDArray[Any] = _frontier_array(1 << bit for (bit,) in frontier_tuples)
     # Level-1 census: raw |C_1| singletons + the post-min_hits frequent frontier |F_1|.
     _emit_census(
         cell_label=cell_label,
@@ -939,7 +1004,7 @@ def generate_apriori_candidates(
             if count >= min_hits
         ]
         frontier_tuples = [tpl for tpl, _ in frequent]
-        frontier_masks = np.array(sorted(mask for _, mask in frequent), dtype=np.uint64)
+        frontier_masks = _frontier_array(sorted(mask for _, mask in frequent))
         # Intermediate-level census: raw |C_j| join output + frequent frontier |F_j|.
         _emit_census(
             cell_label=cell_label,
