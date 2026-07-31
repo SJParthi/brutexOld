@@ -42,6 +42,7 @@ from brutex.observability.rust_census import (
     UNKNOWN,
     FacadeStatus,
     _accepted_events,
+    _calls_strict_refusal,
     _classify,
     _crate_for_source,
     _crate_names,
@@ -784,6 +785,42 @@ class TestMain:
         assert main([]) == 0
 
 
+class TestCallsStrictRefusal:
+    """Signal 4's AST reader — the two arms the module's own suite missed.
+
+    ``_calls_strict_refusal`` decides whether a module is STRICT-ENROLLED,
+    which is what keeps ``engine/combo_mask`` visible to the census at all.
+    It is deliberately an AST walk rather than a text scan, and both of the
+    arms pinned here are the reason: a text scan cannot tell a real call
+    from prose, and it cannot survive source it fails to parse.
+    """
+
+    def test_the_dotted_call_spelling_counts(self) -> None:
+        """``rust_strict.refuse_if_strict(...)`` is an Attribute, not a Name.
+
+        Both spellings are live in this repo — a facade may import the
+        function directly or reach it through the module — so reading only
+        the bare-``Name`` form would silently un-enrol every facade using
+        the dotted one and drop it back to an unwatched degrade.
+        """
+        assert _calls_strict_refusal("import rust_strict\nrust_strict.refuse_if_strict(x)\n")
+        assert _calls_strict_refusal("rust_strict.refuse(facade, reason)\n")
+
+    def test_unparseable_source_is_false_never_an_exception(self) -> None:
+        """One unparseable module must not blind the census to the rest.
+
+        The marker regex matches first, so this source reaches ``ast.parse``
+        and fails there. Returning ``False`` keeps the walk going; raising
+        would abort discovery for every remaining module — the single-broken
+        -module-blinds-the-audit failure this census is built to avoid.
+        """
+        assert not _calls_strict_refusal("refuse_if_strict(  def def def\n")
+
+    def test_prose_mentioning_the_gate_is_not_a_call(self) -> None:
+        """A docstring that NAMES the gate must not count as enrolment."""
+        assert not _calls_strict_refusal('"""We refuse_if_strict(...) here someday."""\n')
+
+
 class TestDegradedPaths:
     """The unhappy branches -- each must produce a row, never an exception.
 
@@ -874,6 +911,39 @@ class TestDegradedPaths:
         )
         assert verdict == UNKNOWN
         assert "no crate import found" in detail
+
+    def test_an_unreadable_source_is_an_unknown_row_never_a_silent_drop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A facade the census CANNOT read must not vanish from the census.
+
+        Signals 2-4 all read source, so before the fifth signal a module
+        with unreadable source and no ``BRUTEX_*``/``*_enabled()`` pair was
+        DROPPED — no row, no diagnostic, the count silently one lower. An
+        absent row is indistinguishable from a clean audit, which defeats
+        the whole point of a census that exists to prove no facade quietly
+        serves Python.
+
+        The vector is real and measured, not hypothetical: a bare
+        ``types.ModuleType`` in ``sys.modules`` (a sourceless stand-in, as
+        any fake-crate test plants) makes ``inspect.getsource`` raise. This
+        pins the honest outcome — the name stays, the verdict is UNKNOWN,
+        and the detail names the CAUSE rather than reporting the misleading
+        "no crate import found" that ``_classify``'s no-crate arm produces
+        when the crate import is merely unread.
+        """
+        target = "brutex.config.seam_core"
+        assert target in discover_facades(), "precondition: normally discovered"
+
+        monkeypatch.setitem(sys.modules, target, ModuleType(target))
+
+        found = discover_facades()
+        assert target in found, "an unreadable facade was silently dropped"
+        assert set(found) == set(_EXPECTED_FACADES), "the census count moved"
+
+        row = census(modules=[target])[0]
+        assert row.verdict == UNKNOWN
+        assert "source unreadable" in row.detail
 
     def test_discovery_survives_an_unimportable_facade(
         self, monkeypatch: pytest.MonkeyPatch

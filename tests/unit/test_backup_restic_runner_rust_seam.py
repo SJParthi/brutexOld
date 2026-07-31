@@ -27,6 +27,7 @@ from brutex.backup.restic_runner import (
     parse_ls_snapshot_time,
     parse_snapshots_latest,
 )
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +40,28 @@ def _fresh_seam() -> Iterator[None]:
 @pytest.fixture
 def flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "1")
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract to the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    where a Class-A (crate absent/stale/errored) or Class-B (crate answered
+    but the RESULT is structurally refused — the ``law_error`` /
+    ``result_refused`` reasons this file's poison cases induce) fall-back
+    RAISES :class:`RustFallbackRefused` at the seam's choke point instead of
+    serving the Python oracle.  The degrade machinery is not deleted — it
+    stays reachable through the documented ``BRUTEX_RUST_STRICT=0`` kill
+    switch, and THAT is the mode the tests requesting this fixture describe.
+    The strict-ON refusal for the SAME induced poison is pinned positively by
+    :class:`TestStrictModeRefusesTheFallback`, so no coverage is traded away.
+
+    Uses the SHARED ``monkeypatch`` (never a module-scoped
+    ``MonkeyPatch.context()``) so set/unset ordering with sibling env pins in
+    this file stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _install_fake(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
@@ -97,7 +120,11 @@ class TestSummaryIdRouting:
 
     @pytest.mark.parametrize("decision", [(1, None), (1, ""), (1, 42), (2, "x"), "junk-shape"])
     def test_poisoned_decisions_are_refused_to_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, decision: object
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        flag_on: None,
+        strict_off: None,
+        decision: object,
     ) -> None:
         _install_fake(monkeypatch, parse_backup_summary_snapshot_id=lambda stdout: decision)
         assert parse_backup_summary_snapshot_id(SUMMARY_OK) == "abc123"
@@ -149,7 +176,11 @@ class TestSnapshotsLatestRouting:
         [(2, None, "t"), (2, "", "t"), (2, "id", None), (2, "id", 42), (7, None, None), "junk"],
     )
     def test_poisoned_decisions_are_refused(
-        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, decision: object
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        flag_on: None,
+        strict_off: None,
+        decision: object,
     ) -> None:
         _install_fake(monkeypatch, parse_snapshots_latest_decision=lambda s: decision)
         assert parse_snapshots_latest(SNAPSHOTS_OK) == SnapshotInfo(
@@ -171,7 +202,9 @@ class TestLsRouting:
         _install_fake(monkeypatch, parse_ls_file_paths=lambda stdout: None)
         assert parse_ls_file_paths(LS_OK) == ("/a",)
 
-    def test_paths_poison_is_refused(self, monkeypatch: pytest.MonkeyPatch, flag_on: None) -> None:
+    def test_paths_poison_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, strict_off: None
+    ) -> None:
         _install_fake(monkeypatch, parse_ls_file_paths=lambda stdout: ["/a", 42])
         assert parse_ls_file_paths(LS_OK) == ("/a",)
         assert backup_rust.disabled_reason() is None
@@ -206,7 +239,9 @@ class TestLsRouting:
         _install_fake(monkeypatch, parse_ls_snapshot_time_decision=lambda s: (0, None))
         assert parse_ls_snapshot_time(LS_OK) == datetime(2026, 1, 1, tzinfo=UTC)
 
-    def test_time_poison_is_refused(self, monkeypatch: pytest.MonkeyPatch, flag_on: None) -> None:
+    def test_time_poison_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, strict_off: None
+    ) -> None:
         _install_fake(monkeypatch, parse_ls_snapshot_time_decision=lambda s: (3, 42))
         assert parse_ls_snapshot_time(LS_OK) == datetime(2026, 1, 1, tzinfo=UTC)
         assert backup_rust.disabled_reason() is None
@@ -226,7 +261,9 @@ class TestArgvRouting:
             expected
         )
 
-    def test_argv_poison_is_refused(self, monkeypatch: pytest.MonkeyPatch, flag_on: None) -> None:
+    def test_argv_poison_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, strict_off: None
+    ) -> None:
         _install_fake(monkeypatch, build_backup_argv=lambda *a: "not-a-list")
         assert build_backup_argv("restic", [], excludes=[], tags=[]) == (
             "restic",
@@ -308,3 +345,60 @@ class TestRealWheelParity:
             tags=["brutex", "pull-quiet"],
         )
         assert backup_rust.disabled_reason() is None
+
+
+class TestStrictModeRefusesTheFallback:
+    """The no-fallback guarantee, pinned POSITIVELY on all four routed surfaces.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001.  Each test induces the SAME poisoned
+    crate decision its ``strict_off`` twin above induces, but leaves
+    ``BRUTEX_RUST_STRICT`` at its shipped default (ON) and asserts the seam
+    RAISES rather than quietly serving the Python oracle.  Without these the
+    ``strict_off`` pins above would be a coverage trade, not a relocation.
+
+    Two reason tokens reach the choke point from this facade: a poison caught
+    while ``_compute`` maps the decision reports ``law_error``; a poison
+    caught while the returned thunk materialises reports ``result_refused``.
+    Both are refused unconditionally — the ``match=`` substrings below are the
+    verified tokens for each surface, not a guess.
+    """
+
+    def test_summary_id_poison_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, parse_backup_summary_snapshot_id=lambda stdout: (2, "x"))
+        with pytest.raises(RustFallbackRefused, match="law_error"):
+            parse_backup_summary_snapshot_id(SUMMARY_OK)
+
+    def test_snapshots_latest_poison_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, parse_snapshots_latest_decision=lambda s: (2, None, "t"))
+        with pytest.raises(RustFallbackRefused, match="law_error"):
+            parse_snapshots_latest(SNAPSHOTS_OK)
+
+    def test_ls_paths_poison_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, parse_ls_file_paths=lambda stdout: ["/a", 42])
+        with pytest.raises(RustFallbackRefused, match="result_refused"):
+            parse_ls_file_paths(LS_OK)
+
+    def test_ls_time_poison_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, parse_ls_snapshot_time_decision=lambda s: (3, 42))
+        with pytest.raises(RustFallbackRefused, match="law_error"):
+            parse_ls_snapshot_time(LS_OK)
+
+    def test_argv_poison_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, build_backup_argv=lambda *a: "not-a-list")
+        with pytest.raises(RustFallbackRefused, match="result_refused"):
+            build_backup_argv("restic", [], excludes=[], tags=[])

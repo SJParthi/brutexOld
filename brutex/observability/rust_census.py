@@ -308,6 +308,26 @@ def _source_of(module: ModuleType) -> str:
         return ""
 
 
+def _source_unreadable(module: ModuleType) -> bool:
+    """Report whether a module's source genuinely CANNOT be read.
+
+    Deliberately NOT spelled ``_source_of(module) == ""``. An empty but
+    perfectly readable file — a bare ``__init__.py`` — also yields ``""``,
+    and the two facts must not be conflated: one is "this module says
+    nothing", the other is "this census cannot tell what it says". Only the
+    second may keep a module in the audit as ``UNKNOWN``; the first is a
+    genuine negative. Measured on this tree: ZERO pre-filtered modules hit
+    either case, so the distinction costs nothing today and exists so the
+    behaviour stays correct if a compiled or zip-imported module ever
+    appears.
+    """
+    try:
+        inspect.getsource(module)
+    except (OSError, TypeError):
+        return True
+    return False
+
+
 def _declares_rust_env(name: str) -> bool:
     """Report whether a module DECLARES a ``*RUST*_ENV`` constant.
 
@@ -838,7 +858,34 @@ def discover_facades() -> list[str]:
         strict_seam = (
             _calls_strict_refusal(source) and _crate_for_source(source, _crate_names()) is not None
         )
-        if (has_env and has_enabled) or required_seam or degrading_seam or strict_seam:
+        # Fifth signal: "I CANNOT TELL" IS A ROW, NEVER AN ABSENCE. Signals
+        # 2-4 all read source, so a module whose source cannot be read is
+        # findable by signal 1 alone — and a facade that holds no
+        # ``BRUTEX_*`` value plus ``*_enabled()`` pair was simply DROPPED:
+        # no row, no diagnostic, no count change to notice. That is the one
+        # answer this census may never give, because an absent row is
+        # indistinguishable from a clean audit, which is exactly the lie
+        # the whole P1 guarantee exists to prevent.
+        #
+        # MEASURED, not theorised: planting a bare ``types.ModuleType`` over
+        # ``brutex.config.seam_core`` in ``sys.modules`` removed it from
+        # ``discover_facades()`` silently — 44 rows became 43 with nothing
+        # said. Keeping the name routes it through ``census``/``_classify``,
+        # which reports the honest ``UNKNOWN`` the docstring above already
+        # promised for unreadable source (before this arm that promise was
+        # false for signals 2-4 — they vanished the module instead).
+        #
+        # Inert on a source-shipping tree: ZERO of the ~48 pre-filtered
+        # modules have unreadable source, so this adds no row in practice.
+        # It arms only for a compiled/zip-imported module or a sourceless
+        # stand-in — cases where silence would be the worst possible answer.
+        if (
+            (has_env and has_enabled)
+            or required_seam
+            or degrading_seam
+            or strict_seam
+            or _source_unreadable(module)
+        ):
             found.append(name)
     return sorted(found)
 
@@ -925,6 +972,15 @@ def census(modules: list[str] | None = None) -> list[FacadeStatus]:
             crate_present=crate_present,
             required_seam=required_seam,
         )
+        # Say WHY, not just "unknown". Every source-derived fact above —
+        # crate, required-seam — is silently absent for an unreadable
+        # module, so ``_classify`` reaches its no-crate arm and reports
+        # "no crate import found". On this path that sentence is a
+        # misreading dressed as a finding: the crate import may well be
+        # there, unread. Naming the real cause keeps the row honest and
+        # tells the operator the row is uninformative rather than negative.
+        if _source_unreadable(module):
+            detail = "source unreadable - crate and required-seam signals unavailable"
         rows.append(
             FacadeStatus(
                 module=name,

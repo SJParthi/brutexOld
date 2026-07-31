@@ -16,6 +16,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.crossverify import canonical, rust_seam
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 
@@ -39,6 +40,28 @@ def _fresh_seam() -> Iterator[None]:
     rust_seam.reset_crossverify_rust_for_tests()
     yield
     rust_seam.reset_crossverify_rust_for_tests()
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract to the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    where a Class-A (crate absent/stale/errored) or Class-B (crate answered
+    but the RESULT is structurally refused) fall-back RAISES
+    :class:`RustFallbackRefused` at the seam's choke point instead of serving
+    the Python oracle.  A LATCHED seam is exactly that class.  The degrade
+    machinery is not deleted — it stays reachable through the documented
+    ``BRUTEX_RUST_STRICT=0`` kill switch, and THAT is the mode the tests
+    requesting this fixture describe.  The strict-ON refusal for the SAME
+    induced fault is pinned positively by
+    :class:`TestStrictModeRefusesTheFallback`, so no coverage is traded away.
+
+    Uses the SHARED ``monkeypatch`` (never a module-scoped
+    ``MonkeyPatch.context()``) so set/unset ordering with the sibling env pins
+    in this file stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 class _FakeOpsModule(types.ModuleType):
@@ -135,7 +158,9 @@ class TestCanonicalFlagOn:
             == "crossverify/groww/2026-07-10/NSE_EQ/M&M.csv"
         )
 
-    def test_flag_on_latched_seam_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_flag_on_latched_seam_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, strict_off: None
+    ) -> None:
         monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "1")
         _plant_spy_crate(monkeypatch, [])
         rust_seam._disable("test_latch")
@@ -144,3 +169,55 @@ class TestCanonicalFlagOn:
             s3_key(prefix="crossverify/groww", day=_DAY, identity=_IDENTITY)
             == "crossverify/groww/2026-07-10/NSE_EQ/M&M.csv"
         )
+
+
+class TestStrictModeRefusesTheFallback:
+    """The no-fallback guarantee, pinned POSITIVELY on this facade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001.  ``BRUTEX_RUST_STRICT`` ships ON, so the
+    latched-seam fall-back :class:`TestCanonicalFlagOn` describes under
+    ``strict_off`` must RAISE here rather than quietly serving the Python
+    oracle — otherwise that fixture would be a coverage trade instead of a
+    relocation.
+
+    Placement subtlety, read off the facade rather than assumed:
+    :func:`rust_seam._disable` calls its strict gate BEFORE writing the latch
+    (``rust_seam.py`` — "the refusal fires BEFORE the latch is written"), so
+    under strict mode the latch is never set and every
+    ``rust_seam_disabled()`` early-return in the routed laws is structurally
+    unreachable.  Both halves are therefore pinned: the latch attempt itself
+    refuses, and a fall-back induced through the REAL routed call (a burn-in
+    mismatch) raises out of :func:`canonical_identity`.
+    """
+
+    def test_latching_the_seam_refuses_and_never_writes_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "1")
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _plant_spy_crate(monkeypatch, [])
+        with pytest.raises(RustFallbackRefused, match="test_latch"):
+            rust_seam._disable("test_latch")
+        assert not rust_seam.rust_seam_disabled(), (
+            "the refusal fires BEFORE the latch write, so the latched "
+            "early-return is unreachable under strict mode"
+        )
+
+    def test_burn_in_mismatch_raises_out_of_the_routed_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "1")
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        module = _plant_spy_crate(monkeypatch, [])
+        # A DRIFTED mapping (wrong canonical_symbol): the burn-in bit-compare
+        # would ship the ORACLE tuple and latch — strict mode refuses instead.
+        module.crossverify_canonical_identity = lambda *args: (
+            "NSE",
+            "CASH",
+            "M&M",
+            "WRONG",
+            "NSE_EQ",
+            "cash_spot",
+        )
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch_canonical"):
+            canonical_identity(exchange="NSE", segment="CASH", lake_symbol="M&M")
