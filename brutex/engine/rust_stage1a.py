@@ -252,25 +252,56 @@ def disable_kernel(reason: str, **context: object) -> None:
         _LOG.error("rust_stage1a.kernel_autoreverted", reason=reason, **context)
 
 
+#: OVERLOADED reason tokens — HELD, not classified (the honest posture
+#: DEC-RUST-STRICT-NO-FALLBACK-001 mandates for a token that is genuinely two
+#: classes at once). Strict mode does NOT refuse these, because refusing would
+#: crash the CLASS-C half:
+#:
+#: * ``kernel_refused`` — emitted by ONE ``except ValueError`` around the
+#:   ``trading_core.stage1a_bar_bits_batch`` call, which catches BOTH:
+#:
+#:   - **CLASS A/B**: the kernel's own structural refusals. Rust ran and said
+#:     no; a quiet Python re-run papers that over.
+#:   - **CLASS C**: a per-bar price/level whose magnitude exceeds the crate's
+#:     private ``MAX_BAR_PAISA`` (``rust/trading-core/src/python.rs:169``,
+#:     ``i64::MAX / 65536``). That is the crate's *envelope*, not a fault —
+#:     the Python oracle was always the intended handler and raises the
+#:     precise ``"outside the overflow-safe range"`` ``ValueError`` the
+#:     flag-OFF arm raises. Refusing here would replace that exact diagnosis
+#:     with a generic ``RustFallbackRefused``.
+#:
+#:   ``MAX_BAR_PAISA`` is not exported to Python, so screening the envelope
+#:   before the FFI — the fix DEC-RUST-STRICT-CLASS-C-QUANTILE-DOMAIN-001 used
+#:   for ``rust_stats``' AS241 domain — would mean duplicating a private crate
+#:   constant Python-side and inviting drift. Exporting it (or minting a
+#:   distinct ``kernel_input_refused`` crate-side) is the real fix and carries
+#:   its own DEC. Guessing a class here would either crash a legal call or
+#:   hide a genuine kernel refusal.
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset({"kernel_refused"})
+
+
 def warn_fallback_once(reason: str, **context: object) -> None:
     """Refuse under strict mode; else log ``rust_stage1a.fallback`` warn-once.
 
     This is the ONE choke point every Stage-1A fall-back funnels through, so
     :func:`~brutex.config.rust_strict.refuse_if_strict` here is a *complete*
     block on the Python oracle — there is no unannounced path around it
-    (DEC-RUST-STRICT-NO-FALLBACK-001). Every reason this facade can emit
-    (``flag_unrecognised`` / ``kernel_disabled`` / ``wheel_missing`` /
-    ``kernel_refused``) means Rust is absent, latched, or gave a structurally
-    refused answer — never "this input is outside the crate's envelope" — so
-    refusing them all is exactly the intent, with no legitimate input turned
-    into a crash.
+    (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    Three of the four reasons this facade can emit (``flag_unrecognised`` /
+    ``kernel_disabled`` / ``wheel_missing``) mean Rust is absent, latched, or
+    mis-configured, so refusing them is exactly the intent. The fourth,
+    ``kernel_refused``, is genuinely two classes at once and is HELD in
+    :data:`_STRICT_UNRESOLVED_REASONS` rather than guessed — see that
+    constant for why, and for the honest cost.
 
     With strict mode OFF the historic behaviour is byte-identical: the seam
     runs once per kernel BUILD (up to thousands per grid sweep), so a sticky
     reason (a stale wheel, a latched kernel) would otherwise flood the logs,
     and the fallback itself is bit-exact — the Python oracle serves the build.
     """
-    refuse_if_strict("brutex.engine.rust_stage1a", reason, **context)
+    if reason not in _STRICT_UNRESOLVED_REASONS:
+        refuse_if_strict("brutex.engine.rust_stage1a", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
