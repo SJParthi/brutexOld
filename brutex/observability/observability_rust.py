@@ -49,12 +49,14 @@ materialize-in-Python — the DEC-FEED-RUST-CORE-001 shape):
   to the oracle (never served — a poisoned crate can only degrade).
 * **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
   FFI error surface; a lone-surrogate string's ``UnicodeEncodeError`` ⊂
-  ``ValueError`` lands here, and so does the crate's checked ``episodes +
-  1`` overflow refusal — "episodes counter overflow" at a warn edge on
-  ``episodes == 2**64 - 1``, where the oracle's unbounded Python int is the
-  honest value), ``TypeError``/``OverflowError`` (PyO3 argument conversion —
-  a negative/out-of-u64 ``episodes`` int lands here), ``AttributeError``
-  (broken-crate-internals belt). The ESCAPE clause
+  ``ValueError`` lands here), ``TypeError``/``OverflowError`` (PyO3 argument
+  conversion), ``AttributeError`` (broken-crate-internals belt). The episode
+  counter's two out-of-``u64`` shapes — negative, or at/over ``u64::MAX`` so
+  the crate's checked ``episodes + 1`` on a warn edge cannot represent the
+  result — are NOT left to this set: they are gated PRE-FFI as the CLASS-C
+  ``loop_input_beyond_crate`` (the oracle's unbounded Python int is the
+  honest value), so the degrade set stays a genuine "the crate broke"
+  surface. The ESCAPE clause
   (``KeyboardInterrupt``/``SystemExit``/``MemoryError``) re-raises RAW and
   sits ABOVE the panic belt so the belt's ``Exception`` member can never
   swallow an OOM. The panic belt (:func:`_panic_belt_errors`) resolves the
@@ -175,6 +177,11 @@ _LAW_SLA: Final[str] = "sla"
 _LAW_STAMP_SHAPE: Final[str] = "stamp_shape"
 #: The law-D2 (stamp verdict) burn-in budget key.
 _LAW_STAMP_VERDICT: Final[str] = "stamp_verdict"
+
+#: ``u64::MAX`` — the ceiling of the crate's episode counter. The RANGE gate
+#: in :func:`routed_loop_check_once` keeps ``episodes`` strictly BELOW it so
+#: the crate's checked ``episodes + 1`` on a warn edge always fits.
+_U64_MAX: Final[int] = 2**64 - 1
 
 #: Flag vocabulary — a LOCAL twin of ``lake_rust_render._TRUTHY``
 #: (equality-pinned by test; module docstring's import-edge decision).
@@ -533,19 +540,28 @@ def reset_observability_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> N
 #: (DEC-RUST-STRICT-NO-FALLBACK-001). Enumerated + reviewable here, never
 #: buried in an inline condition. Everything NOT listed refuses.
 #:
-#: All three are the facade's EXACT-TYPE input gates: the crate's FFI takes a
-#: concrete ``float``/``int``, so a numeric SUBCLASS, a ``Decimal``, a ``bool``
-#: or an ``int`` where a ``float`` is required is an input the crate never
-#: claimed — the arbitrary-precision Python oracle was ALWAYS the intended
-#: handler for it (see each gate's own docstring). Refusing would crash a
-#: legitimate caller; the honest fix is to widen the crate's accepted types
-#: until these arms are unreachable, then delete the entries.
+#: All four are the facade's INPUT gates: the crate's FFI takes a concrete
+#: ``float``/``u64``, so a numeric SUBCLASS, a ``Decimal``, a ``bool``, an
+#: ``int`` where a ``float`` is required, or an episode counter outside the
+#: ``u64`` range is an input the crate never claimed — the
+#: arbitrary-precision Python oracle was ALWAYS the intended handler for it
+#: (see each gate's own docstring). Refusing would crash a legitimate caller;
+#: the honest fix is to widen the crate's accepted types/range until these
+#: arms are unreachable, then delete the entries.
 #:
 #: * ``loop_input_refused``   — ``check_once`` tier not an exact ``float``.
+#: * ``loop_input_beyond_crate`` — ``episodes`` negative, or at/over
+#:   ``u64::MAX`` so the crate's checked ``+ 1`` on a warn edge could not
+#:   represent the result.
 #: * ``watchdog_input_refused`` — worker-heartbeat ``now`` not an exact ``float``.
 #: * ``sla_input_refused``    — SLA ``value``/threshold not an exact ``float``.
 _STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
-    {"loop_input_refused", "watchdog_input_refused", "sla_input_refused"}
+    {
+        "loop_input_refused",
+        "loop_input_beyond_crate",
+        "watchdog_input_refused",
+        "sla_input_refused",
+    }
 )
 
 
@@ -862,6 +878,17 @@ def routed_loop_check_once(  # noqa: UP047 — PEP 695 unsupported by the mutmut
         # Exact-type gate: Python compares int/Decimal against float with
         # arbitrary precision — an f64 round-trip could differ (module docs).
         _warn_once("loop_input_refused", tier_type=type(tier).__name__)
+        return _oracle()
+    if not 0 <= episodes < _U64_MAX:
+        # RANGE gate, the exact-type gate's sibling: the crate counts episodes
+        # in a ``u64`` and increments it on a warn edge, so a negative counter
+        # (unrepresentable) or one at/over ``u64::MAX`` (unincrementable — the
+        # crate's own ``checked_add`` refuses it) is an input the crate never
+        # claimed. Python's unbounded int was ALWAYS the intended handler for
+        # it (module docstring). Gated here, PRE-FFI, so ``loop_error`` stays
+        # a genuine CLASS-A "the crate broke" refusal instead of absorbing a
+        # CLASS-C out-of-envelope input.
+        _warn_once("loop_input_beyond_crate", episodes=episodes)
         return _oracle()
     crate = _resolve_crate()
     if crate is None:

@@ -266,7 +266,7 @@ jobs:
         # is a typed FeedError, no Python oracle to fall back to). Same
         # crates.io flake-retry idiom as above.
         run: |
-          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity ./rust/brutex-refine ./rust/brutex-feed; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-core ./rust/brutex-identity ./rust/brutex-refine ./rust/brutex-feed; do
             n=0
             until pip install "$crate"; do
               n=$((n+1))

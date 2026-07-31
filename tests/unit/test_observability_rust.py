@@ -1545,12 +1545,13 @@ class TestRealWheelDifferential:
         last_logged_at=_FLOATS,
         last_alerted_at=_FLOATS,
         # The FULL u64 domain, u64::MAX INCLUDED (+ the two boundary values
-        # oversampled): a warn edge at episodes == 2**64 - 1 now takes the
-        # crate's checked_add ValueError refusal → the degrade set → the
-        # ORACLE value (Python ints are unbounded), so the differential
-        # equality holds over the whole domain — the pre-fix belt-escaping
-        # overflow panic is dead at the root (the flipped containment pin
-        # below: test_u64_max_episodes_warn_edge_degrades_via_value_error).
+        # oversampled): episodes == 2**64 - 1 is outside the crate's counter
+        # range (its checked ``+ 1`` on a warn edge cannot represent the
+        # result), so the facade's PRE-FFI range gate routes it to the ORACLE
+        # value (Python ints are unbounded) and the differential equality
+        # holds over the whole domain — the pre-fix belt-escaping overflow
+        # panic is dead at the root (the containment pin below:
+        # test_u64_max_episodes_warn_edge_routes_to_oracle_pre_ffi).
         episodes=st.integers(min_value=0, max_value=2**64 - 1)
         | st.sampled_from([2**64 - 1, 2**64 - 2]),
         warn_after_s=_FLOATS,
@@ -1745,31 +1746,40 @@ class TestRealWheelDifferential:
             expected_snapshot,
         )
 
-    def test_out_of_u64_episodes_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_out_of_u64_episodes_routes_to_oracle_pre_ffi(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Production-unreachable (episodes only ever increments from 0): a
-        # NEGATIVE int fails the u64 conversion with OverflowError at the
-        # pyo3 edge → the degrade set → the oracle serves it (the in-u64
-        # overflow at MAX is the separate checked_add ValueError pin above).
+        # NEGATIVE int is unrepresentable in the crate's ``u64``, so the
+        # facade's PRE-FFI range gate serves the oracle. It used to reach
+        # pyo3's argument conversion and come back as a CLASS-A
+        # ``loop_error`` OverflowError — which, under BRUTEX_RUST_STRICT,
+        # would refuse a legitimate (if absurd) caller. Same CLASS-C arm as
+        # the at/over-u64::MAX pin below.
         self._require_wheel(monkeypatch)
         state = WatchdogState(episodes=-1)
         with capture_logs() as logs:
             verdict = _call_loop_with_state(state)
         assert verdict.state is state  # the oracle's OK→OK identity
         warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
-        assert warns[0]["reason"] == "loop_error"
+        assert warns[0]["reason"] == "loop_input_beyond_crate"
+        assert warns[0]["episodes"] == -1
 
-    def test_u64_max_episodes_warn_edge_degrades_via_value_error(
+    def test_u64_max_episodes_warn_edge_routes_to_oracle_pre_ffi(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # THE FLIPPED CONTAINMENT PIN. Pre-fix this test pinned the ESCAPE:
-        # the `episodes + 1` overflow-checks panic crossed the FFI as THIS
-        # wheel's per-extension PanicException — a BaseException resolvable
-        # from NEITHER name-based belt home — and propagated un-latched.
-        # The fix kills the panic at the ROOT (the crate's checked_add maps
-        # the warn-edge increment at u64::MAX to a ValueError naming the
-        # field) so the facade's degrade set serves the ORACLE value —
-        # honest, since Python ints are unbounded and the oracle computes
-        # u64::MAX + 1 fine. One warn, no latch, no autorevert.
+        # THE CONTAINMENT PIN. Two revisions ago this test pinned the
+        # ESCAPE: the `episodes + 1` overflow-checks panic crossed the FFI
+        # as THIS wheel's per-extension PanicException — a BaseException
+        # resolvable from NEITHER name-based belt home — and propagated
+        # un-latched. The crate's checked_add then demoted that to a
+        # ValueError, which the facade's degrade set caught. It is now
+        # caught EARLIER still: episodes at/over u64::MAX is outside the
+        # crate's counter range, so the facade's PRE-FFI range gate serves
+        # the ORACLE without calling the crate at all — honest, since Python
+        # ints are unbounded and the oracle computes u64::MAX + 1 fine, and
+        # a CLASS-C input gate rather than a CLASS-A "the crate broke"
+        # degrade. One warn, no latch, no autorevert.
         self._require_wheel(monkeypatch)
         state = WatchdogState(episodes=2**64 - 1)
         with capture_logs() as logs:
@@ -1787,8 +1797,8 @@ class TestRealWheelDifferential:
         assert verdict.warn_edge is True
         assert verdict.state.episodes == 2**64  # the unbounded-int truth
         warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
-        assert warns[0]["reason"] == "loop_error"
-        assert "episodes counter overflow" in warns[0]["error_detail"]
+        assert warns[0]["reason"] == "loop_input_beyond_crate"
+        assert warns[0]["episodes"] == 2**64 - 1
         assert obs.rust_observability_disabled() is False  # degrade, never a latch
         assert [e for e in logs if e["event"] == "observability_rust.autoreverted"] == []
 

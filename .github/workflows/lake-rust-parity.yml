@@ -335,6 +335,32 @@ jobs:
             sleep 10
           done
 
+      - name: Install brutex_core Rust extension (strict-mode hardware-envelope dep)
+        # DEC-RUST-STRICT-NO-FALLBACK-001: with BRUTEX_RUST_STRICT ON by
+        # default, `brutex/config/hardware_envelope_rust.py` REFUSES rather
+        # than serving its Python oracle when the crate is absent —
+        # `crate_unavailable` / ModuleNotFoundError("No module named
+        # 'brutex_core'"). Every lane suite that resolves a CPU/RAM budget
+        # (the sizing helpers are imported transitively by the lake writers'
+        # pool sizing) therefore dies at that refusal without this wheel.
+        # Installed for the whole job so any future leg widening its imports
+        # is covered. brutex_core is polars-free, so it is installed BEFORE
+        # the polars alignment step below and cannot perturb that pin. Same
+        # maturin/abi3 build + crates.io flake-retry idiom as the two steps
+        # above; the lane's newer toolchain is fine — the wheel is
+        # compiler-version independent.
+        run: |
+          n=0
+          until pip install ./rust/brutex-core; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
       - name: Align the installed polars wheel to the crate pin
         # Review-round fold (supersedes the warn-only-drift-with-no-alignment
         # shape): `pip install -e ".[data,dev]"` resolves the HIGHEST polars

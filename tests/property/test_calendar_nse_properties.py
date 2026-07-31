@@ -3,7 +3,8 @@
 Hypothesis invariants:
 - IST offset is ALWAYS +05:30 with no DST, for any instant.
 - No listed holiday is ever a trading day (within coverage).
-- A regular session's open/close are exactly 09:15:00 / 15:30:00 and span 375m.
+- A regular session's open/close are exactly 09:15:00 / 15:30:00 and span 375m,
+  EXCEPT an :data:`EXTENDED_SESSIONS` outage date, which is positively pinned.
 - Every regular trading-day timestamp from open..close is within session bounds.
 - `is_holiday_data_available` is exactly the covered-year range test.
 - `is_holiday_checked` raises iff data is unavailable, else equals `is_holiday`.
@@ -16,6 +17,7 @@ from datetime import date, datetime, time, timedelta
 import pytest
 from brutex.calendars.nse import (
     ALL_HOLIDAYS,
+    EXTENDED_SESSIONS,
     HOLIDAY_COVERAGE_FIRST_YEAR,
     HOLIDAY_COVERAGE_LAST_YEAR,
     IST,
@@ -76,12 +78,41 @@ def test_checked_holiday_matches_or_raises(d: date) -> None:
 
 @given(_DATES)
 def test_regular_session_has_canonical_bounds(d: date) -> None:
+    """Every REGULAR session is canonical 09:15-15:30 EXCEPT an outage extension.
+
+    EXTENDED-SESSION CARVE-OUT (DEC-EXTENDED-SESSION-OUTAGE-001, MIGRATION.md
+    #1746): ``get_session`` classifies an :data:`EXTENDED_SESSIONS` date as
+    ``SessionType.REGULAR`` with the exchange's real, LATER close — 2021-02-24
+    closed 17:00 IST after the NSE telecom-link outage — so the blanket
+    "every REGULAR session closes 15:30" assertion was false for that one date.
+    The property predates that pack and only excused special-weekend sessions
+    (which genuinely DO keep canonical hours, so they need no carve-out).
+
+    CI never saw it: the repo-registered ``ci`` hypothesis profile is
+    derandomized (DEC-TEST-APPARATUS-DEBTS-001, MIGRATION.md #1541), so the
+    shrinker never drew 2021-02-24 there. A local run on the random default
+    profile does, and hypothesis then caches the counterexample — a latent
+    flake that could red CI on any reseed. Both this file and
+    ``brutex/calendars/nse.py`` are byte-identical to ``origin/main``, so the
+    gap is PRE-EXISTING and unrelated to the strict-mode work on this branch.
+
+    The extended date is PINNED positively rather than skipped, so the
+    carve-out can never silently swallow a real regression.
+    """
     session = get_session(d)
-    if session is not None and session.session_type == SessionType.REGULAR:
-        # Special weekend sessions are also REGULAR but use canonical hours too.
-        assert session.open_time_ist == SESSION_OPEN_IST == time(9, 15, 0)
-        assert session.close_time_ist == SESSION_CLOSE_IST == time(15, 30, 0)
-        assert session.duration_minutes == SESSION_DURATION_MINUTES == 375
+    if session is None or session.session_type != SessionType.REGULAR:
+        return
+    # Special weekend sessions are also REGULAR but use canonical hours too.
+    assert session.open_time_ist == SESSION_OPEN_IST == time(9, 15, 0)
+    if d in EXTENDED_SESSIONS:
+        expected_open, expected_close = EXTENDED_SESSIONS[d]
+        assert session.open_time_ist == expected_open == SESSION_OPEN_IST
+        assert session.close_time_ist == expected_close
+        assert session.close_time_ist > SESSION_CLOSE_IST
+        assert session.duration_minutes > SESSION_DURATION_MINUTES
+        return
+    assert session.close_time_ist == SESSION_CLOSE_IST == time(15, 30, 0)
+    assert session.duration_minutes == SESSION_DURATION_MINUTES == 375
 
 
 @given(st.integers(min_value=0, max_value=375))

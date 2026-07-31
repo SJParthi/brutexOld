@@ -15,6 +15,7 @@ import types
 
 import pytest
 from brutex.config import seam_core
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 
 _ENV = "BRUTEX_CORE_RUST_DEMO"
 
@@ -528,3 +529,47 @@ class TestAdopt:
         assert _adopt(seam) == "oracle"
         assert _adopt(seam) == "oracle"
         assert infos.count("demo_rust.engaged") == 1
+
+
+class TestStrictFacadeOptIn:
+    """The OPT-IN strict wiring (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    ``ConfigRustSeam._refuse_if_strict`` is a NO-OP unless the owning facade
+    passed ``strict_facade``. That opt-in is what keeps an unclassified
+    consumer (today ``brutex.config.backup_env_rust``) byte-identical instead
+    of being silently swept into strict mode — so BOTH arms are pinned here:
+    the opted-in seam REFUSES, the opted-out seam degrades exactly as before.
+    """
+
+    def test_opted_in_seam_refuses_under_strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(lambda _s: "wrong"))
+        seam = _make_seam(strict_facade="brutex.config.demo_rust")
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            _adopt(seam)
+        message = str(excinfo.value)
+        assert "brutex.config.demo_rust" in message
+        assert "burn_in_mismatch_law_a" in message
+        assert "BRUTEX_RUST_STRICT" in message
+
+    def test_opted_in_seam_degrades_when_strict_is_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+        _warns, errors, _infos = _capture_logs(monkeypatch)
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(lambda _s: "wrong"))
+        seam = _make_seam(strict_facade="brutex.config.demo_rust")
+        assert _adopt(seam) is None
+        assert seam.disabled_reason == "burn_in_mismatch_law_a"
+        assert errors[0][1] == "burn_in_mismatch_law_a"
+
+    def test_opted_out_seam_is_untouched_by_strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Anti-vacuous: strict-ON + NO ``strict_facade`` still degrades."""
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+        _warns, errors, _infos = _capture_logs(monkeypatch)
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(lambda _s: "wrong"))
+        seam = _make_seam()  # strict_facade defaults to None
+        assert seam.strict_facade is None
+        assert _adopt(seam) is None
+        assert seam.disabled_reason == "burn_in_mismatch_law_a"
+        assert errors[0][1] == "burn_in_mismatch_law_a"

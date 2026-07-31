@@ -945,6 +945,38 @@ class TestStrictRefusal:
             assert rust_strict.strict_mode() is True
             yield
 
+    @staticmethod
+    @contextmanager
+    def _strict_off() -> Generator[None]:
+        """Re-assert the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        The mirror of :meth:`_strict_on`, and it exists for the SAME reason —
+        a shared-``monkeypatch`` ``setenv`` here is the leak this class's
+        sibling docstring warns about, with the polarity swapped: the
+        autouse ``_strict_off_degrade_lattice`` has already set ``"0"`` in a
+        SEPARATE context, so a shared-``monkeypatch`` ``setenv`` records
+        ``"0"`` as the value to restore. If pytest then finalises the autouse
+        fixture's context BEFORE the shared ``monkeypatch`` (LIFO across
+        fixture objects, and the shared fixture is set up early because other
+        fixtures request it), the autouse undo DELETES the var and the shared
+        undo puts ``"0"`` back — leaking the kill switch into every later
+        test in the process.
+
+        The damage is silent-green in the wrong direction: a later
+        ``TestStrictMode`` refusal test degrades to
+        ``Failed: DID NOT RAISE RustFallbackRefused`` while its facade
+        quietly served the Python oracle. Reproduced (pre-fix) as 7 failures
+        in ``tests/unit/test_strategies_combo_rust.py::TestStrictMode`` on
+        the CI shard-3 file list; ``tests/conftest.py::_isolate_rust_strict_env``
+        is the suite-wide belt, this is the root fix.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+            assert rust_strict.strict_mode() is False
+            yield
+
     # ── CLASS A — crate absent / stale / errored ────────────────────────────
 
     def test_class_a_crate_absent_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1105,11 +1137,14 @@ class TestStrictRefusal:
     # ── The kill switch still works ────────────────────────────────────────
 
     def test_strict_off_still_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
-        from brutex.config import rust_strict
+        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise.
 
-        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        The env goes through :meth:`_strict_off`'s OWN MonkeyPatch context,
+        never the shared ``monkeypatch`` — see that method's docstring for the
+        cross-context LIFO leak a shared ``setenv`` causes here.
+        """
         _flag_on(monkeypatch)
         _install_crate(monkeypatch, SimpleNamespace(__version__="0.0.1"))
-        assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
+        with self._strict_off():
+            assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
         assert fsr._DISABLED_REASON[0] == "crate_stale"

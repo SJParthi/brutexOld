@@ -4361,7 +4361,7 @@ jobs:
           # production kernels are needed too (same retry guard);
           # brutex-identity joins them because results_store.py hard-imports
           # its kernel (DEC-RUST-RUNID-STORES-001).
-          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-core ./rust/brutex-identity; do
             n=0
             until pip install "$crate"; do
               n=$((n + 1))

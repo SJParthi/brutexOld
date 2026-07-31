@@ -9,6 +9,7 @@ holds on wheel-less CI. The REAL-crate byte parity corpus lives in
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import types
 from pathlib import Path
@@ -37,6 +38,17 @@ def _payload() -> ShardRenderPayload:
         files=(("2026/07.parquet", 2, "a", "b", 5, 9, None),),
         updated_utc="2026-07-07T00:00:00+00:00",
     )
+
+
+def _payload_with_file(
+    row: tuple[str, int, str, str, int, int, str | None],
+) -> ShardRenderPayload:
+    """:func:`_payload` with its ONE file row swapped — the ``_beyond_crate`` seam.
+
+    Row layout is the writer's own tuple:
+    ``(rel, rows, min_ts_iso, max_ts_iso, mtime_ns, size, raw_hash)``.
+    """
+    return dataclasses.replace(_payload(), files=(row,))
 
 
 def _seam_call(python_body: str = "PY") -> str:
@@ -262,6 +274,80 @@ class TestDegradePaths:
         assert warns[0]["result_type"] == "bytes"
 
 
+class TestBeyondCrateInputs:
+    """CLASS C — a legitimate Python value pyo3 cannot carry (``_beyond_crate``).
+
+    The wheel-less twin of the golden corpus' ``TestDegradeLaws``: the SAME
+    two out-of-envelope shapes (an ``int`` outside ``i64``; a ``str`` carrying
+    a lone surrogate, legal in Python, illegal in Rust's UTF-8 ``String``)
+    driven through the seam against a FAKE crate, so the gate's own branches
+    are covered on wheel-less CI.
+
+    The law under test is that the gate runs BEFORE the FFI: the crate is
+    never called at all, so the fault-only ``render_error`` token keeps its
+    honest "the crate ran and broke" meaning and the out-of-envelope input
+    takes the exempt ``render_input_beyond_crate`` reason instead.
+    """
+
+    @staticmethod
+    def _never(*args: object) -> str:
+        """Engagement spy — a pre-FFI-gated call must never reach the crate."""
+        raise AssertionError("the crate was called for an out-of-envelope input")
+
+    @staticmethod
+    def _seam(payload: ShardRenderPayload) -> str:
+        return lake_rust_stats.render_shard_json(
+            payload_factory=lambda: payload, python_render=lambda: "PY"
+        )
+
+    @pytest.mark.parametrize(
+        ("row", "field"),
+        [
+            # int outside i64 — pyo3 cannot extract it into the crate's i64.
+            (("2026/07.parquet", 2, "a", "b", 2**63, 9, None), "files[0].mtime_ns"),
+            (("2026/07.parquet", 2, "a", "b", 5, -(2**63) - 1, None), "files[0].size"),
+            # lone surrogate — legal str, illegal Rust String.
+            (("bad\ud800rel", 2, "a", "b", 5, 9, None), "files[0].rel"),
+            # ...including in the OPTIONAL raw_hash, whose check is skipped
+            # entirely when the column is absent (the None row every other
+            # test in this module uses).
+            (("2026/07.parquet", 2, "a", "b", 5, 9, "bad\ud800hash"), "files[0].raw_hash"),
+        ],
+    )
+    def test_out_of_envelope_value_routes_to_the_oracle_pre_ffi(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        row: tuple[str, int, str, str, int, int, str | None],
+        field: str,
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "brutex_lake", _fake_crate(render=self._never))
+        with capture_logs() as logs:
+            assert self._seam(_payload_with_file(row)) == "PY"
+        warns = [entry for entry in logs if entry["event"] == "lake_rust_stats.fallback"]
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "render_input_beyond_crate"
+        assert warns[0]["field"] == field
+        # Degrade, never a latch: the next in-envelope call is crate-served.
+        assert lake_rust_stats.rust_stats_disabled() is False
+
+    def test_present_raw_hash_inside_the_envelope_reaches_the_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gate's PASS arm with the optional column populated.
+
+        Every other test carries ``raw_hash=None`` (the column is skipped);
+        this one populates it with an in-envelope value so the check runs and
+        returns clean, proving the gate lets a legitimate raw_hash through
+        rather than treating presence itself as out-of-envelope.
+        """
+        monkeypatch.setitem(sys.modules, "brutex_lake", _fake_crate(render=lambda *a: "RUST"))
+        lake_rust_stats.reset_lake_rust_stats_for_tests(remaining=0)
+        row = ("2026/07.parquet", 2, "a", "b", 5, 9, "deadbeef")
+        with capture_logs() as logs:
+            assert self._seam(_payload_with_file(row)) == "RUST"
+        assert [e for e in logs if e["event"] == "lake_rust_stats.fallback"] == []
+
+
 class TestPanicBelt:
     def test_belt_matches_the_lake_rust_render_twin(self) -> None:
         """The LOCAL twin resolves the SAME homes to the SAME classes."""
@@ -411,10 +497,14 @@ class TestStrictRefusal:
     its shipped default (ON) and pin that the choke points REFUSE instead of
     quietly handing the call to the Python oracle.
 
-    This facade has NO class-C reason (an input the crate was never meant
-    to handle) at either choke point, so it carries no exemption set —
-    every reason it emits is class A (crate absent / stale / errored) or
-    class B (the crate ran and returned a structurally refused result).
+    Every reason this facade emits is class A (crate absent / stale /
+    errored) or class B (the crate ran and returned a structurally refused
+    result) — both REFUSE — EXCEPT the single class-C member of
+    ``_STRICT_EXEMPT_REASONS``: ``render_input_beyond_crate``, an input the
+    crate never claimed, decided by a Python-side gate BEFORE the FFI. That
+    one is exempt because refusing it would crash a legitimate caller over a
+    value the CPython oracle was always the intended handler for; its
+    exemption is pinned here too, not merely asserted in a docstring.
 
     ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
     fixture used, so both live on one LIFO undo stack and the value cannot
@@ -457,3 +547,26 @@ class TestStrictRefusal:
         self._strict_on(monkeypatch)
         with pytest.raises(RustFallbackRefused):
             lake_rust_stats._disable("burn_in_byte_mismatch")
+
+    def test_class_c_beyond_crate_is_exempt_and_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ONE exempt reason — strict-ON still degrades, and says why.
+
+        A lone-surrogate ``rel`` is a value the CRATE cannot carry, not a
+        Rust fault: refusing it would strand a legitimate shard write over an
+        input pyo3 never accepted. The gate runs pre-FFI, so the crate is
+        never called and the oracle serves — under the shipped strict default.
+        """
+        monkeypatch.setitem(
+            sys.modules, "brutex_lake", _fake_crate(render=TestBeyondCrateInputs._never)
+        )
+        self._strict_on(monkeypatch)
+        row = ("bad\ud800rel", 2, "a", "b", 5, 9, None)
+        with capture_logs() as logs:
+            body = lake_rust_stats.render_shard_json(
+                payload_factory=lambda: _payload_with_file(row), python_render=lambda: "PY"
+            )
+        assert body == "PY"
+        warns = [entry for entry in logs if entry["event"] == "lake_rust_stats.fallback"]
+        assert warns[0]["reason"] == "render_input_beyond_crate"

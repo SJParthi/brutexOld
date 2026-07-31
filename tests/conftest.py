@@ -14,6 +14,7 @@ import structlog
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+from brutex.config.rust_strict import RUST_STRICT_ENV
 from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV
 from brutex.data.today_completeness import (
     TODAY_COMPLETENESS_GATE_ENV,
@@ -600,6 +601,44 @@ def _isolate_sweep_apriori_env() -> Iterator[None]:
             os.environ.pop(env_name, None)
         else:
             os.environ[env_name] = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_rust_strict_env() -> Iterator[None]:
+    """Snapshot-restore ``BRUTEX_RUST_STRICT`` around EVERY test.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: ``strict_mode()`` reads the env on every
+    call and never memoises, so the shipped default (ON when the var is unset)
+    is a *process-wide ambient* — and a test that writes the kill switch
+    ``"0"`` with a RAW ``os.environ`` assignment instead of ``monkeypatch``
+    leaks it into every later test in the same pytest process. The failure is
+    SILENT-GREEN in the wrong direction: a strict-refusal test degrades to
+    ``Failed: DID NOT RAISE RustFallbackRefused`` while its facade quietly
+    served the Python oracle — exactly the fall-back this DEC exists to
+    forbid. It only ever reproduces on the shard/order that pairs a leaking
+    writer with a ``TestStrictMode`` class, so it is invisible to a
+    single-file run.
+
+    This is the ``_isolate_sweep_apriori_env`` law one env var over: the
+    snapshot is taken at autouse SETUP (before the test body can leak) and
+    restored at teardown, so a leak can never outlive the test that caused it.
+    It never fights a test's deliberate ``monkeypatch.setenv``/``delenv`` of
+    the same var — autouse setup precedes the test's own ``monkeypatch``, so
+    the snapshot IS the true pre-test value and both restore to it.
+
+    The seam-owning facades' own fixtures deliberately do NOT delenv this var
+    (``TestStrictMode`` classes rely on the shipped ambient default being ON),
+    which is precisely why the belt has to live here, at the suite boundary,
+    rather than in any one seam's ``autouse`` fixture.
+    """
+    original = os.environ.get(RUST_STRICT_ENV)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(RUST_STRICT_ENV, None)
+        else:
+            os.environ[RUST_STRICT_ENV] = original
 
 
 @pytest.fixture(autouse=True)
