@@ -345,9 +345,7 @@ class TestRustEnvMarker:
     def test_rejects_a_non_declaration(self, source: str, why: str) -> None:
         assert _RUST_ENV_MARKER_RE.search(f"{source}\n") is None, why
 
-    def test_never_imports_the_probed_module_itself(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_never_imports_the_probed_module_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The probed module never lands in ``sys.modules``.
 
         This is the claim that matters and the only one a test can make
