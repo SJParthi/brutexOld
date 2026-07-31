@@ -658,9 +658,17 @@ class TestStrictRefusal:
     # ── The kill switch still works ────────────────────────────────────────
 
     def test_strict_off_still_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The kill switch is ALREADY "0" here — ``_strict_off_degrade_lattice``
+        # pins it for every test in this module. Re-setting it through the
+        # SHARED ``monkeypatch`` is the leak this class's own docstring warns
+        # against: that object records "0" as the value to restore, and pytest
+        # tears it down after the suite-wide belt, so the kill switch outlives
+        # the module and every later strict-refusal test reads DID NOT RAISE.
+        # (Reproduced: this test leaked into ``test_rust_strict_env_belt`` on
+        # CI shard 3.) Nothing to set — assert the pinned mode instead.
         from brutex.config import rust_strict
 
-        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        assert rust_strict.strict_mode() is False
         monkeypatch.setenv(CVAR_RUST_ENV, "1")
         monkeypatch.setitem(sys.modules, "fno_math", None)
         assert cvar_tail_fold(self._PNLS, 500) == _cvar_tail_fold_python(self._PNLS, 500)

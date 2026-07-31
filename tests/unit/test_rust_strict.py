@@ -117,6 +117,31 @@ class TestRefuseMessage:
         """So every existing ``except BruteXError`` boundary sees it as ours."""
         assert issubclass(RustFallbackRefused, BruteXError)
 
+    def test_a_huge_context_value_cannot_mint_an_unbounded_message(self) -> None:
+        """The docstring says "bounded context" — this is what makes that true.
+
+        ``context`` is caller-supplied and a facade may hand over a whole frame
+        or a kernel result. Without the cap a single refusal could mint a
+        megabyte-long exception string into a log line. Bounding lives at this
+        ONE choke point, so the pin here covers all 38 wired facades.
+        """
+        from brutex.config.rust_strict import _CONTEXT_REPR_CAP
+
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            refuse("f", "r", blob="x" * 100_000)
+        text = str(excinfo.value)
+        # The value is capped; the surrounding message is not truncated, so the
+        # operator still gets the facade, the reason and the kill switch.
+        assert "x" * _CONTEXT_REPR_CAP not in text, "the cap must actually bite"
+        assert "x" * (_CONTEXT_REPR_CAP - 1) in text, "…but must not over-trim"
+        assert f"{RUST_STRICT_ENV}=0" in text
+
+    def test_a_short_context_value_is_byte_identical_to_the_pre_cap_form(self) -> None:
+        """The cap is a ceiling, not a reformat: normal refusals are unchanged."""
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            refuse("f", "r", error=ValueError("boom"))
+        assert "(error=ValueError('boom'))" in str(excinfo.value)
+
 
 class TestRefuseIfStrict:
     """:func:`refuse_if_strict` — the one-line insert at each choke point."""

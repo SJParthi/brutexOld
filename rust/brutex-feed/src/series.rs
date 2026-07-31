@@ -28,44 +28,15 @@
 //! integer transcription is lossless by construction (no float ever
 //! enters).
 
-use crate::scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US};
+use crate::scan::{DAY_US, IST_OFFSET_US};
 
-/// `true` iff an epoch-µs / step integer lies inside the crate's fixed-IST
-/// envelope `[0, MAX_SAFE_TS_US)` — the ONE magnitude law of
-/// `DEC-FFI-MAGNITUDE-CEILING-001`, shared by the `#[pyfunction]` guard and
-/// the abstain arm of [`ownership_cut`].
-///
-/// It is the SAME predicate `ownership_cut` already applies per timestamp
-/// (`(0..MAX_SAFE_TS_US).contains(&t)`), hoisted so the two FFI faces cannot
-/// drift apart: `ownership_cut` can express its refusal in its return type
-/// (`Option` → the caller's loud refusal), while
-/// [`expected_bar_instant`] returns a plain `bool`, so its face raises
-/// `ValueError` instead.
-///
-/// ## Why this bound makes the label arithmetic provably overflow-free
-///
-/// `MAX_SAFE_TS_US` ≈ `2.534e17`, so for envelope-bounded `open_us`,
-/// `seg_start_us` and `step_us`:
-///
-/// * `open_us - seg_start_us` has magnitude `< MAX_SAFE_TS_US` (both
-///   operands are non-negative and bounded);
-/// * `div_euclid(step_us)` cannot hit the sole `i64` division overflow
-///   (`i64::MIN / -1`) — the numerator is bounded and `step_us >= 0`;
-/// * the quotient's magnitude is `<= |open_us - seg_start_us|` (dividing by
-///   `step_us >= 1`), so negating it cannot overflow (`i64::MIN` is
-///   unreachable);
-/// * `quotient * step_us` reconstructs a value of magnitude
-///   `<= |open_us - seg_start_us| < MAX_SAFE_TS_US`;
-/// * the final `open_us + …` is therefore `< 2 · MAX_SAFE_TS_US ≈ 5.1e17`,
-///   an order of magnitude inside `i64::MAX ≈ 9.22e18`.
-///
-/// A `step_us` of `0` is legal (it selects the derived-`1day` arm, which
-/// performs no arithmetic at all — only comparisons).
-#[must_use]
-#[inline]
-pub fn ts_in_envelope(value: i64) -> bool {
-    (0..MAX_SAFE_TS_US).contains(&value)
-}
+/// The crate's ONE magnitude law (`DEC-FFI-MAGNITUDE-CEILING-001`), defined
+/// beside the constant it tests in [`crate::scan`] and re-exported here —
+/// this module's [`ownership_cut`] abstain arm and the `#[pyfunction]` guard
+/// over [`expected_bar_instant`] both call it, and the crate root exposes it
+/// on this path. See [`ts_in_envelope`] for why the bound keeps
+/// `expected_bar_instant`'s label arithmetic provably overflow-free.
+pub use crate::scan::ts_in_envelope;
 
 /// One resolvable NSE session day, as exact epoch-microsecond instants:
 /// `(stamp_us, open_us, close_us)` — `stamp_us` is the derived-`1day`
@@ -159,7 +130,7 @@ pub fn expected_bar_instant(
 pub fn ownership_cut(ts_us: &[i64], own_start_days: i64, own_end_days: i64) -> Option<Vec<usize>> {
     let mut kept: Vec<usize> = Vec::new();
     for (i, &t) in ts_us.iter().enumerate() {
-        if !(0..MAX_SAFE_TS_US).contains(&t) {
+        if !ts_in_envelope(t) {
             return None;
         }
         let ordinal = (t + IST_OFFSET_US).div_euclid(DAY_US);

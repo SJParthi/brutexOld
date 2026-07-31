@@ -7,7 +7,7 @@ import sys
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import pytest
 import structlog
@@ -630,6 +630,18 @@ def _isolate_rust_strict_env() -> Iterator[None]:
     (``TestStrictMode`` classes rely on the shipped ambient default being ON),
     which is precisely why the belt has to live here, at the suite boundary,
     rather than in any one seam's ``autouse`` fixture.
+
+    HONEST LIMIT (why the ``trylast`` hook below exists): a fixture restores
+    at ITS finaliser, and pytest tears finalisers down LIFO **by setup order**.
+    A ``monkeypatch`` object that pytest happened to instantiate BEFORE this
+    fixture (it is a dependency of a module's own autouse fixture, so its
+    position is not this file's to control) is therefore undone AFTER this
+    restore — and if that ``monkeypatch`` recorded ``"0"`` as the value to put
+    back, the kill switch survives the belt. That is not hypothetical: it is
+    the exact shape that turned two CI shards red (a ``DID NOT RAISE
+    RustFallbackRefused`` in ``test_money_rust`` and this belt's own
+    parent-process pin). The fixture stays because it is the cheap common
+    case; the hook is the ordering-immune backstop.
     """
     original = os.environ.get(RUST_STRICT_ENV)
     try:
@@ -639,6 +651,34 @@ def _isolate_rust_strict_env() -> Iterator[None]:
             os.environ.pop(RUST_STRICT_ENV, None)
         else:
             os.environ[RUST_STRICT_ENV] = original
+
+
+#: The kill switch as the pytest PROCESS found it, captured once at conftest
+#: import — before any fixture, any collection, any test body. This is the
+#: value every test is entitled to see, and the one the backstop restores.
+_RUST_STRICT_BASELINE: Final[str | None] = os.environ.get(RUST_STRICT_ENV)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """Ordering-immune backstop for the ``BRUTEX_RUST_STRICT`` belt.
+
+    ``trylast`` puts this AFTER pytest's own ``pytest_runtest_teardown`` — the
+    impl that runs every fixture finaliser — so it is the last code to touch
+    the environment before the next test is set up. Whatever finaliser order
+    produced, the kill switch is back at :data:`_RUST_STRICT_BASELINE` here.
+
+    This is deliberately a repair, not an assertion: a shard that reds on the
+    *victim* of a leak names the wrong file (the ``DID NOT RAISE`` shard-4
+    failure blamed ``test_money_rust``; the writer was three hundred files
+    upstream). The writer is fixed at its source when found — this guarantees
+    the blast radius is one test either way.
+    """
+    del item, nextitem  # the repair is unconditional; the args are the hook's
+    if _RUST_STRICT_BASELINE is None:
+        os.environ.pop(RUST_STRICT_ENV, None)
+    else:
+        os.environ[RUST_STRICT_ENV] = _RUST_STRICT_BASELINE
 
 
 @pytest.fixture(autouse=True)

@@ -121,11 +121,12 @@ fn scan_bars_strict(
 /// envelope `[0, MAX_SAFE_TS_US)` — `DEC-FFI-MAGNITUDE-CEILING-001`.
 ///
 /// The predicate itself is the crate's ONE shared magnitude law
-/// (`series::ts_in_envelope`) — the same `(0..MAX_SAFE_TS_US)` test
-/// `series::ownership_cut` already abstains on — so the two FFI faces cannot
-/// drift apart. `ownership_cut` can express its refusal in its return type
-/// (`Option`); `expected_bar_instant` returns a plain `bool`, so the refusal
-/// has to be raised here.
+/// (`scan::ts_in_envelope`, re-exported as `series::ts_in_envelope`): the
+/// single expression every decision site calls — the two scans' ABSTAIN
+/// gates, `series::ownership_cut`'s per-timestamp arm, and this guard — so
+/// they cannot drift apart. Those sites can express the refusal in their
+/// return type (`Ok(None)` / `Option`); `expected_bar_instant` returns a
+/// plain `bool`, so the refusal has to be raised here.
 ///
 /// Why a refusal and not a `checked_*` fallback: this crate's
 /// `[profile.release]` carries BOTH `overflow-checks = true` and
@@ -143,6 +144,25 @@ fn require_ts_envelope(name: &str, value: i64) -> PyResult<()> {
         "{name} must be in [0, {}) epoch-µs (fixed-IST envelope); got {value}",
         scan::MAX_SAFE_TS_US
     )))
+}
+
+/// [`require_ts_envelope`] for one `sessions[i].<field>` element, with the
+/// argument NAME built lazily.
+///
+/// The name is a `format!` — an allocation — and the loop below runs it for
+/// three fields of every session on EVERY call. Passing it as an argument
+/// (`require_ts_envelope(&format!(…), v)`) would allocate on the happy path,
+/// where the value is in envelope and the string is dropped unread; the
+/// predicate is checked FIRST here so the allocation happens only on the
+/// refusal branch. The refusal itself still goes through the single
+/// error-text expression in [`require_ts_envelope`] — the message bytes are
+/// unchanged.
+#[inline]
+fn require_ts_envelope_at(field: &str, index: usize, value: i64) -> PyResult<()> {
+    if series::ts_in_envelope(value) {
+        return Ok(());
+    }
+    require_ts_envelope(&format!("sessions[{index}].{field}"), value)
 }
 
 /// `_expected_bar_time_in_window`'s geometric core: `step_us == 0` marks
@@ -183,9 +203,9 @@ fn expected_bar_instant(
     require_ts_envelope("step_us", step_us)?;
     require_ts_envelope("now_us", now_us)?;
     for (i, &(stamp_us, open_us, close_us)) in sessions.iter().enumerate() {
-        require_ts_envelope(&format!("sessions[{i}].stamp_us"), stamp_us)?;
-        require_ts_envelope(&format!("sessions[{i}].open_us"), open_us)?;
-        require_ts_envelope(&format!("sessions[{i}].close_us"), close_us)?;
+        require_ts_envelope_at("stamp_us", i, stamp_us)?;
+        require_ts_envelope_at("open_us", i, open_us)?;
+        require_ts_envelope_at("close_us", i, close_us)?;
     }
     Ok(series::expected_bar_instant(
         seg_start_us,

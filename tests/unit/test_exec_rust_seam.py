@@ -1325,7 +1325,16 @@ class TestStrictRefusal:
         """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
         from brutex.config import rust_strict
 
-        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        # The kill switch is ALREADY "0" here — ``_strict_off_degrade_lattice``
+        # pins it for every test in this module. Re-setting it through the
+        # SHARED ``monkeypatch`` is the exact leak :meth:`_strict_on`'s
+        # docstring warns against: that object records "0" as the value to
+        # restore, and pytest tears it down after the suite-wide belt, so the
+        # kill switch outlives the module and every later strict-refusal test
+        # reads DID NOT RAISE. (Reproduced: this test leaked into
+        # ``test_money_rust::TestStrictMode`` on CI shard 4.) Nothing to set —
+        # assert the pinned mode instead.
+        assert rust_strict.strict_mode() is False
         monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
         monkeypatch.setattr(exec_rust, "_rust", None)
         assert exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True) is None
