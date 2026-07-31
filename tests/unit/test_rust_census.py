@@ -345,7 +345,9 @@ class TestRustEnvMarker:
     def test_rejects_a_non_declaration(self, source: str, why: str) -> None:
         assert _RUST_ENV_MARKER_RE.search(f"{source}\n") is None, why
 
-    def test_never_imports_the_probed_module_itself(self) -> None:
+    def test_never_imports_the_probed_module_itself(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The probed module never lands in ``sys.modules``.
 
         This is the claim that matters and the only one a test can make
@@ -362,11 +364,23 @@ class TestRustEnvMarker:
         ``brutex.calendars`` are imported by this test module's own
         imports), which isolates the one import the probe could still make:
         the module itself. It must not appear.
+
+        The eviction goes through ``monkeypatch.delitem`` so pytest RESTORES
+        the original module objects at teardown. A raw ``sys.modules.pop``
+        here is a process-wide leak, not a local one: a later test in the same
+        shard re-imports the evicted module and gets a FRESH module object
+        whose functions are new objects, while every module that imported it
+        BEFORE the eviction still holds the old ones. Identity assertions then
+        fail with two same-named functions -- which is exactly how this test
+        reddened CI shard 5 on PR #1774 (victims:
+        ``test_vendor_profile::TestGrowwProfile::
+        test_production_bindings_are_imported_not_reminted`` and two siblings,
+        all asserting ``profile.market_hours_guard is guard_active_default``).
         """
         target_true = "brutex.ranking.cvar_gate"
         target_false = "brutex.calendars.market_hours"
         for target in (target_true, target_false):
-            sys.modules.pop(target, None)
+            monkeypatch.delitem(sys.modules, target, raising=False)
 
         before = set(sys.modules)
         assert _declares_rust_env(target_true) is True
