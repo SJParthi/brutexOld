@@ -21,6 +21,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARD = REPO_ROOT / "scripts" / "ci" / "zplus-pr-guard.sh"
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+PR_TEMPLATE = REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 
 ALL_6_MARKERS = """
 This PR carries the Z+ 15-row matrix and Z+ 7-row resilience matrix and a
@@ -344,3 +345,48 @@ class TestPrBodyGatesReadLiveBody:
             "ci.yml's pull_request trigger gained a `types:` list — re-read "
             "TestPrBodyGatesReadLiveBody's docstring and update it"
         )
+
+
+class TestRepoTemplateSatisfiesItsOwnGuard:
+    """The repo's PR template must pass the fail-closed gate it is judged by.
+
+    Found the hard way on PR #1774: the guard matches HEADING LITERALS
+    byte-for-byte, and ``.github/PULL_REQUEST_TEMPLATE.md`` scaffolded only
+    2 of the 6 required markers. An author who filled the template in
+    faithfully still went RED, and the failure names the *missing marker*
+    rather than "your template is short four sections" — so the diagnosis
+    costs a round trip every time. The template now carries all six; these
+    pins keep it that way.
+    """
+
+    def test_template_passes_the_real_guard(self) -> None:
+        """Drive the SHIPPED guard over the SHIPPED template, non-bot author.
+
+        Not a re-implementation of the marker list — the real script, so a
+        marker added to the guard without a matching template section fails
+        here rather than on some future contributor's PR.
+        """
+        body = PR_TEMPLATE.read_text(encoding="utf-8")
+        result = _run(body, pr_author="a-human")
+        assert result.returncode == 0, (
+            "the PR template no longer satisfies scripts/ci/zplus-pr-guard.sh — "
+            "add the missing section to the template (do NOT relax the guard): "
+            f"{result.stdout}{result.stderr}"
+        )
+
+    def test_template_carries_every_marker_the_guard_requires(self) -> None:
+        """Second, independent check: parse the guard's own marker list.
+
+        ``test_template_passes_the_real_guard`` would also pass if the guard
+        were accidentally neutered. This one reads REQUIRED_MARKERS out of the
+        script source, so a guard that stops requiring a marker is visible as
+        a diff here rather than a silent loosening.
+        """
+        guard_src = GUARD.read_text(encoding="utf-8")
+        block = guard_src.split("REQUIRED_MARKERS=(", 1)[1].split(")", 1)[0]
+        lines = [line.strip() for line in block.splitlines()]
+        markers = [ln.strip('"') for ln in lines if ln.startswith('"')]
+        assert len(markers) == 6, f"expected 6 required markers, parsed {markers}"
+        template = PR_TEMPLATE.read_text(encoding="utf-8")
+        missing = [m for m in markers if m.lower() not in template.lower()]
+        assert not missing, f"PR template is missing required marker(s): {missing}"

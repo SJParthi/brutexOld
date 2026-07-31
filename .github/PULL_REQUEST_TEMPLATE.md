@@ -110,6 +110,72 @@ automatically — this checklist is a pre-flight, not the gate itself.
 - [ ] `pytest tests/bench -m bench` passes (if hot-path code touched)
 - [ ] Manual smoke test if applicable
 
+---
+
+<!-- The four sections below carry the marker phrases the fail-closed
+`Z+ PR-body marker check` gate requires (scripts/ci/zplus-pr-guard.sh,
+operator decree 2026-05-17 + DEC-P0-014). The gate matches the HEADING
+LITERALS below byte-for-byte, so rename a heading and the gate goes red
+even on a perfectly-reviewed PR. Fill the tables in; do not retitle them.
+Bots (renovate/dependabot/github-actions) are exempt by author pattern. -->
+
+## Z+ 15-row matrix (charter §C)
+
+| Demand | This PR's proof | Real-time check |
+|---|---|---|
+| 100% code coverage | | |
+| 100% audit coverage | | |
+| 100% testing coverage | | |
+| 100% code checks | | |
+| 100% code performance | | |
+| 100% monitoring | | |
+| 100% logging | | |
+| 100% alerting | | |
+| 100% security | | |
+| 100% security hardening | | |
+| 100% bug fixing | | |
+| 100% scenarios covering | | |
+| 100% functionalities covering | | |
+| 100% code review | | |
+| 100% extreme check | | |
+
+## Z+ 7-row resilience matrix (charter §C)
+
+<!-- A row that genuinely does not apply to this PR gets `N/A — <why>`,
+never a blank and never a fabricated claim (Golden Rule #10). -->
+
+| Demand | Honest envelope | This PR's proof |
+|---|---|---|
+| Zero ticks lost | | |
+| WS never disconnects | | |
+| Never slow/locked/hanged | | |
+| QuestDB never fails | | |
+| O(1) latency | | |
+| Uniqueness + dedup | | |
+| Real-time proof | | |
+
+## Z+ 7-layer audit
+
+| Layer | This PR's status |
+|---|---|
+| DETECT | |
+| VERIFY | |
+| RECONCILE | |
+| PREVENT | |
+| AUDIT | |
+| RECOVER | |
+| COOLDOWN | |
+
+## 4-agent hostile review
+
+<!-- Golden Rule #9. The canonical four lenses are Plan + Explore +
+general-purpose × 2. Extra follow-up passes are welcome — append rows,
+but keep the "4-agent hostile review" literal in this heading. -->
+
+| Agent | Lens | Findings | Severity |
+|---|---|---|---|
+| | | | |
+
 ## Operator action required (post-merge)
 
 <!-- List any operator action — e.g. mount SSD, paste token, run migration -->
