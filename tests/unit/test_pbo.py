@@ -183,6 +183,7 @@ def test_pbo_rejects_inf_cell() -> None:
 import struct  # noqa: E402  (appended PR-2 section)
 
 import fno_math  # noqa: E402
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused  # noqa: E402
 from brutex.metrics import rust_stats  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
@@ -240,6 +241,18 @@ def test_flag_on_custom_evaluator_refuses_to_the_oracle(
 
 
 def test_flag_on_latched_kernel_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The degrade-to-oracle contract, pinned in the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    and a LATCHED kernel is Class B — the crate answered but its RESULT is
+    structurally refused — so under the shipped default this fall-back RAISES
+    rather than quietly serving the retained Python tail.  The degrade
+    machinery is not deleted; it stays reachable through the documented
+    ``BRUTEX_RUST_STRICT=0`` kill switch, and THAT is the mode this test
+    describes.  The strict-ON refusal for the same input is pinned by
+    :func:`test_latched_kernel_refuses_under_strict` below.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
     monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
     rust_stats.disable_kernel("pbo", "self_check_mismatch")
     monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "0")
@@ -247,6 +260,30 @@ def test_flag_on_latched_kernel_falls_through(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
     on = pbo_probability(_matrix(), n_splits=4)
     assert _bits(on.pbo) == _bits(off.pbo)
+
+
+def test_latched_kernel_refuses_under_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strict-ON refuses the latch itself, BEFORE it is ever written.
+
+    That ordering is why the fallthrough arm above is structurally
+    unreachable under the shipped default: the process can never get INTO
+    the latched state.  The refusal must name the facade and the documented
+    kill switch so the operator can act on the message alone.
+    """
+    monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+    monkeypatch.setenv(rust_stats.STATS_RUST_ENV, "1")
+    with pytest.raises(RustFallbackRefused, match="self_check_mismatch") as excinfo:
+        rust_stats.disable_kernel("pbo", "self_check_mismatch")
+    text = str(excinfo.value)
+    assert "brutex.metrics.rust_stats" in text
+    assert f"{RUST_STRICT_ENV}=0" in text
+    # ...and because the raise preceded the latch write, the kernel still serves.
+    with capture_logs() as logs:
+        served = pbo_probability(_matrix(), n_splits=4)
+    assert any(e["event"] == "rust_stats.engaged" and e["fn"] == "pbo" for e in logs), (
+        "a refused disable_kernel must not have latched the kernel off"
+    )
+    assert 0.0 <= served.pbo <= 1.0
 
 
 def test_flag_off_never_touches_the_kernel(monkeypatch: pytest.MonkeyPatch) -> None:

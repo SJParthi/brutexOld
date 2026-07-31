@@ -271,9 +271,6 @@ DEFAULT_MAX_MASK_BARS: Final[int] = 1_159_200_000_000
 #: answer and emitted candidate is bit-identical to the u64 era.
 _MASK_BITS: Final[int] = 128
 
-#: Back-compat alias for the pre-widening name (external drift pins import it).
-_U64_BITS: Final[int] = _MASK_BITS
-
 #: The single-limb mask — the low/high 64-bit halves of a u128 frontier mask.
 _U64_MAX: Final[int] = (1 << 64) - 1
 

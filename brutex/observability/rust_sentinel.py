@@ -69,7 +69,7 @@ WHAT THIS DOES NOT DO (so the guarantee is not oversold).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Generator, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -168,12 +168,14 @@ NOT_A_RUST_DEGRADE: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: The first-answer event suffix. Its presence in a module's source is the
-#: house marker for "this is a Rust facade", and :func:`rust_namespaces`
-#: uses exactly that to tell a facade namespace from an ordinary one.
-_ENGAGED_SUFFIX: Final[str] = ".engaged"
-
 #: Literal ``"<namespace>.engaged"`` occurrences in a source file.
+#:
+#: The ``.engaged`` first-answer event suffix is the house marker for "this
+#: is a Rust facade", and :func:`rust_namespaces` uses exactly that to tell a
+#: facade namespace from an ordinary one. Matching the QUOTED literal (rather
+#: than the bare suffix) is the narrower test: it reads the namespace the
+#: facade actually emits, so a mention of ``.engaged`` in prose can never
+#: enrol a module.
 _ENGAGED_LITERAL_RE: Final[re.Pattern[str]] = re.compile(r"""["']([a-z_0-9.]+)\.engaged["']""")
 
 #: Marks a source file as belonging to the RUST facade layer: it names a
@@ -355,7 +357,7 @@ class RustSentinel:
 
 
 @contextmanager
-def sentinel_scope(*, strict: bool = False) -> Iterator[RustSentinel]:
+def sentinel_scope(*, strict: bool = False) -> Generator[RustSentinel]:
     """Install a :class:`RustSentinel` for the duration of the block.
 
     Mutates the LIVE processors list in place rather than calling

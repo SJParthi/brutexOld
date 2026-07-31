@@ -108,13 +108,17 @@ OFF: Final[str] = "OFF"
 REQUIRED: Final[str] = "REQUIRED"
 UNKNOWN: Final[str] = "UNKNOWN"
 
-#: The house facade signature. A module qualifies when it exports BOTH a
-#: ``<NAME>_ENV`` string constant and a zero-argument ``<name>_enabled()``
-#: predicate. Both halves are required: the constant alone appears in
-#: consumers that merely reference a flag, and the predicate alone appears
-#: in wheel-REQUIRED seams that carry no flag at all (handled separately
-#: via :data:`_REQUIRED_SEAM_MARKERS`).
-_ENV_SUFFIX: Final[str] = "_ENV"
+#: The predicate half of the house facade signature. A module qualifies when
+#: it exports BOTH an env flag and a zero-argument ``<name>_enabled()``
+#: predicate. Both halves are required: a flag alone appears in consumers
+#: that merely reference a neighbour's kill switch, and the predicate alone
+#: appears in wheel-REQUIRED seams that carry no flag at all (handled
+#: separately via :data:`_REQUIRED_SEAM_MARKERS`).
+#:
+#: The flag half is matched by VALUE (:data:`_BRUTEX_ENV_VALUE_RE`), not by
+#: a ``_ENV`` name suffix — two live seams spell their constant ``ENV_FLAG``
+#: and ``ENV_RUST_FRONT``, so a name-suffix test was measurably blind to
+#: them. See that constant for the full reasoning.
 _ENABLED_SUFFIX: Final[str] = "_enabled"
 
 #: Source markers identifying a wheel-REQUIRED seam — one whose Python
@@ -161,7 +165,7 @@ _REQUIRED_SEAM_MARKERS: Final[tuple[str, ...]] = (
 #:
 #: Anchored at column 0 so a mention inside a comment or a function body
 #: cannot enrol a module that merely *references* a neighbour's flag — the
-#: same both-halves discipline as :data:`_ENV_SUFFIX`. The anchor does NOT
+#: same both-halves discipline as :data:`_ENABLED_SUFFIX`. The anchor does NOT
 #: exclude a DOCSTRING whose example sits at column 0; that shape matches,
 #: and an ``ast`` cross-check of the whole package confirms zero instances
 #: today. Cost if one ever appears: one wasted source read and a candidate
@@ -326,6 +330,50 @@ def _source_unreadable(module: ModuleType) -> bool:
     except (OSError, TypeError):
         return True
     return False
+
+
+def _import_or_none(name: str) -> ModuleType | None:
+    """Import ``name``, or return ``None`` when it cannot be imported.
+
+    The census walks EVERY module under the package, including optional
+    ones whose third-party dependency may be absent on this box. A module
+    that refuses to import is a fact about that module, never a reason to
+    abort the audit and blind every OTHER facade — so the failure is
+    swallowed here and the caller simply skips the row.
+
+    Written as a returns-``None`` helper rather than an inline
+    ``try/except/continue`` deliberately: that shape is bandit ``B112``,
+    and suppressing it with a pragma would hide the pattern instead of
+    removing it. The broad ``except`` is load-bearing — an arbitrary
+    module's import can raise literally anything at module scope — but
+    ``KeyboardInterrupt``/``SystemExit`` are ``BaseException`` and so still
+    propagate, which is the behaviour we want.
+    """
+    try:
+        return importlib.import_module(name)
+    except Exception:
+        return None
+
+
+def _call_flag_or_none(fn: Callable[[], object]) -> bool | None:
+    """Call a zero-arg ``*_enabled`` predicate, or ``None`` if it will not.
+
+    A predicate can legitimately refuse: ``pull_state_rust`` exposes an
+    ARG-TAKING ``…_enabled(raw)``, and a fail-loud facade raises on a junk
+    env value rather than guessing. Either way the honest answer for that
+    facade is "could not resolve", never an assumed ``True`` — so the
+    caller drops the sample and the row falls back to the wheel-required
+    marker for its verdict.
+
+    Same rationale as :func:`_import_or_none` for the shape: a
+    returns-``None`` helper instead of an inline ``try/except/continue``
+    (bandit ``B112``), and a broad ``except`` because a facade predicate
+    may raise anything while ``BaseException`` still propagates.
+    """
+    try:
+        return bool(fn())
+    except Exception:
+        return None
 
 
 def _declares_rust_env(name: str) -> bool:
@@ -817,9 +865,8 @@ def discover_facades() -> list[str]:
         # against the SPEC name, which stays the dotted path either way.
         if __spec__ is not None and name == __spec__.name:
             continue
-        try:
-            module = importlib.import_module(name)
-        except Exception:  # noqa: S112 - a broken optional module must not blind the census
+        module = _import_or_none(name)
+        if module is None:  # a broken optional module must not blind the census
             continue
         # The env signal is VALUE-based, not name-based. A name test on
         # ``*_ENV`` misses a real facade that spells its constant otherwise:
@@ -949,10 +996,9 @@ def census(modules: list[str] | None = None) -> list[FacadeStatus]:
             fn = getattr(module, attr, None)
             if not callable(fn):
                 continue
-            try:
-                resolved.append(bool(fn()))
-            except Exception:  # noqa: S112 - an unresolvable flag is a fact, not a crash
-                continue
+            sample = _call_flag_or_none(fn)
+            if sample is not None:  # an unresolvable flag is a fact, not a crash
+                resolved.append(sample)
         flag_on: bool | None = all(resolved) if resolved else None
 
         source = _source_of(module)
@@ -1113,8 +1159,27 @@ def prove(
     return out
 
 
+def _emit(line: str) -> None:
+    """Write one census line to stdout.
+
+    Deliberately ``sys.stdout.write`` and not ``print``. The repo bans the
+    ``print`` builtin in every nested ``brutex/`` module
+    (``scripts/ci/scan-banned-patterns.sh``) so that a stray debug print can
+    never contaminate stdout — which matters here because the CLI contract
+    documented in ``brutex/cli.py`` is that **stdout carries EXACTLY the
+    table / JSON and every log line goes to stderr**. This is that contract,
+    not an exception to it: the census table IS the deliverable, so it is
+    written to stdout explicitly through one named seam, while every
+    diagnostic in this module still goes through structlog to stderr.
+
+    Routing through a single function also makes the CLI's output surface
+    greppable — one place to audit — instead of three scattered calls.
+    """
+    sys.stdout.write(f"{line}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Print the census.
+    """Write the census table to stdout.
 
     Exit 1 if any facade is DEGRADED; under ``--strict`` also fail on OFF
     or UNKNOWN, so a clean exit means every facade will take the Rust path.
@@ -1122,14 +1187,14 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     strict = "--strict" in args
     rows = census()
-    print(render_table(rows))
+    _emit(render_table(rows))
 
     failures = strict_failures(rows) if strict else [r for r in rows if r.verdict == DEGRADED]
     if not failures:
         return 0
-    print("\nSTRICT FAILURES:" if strict else "\nDEGRADED:")
+    _emit("\nSTRICT FAILURES:" if strict else "\nDEGRADED:")
     for row in failures:
-        print(f"  {row.module}  [{row.verdict}]  {row.detail}")
+        _emit(f"  {row.module}  [{row.verdict}]  {row.detail}")
     return 1
 
 
