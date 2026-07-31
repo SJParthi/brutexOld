@@ -276,7 +276,23 @@ jobs:
           # rust-brutex-ops · rust-brutex-pull-state · rust-brutex-refine) +
           # brutex-lake (gated via this required build-wheels job + the
           # ci-ok kernel verify).
-          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**', 'rust/brutex-refine/**', 'rust/brutex-identity/**') }}
+          #
+          # v2 → v3 (DEC-RUST-STRICT-EVERYWHERE): the wheelhouse grew 8 → 16
+          # crates so every strict-enrolled facade can reach its crate in CI.
+          # TWO changes, both load-bearing:
+          #   (a) the version bump INVALIDATES every stale 8-wheel cache — a
+          #       v2 hit would restore the old 8, skip every build step (they
+          #       are all `cache-hit != 'true'`-guarded) and fail the verify
+          #       at `-eq 16`. That is exactly what happened on the first
+          #       16-crate run; the verify caught it, which is the gate
+          #       working. Bumping the version is the only way out.
+          #   (b) hashFiles now covers the SIX newly-built crates too
+          #       (brutex-core · brutex-data · brutex-notify · brutex-meta ·
+          #       brutex-observability · brutex-sweep-ops) so a source change
+          #       in any of them invalidates the wheelhouse. Without (b) the
+          #       stale-wheel-under-green-CI hole the v2 comment closes would
+          #       have silently reopened for a third of the crates.
+          key: rust-wheels-v3-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**', 'rust/brutex-refine/**', 'rust/brutex-identity/**', 'rust/brutex-core/**', 'rust/brutex-data/**', 'rust/brutex-notify/**', 'rust/brutex-meta/**', 'rust/brutex-observability/**', 'rust/brutex-sweep-ops/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -294,7 +310,7 @@ jobs:
           workspaces: rust/brutex-lake -> target
           shared-key: brutex-lake-wheel
           key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
-      - name: Build the eight maturin wheels (cache miss only)
+      - name: Build the sixteen maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt

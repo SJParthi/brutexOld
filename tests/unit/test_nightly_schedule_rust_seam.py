@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.nightly import nightly_rust
 from brutex.nightly.schedule import (
     DEFAULT_LABEL,
@@ -219,6 +220,26 @@ class TestFlagOnParity:
 
 
 class TestFlagOnRefuseAndDegrade:
+    """The degrade-to-oracle arms, pinned in the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON.
+    Every arm below is Class B — the crate ANSWERED but its RESULT is
+    structurally refused (a poisoned return shape, or a burn-in mismatch) —
+    so under the shipped default these fall-backs RAISE rather than quietly
+    serving the retained Python oracle.  That refusal is the correct
+    behaviour and is pinned by :class:`TestStrictRefusesTheSameArms` below.
+
+    The degrade machinery is not deleted: it stays reachable through the
+    documented ``BRUTEX_RUST_STRICT=0`` kill switch, and THAT is the mode
+    this class describes.  Pinning both modes is what keeps the kill switch
+    honest — an escape hatch nobody tests is an escape hatch that has
+    already rotted.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
     def test_poisoned_plist_shape_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(
             monkeypatch,
@@ -262,3 +283,59 @@ class TestFlagOnRefuseAndDegrade:
             assert pmset_wake_command(1, 30) == _pmset_wake_command_python(1, 30, 5)
         assert nightly_rust.nightly_rust_disabled() is True
         assert any(entry["event"] == "nightly_rust.kernel_autoreverted" for entry in logs)
+
+
+class TestStrictRefusesTheSameArms:
+    """Under the SHIPPED default, every arm above refuses instead of degrading.
+
+    This is the other half of the contract :class:`TestFlagOnRefuseAndDegrade`
+    documents.  Each refusal must name the facade and the one kill switch, so
+    an operator can act on the message text alone without reading source.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+
+    def _assert_names_facade_and_switch(self, excinfo: pytest.ExceptionInfo[BaseException]) -> None:
+        text = str(excinfo.value)
+        assert "brutex.nightly.nightly_rust" in text
+        assert f"{RUST_STRICT_ENV}=0" in text
+
+    def test_poisoned_plist_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_render_launchd_plist=lambda *args: b"plist"),
+        )
+        with pytest.raises(
+            RustFallbackRefused, match="render_launchd_plist_result_refused"
+        ) as excinfo:
+            _plist_pair()
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_poisoned_seconds_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_seconds_since_fire=lambda *args: "1800.0"),
+        )
+        now = datetime(2026, 7, 19, 2, 0, 0)
+        with pytest.raises(
+            RustFallbackRefused, match="seconds_since_scheduled_fire_result_refused"
+        ) as excinfo:
+            seconds_since_scheduled_fire(hour=1, minute=30, now_local=now)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_poisoned_parse_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch, build_fake_crate(nightly_parse_at=lambda text: (True, 30)))
+        with pytest.raises(RustFallbackRefused, match="parse_at_result_refused") as excinfo:
+            parse_at("01:30")
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_wrong_pmset_refuses_at_the_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_pmset_wake_command=lambda *args: "sudo wrong"),
+        )
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch") as excinfo:
+            pmset_wake_command(1, 30)
+        self._assert_names_facade_and_switch(excinfo)
