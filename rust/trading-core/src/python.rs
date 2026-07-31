@@ -179,6 +179,46 @@ const MAX_BAR_PAISA: i64 = i64::MAX / 65536;
 /// can never overflow `i64` regardless of how the two ceilings interact.
 const MAX_BPS: i64 = 1_000_000;
 
+/// Marker text stamped on EVERY input-VALUE-envelope refusal this crate
+/// raises (DEC-RUST-STRICT-NO-FALLBACK-001 — the same fragment
+/// `rust/brutex-strategies/src/python.rs::INPUT_REFUSED_MARKER` carries, so
+/// the two crates' facades classify by ONE shared literal).
+///
+/// A marked error means "*the INPUT value is outside this crate's
+/// overflow-safe envelope and the Python oracle was always the intended
+/// handler*" — the `brutex.engine.rust_stage1a` facade logs the distinct
+/// `kernel_input_refused` reason, which strict mode does NOT refuse, because
+/// refusing it would replace a precise, both-arms-IDENTICAL diagnosis with a
+/// generic `RustFallbackRefused`. That identity is what makes the class
+/// provable rather than guessed: the flag-OFF arm reaches the SAME three
+/// guards per bar (through `evaluate_with_levels` / `VwapState.update`), so
+/// degrading to the oracle re-raises the very same `ValueError`.
+///
+/// The marked population is exactly the three VALUE-envelope guards —
+/// [`check_evaluate_inputs`], [`vwap_update_guard`] and the day-table level
+/// magnitude loop in [`check_stage1a_batch_values`].
+///
+/// Deliberately UNMARKED (and therefore CLASS A/B — strict mode REFUSES):
+/// `stage1a_batch::validate_structure`'s SHAPE refusals (column-length
+/// skews, an out-of-range `day_index`, a bad `prior_n` …) and any `Err` from
+/// `stage1a_batch::stage1a_bar_bits_batch_impl`. Those describe a BruteX
+/// marshalling bug or a crate fault, not a caller's out-of-envelope value,
+/// and the Python oracle does not reproduce them — a quiet re-run would
+/// paper one over.
+///
+/// Keep the fragment stable: it is part of the facade contract
+/// (`brutex/engine/rust_stage1a.py::_INPUT_REFUSED_MARKER`).
+const INPUT_REFUSED_MARKER: &str = "input outside the crate envelope";
+
+/// Stamp [`INPUT_REFUSED_MARKER`] onto one value-envelope refusal message.
+///
+/// Appends (never rewrites): every pinned message fragment — the Rust
+/// `assert!(err.contains(…))` unit pins and the Python `match=` pins — is
+/// preserved verbatim, so only the strict-mode CLASS is added.
+fn mark_input_refusal(detail: String) -> String {
+    format!("{detail} — {INPUT_REFUSED_MARKER}")
+}
+
 /// True iff `|value| <= MAX_BAR_PAISA` (a finite per-bar price/level magnitude).
 fn bar_in_range(value: i64) -> bool {
     (-MAX_BAR_PAISA..=MAX_BAR_PAISA).contains(&value)
@@ -233,10 +273,10 @@ fn check_evaluate_inputs(
     }
     for v in prices {
         if !bar_in_range(v) {
-            return Err(format!(
+            return Err(mark_input_refusal(format!(
                 "bar price/level magnitude {v} out of the overflow-safe range \
                  [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-            ));
+            )));
         }
     }
 
@@ -251,9 +291,9 @@ fn check_evaluate_inputs(
         ("swing_bps", swing_bps),
     ] {
         if !(0..=MAX_BPS).contains(&bps) {
-            return Err(format!(
+            return Err(mark_input_refusal(format!(
                 "{name} ({bps}) out of the overflow-safe range [0, {MAX_BPS}]"
-            ));
+            )));
         }
         // close is already bar-bounded above, but check the ACTUAL i64 product so
         // the guarantee is exact regardless of the ceilings' arithmetic.
@@ -261,9 +301,9 @@ fn check_evaluate_inputs(
         // precise condition `is_near` needs (it also correctly ACCEPTS a product of
         // exactly `i64::MIN`, which fits i64, and has no `>`/`>=` boundary to mutate).
         if close.checked_mul(bps).is_none() {
-            return Err(format!(
+            return Err(mark_input_refusal(format!(
                 "{name} ({bps}) × close_paisa ({close}) overflows i64"
-            ));
+            )));
         }
     }
     Ok(())
@@ -1567,18 +1607,18 @@ fn py_resolve_near_month(
 ///   magnitude is bounded.
 fn vwap_update_guard(typical_paisa: i64, volume: i64) -> Result<(), String> {
     if typical_paisa < 0 {
-        return Err(format!(
+        return Err(mark_input_refusal(format!(
             "typical_paisa ({typical_paisa}) must be non-negative: the \
              Python/Rust twin identity (truncating vs floor division) holds \
              only for non-negative typical prices"
-        ));
+        )));
     }
     for (name, value) in [("typical_paisa", typical_paisa), ("volume", volume)] {
         if !bar_in_range(value) {
-            return Err(format!(
+            return Err(mark_input_refusal(format!(
                 "{name} ({value}) out of the overflow-safe range \
                  [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-            ));
+            )));
         }
     }
     Ok(())
@@ -1858,6 +1898,13 @@ fn py_greeks(
 /// to a clean `ValueError` at the pyfunction boundary and the Python seam
 /// falls back to the oracle (which raises today's exact error or computes —
 /// user-visible behaviour identical either way; the fallback law).
+///
+/// Strict-mode CLASS split (DEC-RUST-STRICT-NO-FALLBACK-001): the three
+/// VALUE-envelope guards above stamp [`INPUT_REFUSED_MARKER`] on their
+/// refusals (CLASS C — the facade keeps degrading, because the flag-OFF arm
+/// raises the IDENTICAL error per bar), while `validate_structure`'s SHAPE
+/// refusals and the `day_index`-totality `Err` below stay UNMARKED (CLASS
+/// A/B — a marshalling bug the oracle does NOT reproduce, so strict refuses).
 fn check_stage1a_batch_values(
     inp: &crate::stage1a_batch::Stage1aBatchInputs<'_>,
 ) -> Result<(), String> {
@@ -1874,10 +1921,10 @@ fn check_stage1a_batch_values(
         .chain(inp.day_x1_lo_paisa.iter())
     {
         if !bar_in_range(*v) {
-            return Err(format!(
+            return Err(mark_input_refusal(format!(
                 "level magnitude {v} out of the overflow-safe range \
                  [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
-            ));
+            )));
         }
     }
     for i in 0..n {
@@ -4318,5 +4365,113 @@ mod tests {
         };
         let err = check_stage1a_batch_values(&inputs).unwrap_err();
         assert!(err.contains("level magnitude"), "got: {err}");
+        // CLASS C: a day-table level magnitude is a VALUE-envelope refusal.
+        assert!(err.contains(INPUT_REFUSED_MARKER), "got: {err}");
+    }
+
+    // ── strict-mode CLASS marker (DEC-RUST-STRICT-NO-FALLBACK-001) ─────────
+
+    /// EVERY value-envelope refusal reachable from `stage1a_bar_bits_batch`
+    /// carries [`INPUT_REFUSED_MARKER`] (CLASS C — the facade degrades to the
+    /// oracle even under strict mode, because the flag-OFF arm raises the
+    /// identical error). Fails if any guard is left unmarked.
+    #[test]
+    fn every_value_envelope_refusal_is_marked_class_c() {
+        let big = MAX_BAR_PAISA + 1;
+        // 1. per-bar price magnitude (`check_evaluate_inputs`)
+        let bar = check_evaluate_inputs(0, 0, 0, big, None, None, 0, 0, 0, 0, 10, 10, 10, 10, 10)
+            .unwrap_err();
+        assert!(bar.contains("bar price/level magnitude"), "got: {bar}");
+        assert!(bar.contains(INPUT_REFUSED_MARKER), "got: {bar}");
+        // 2. bps range (`check_evaluate_inputs`)
+        let bps = check_evaluate_inputs(0, 0, 0, 1, None, None, 0, 0, 0, 0, -1, 10, 10, 10, 10)
+            .unwrap_err();
+        assert!(bps.contains("pivot_bps"), "got: {bps}");
+        assert!(bps.contains(INPUT_REFUSED_MARKER), "got: {bps}");
+        // 3. bps × close product overflow (`check_evaluate_inputs`)
+        let prod = check_evaluate_inputs(
+            0,
+            0,
+            0,
+            MAX_BAR_PAISA,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            MAX_BPS,
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap_err();
+        assert!(prod.contains("overflows i64"), "got: {prod}");
+        assert!(prod.contains(INPUT_REFUSED_MARKER), "got: {prod}");
+        // 4/5. VWAP operand guards (`vwap_update_guard`)
+        let neg = vwap_update_guard(-1, 1).unwrap_err();
+        assert!(neg.contains("non-negative"), "got: {neg}");
+        assert!(neg.contains(INPUT_REFUSED_MARKER), "got: {neg}");
+        let vol = vwap_update_guard(0, big).unwrap_err();
+        assert!(vol.contains("volume"), "got: {vol}");
+        assert!(vol.contains(INPUT_REFUSED_MARKER), "got: {vol}");
+    }
+
+    /// A STRUCTURAL refusal on the same path stays UNMARKED (CLASS A/B —
+    /// strict mode must REFUSE it: the Python oracle does not reproduce a
+    /// column-shape bug, so a quiet re-run would paper it over).
+    #[test]
+    fn structural_refusal_is_not_marked_class_c() {
+        // Every column VALID except ONE: a column-length skew — a BruteX
+        // marshalling bug, not a caller's out-of-envelope value.
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[10_000],
+            high_paisa: &[],
+            low_paisa: &[9_900],
+            close_paisa: &[10_050],
+            typical_paisa: &[10_017],
+            volume: &[100],
+            tod_seconds: &[34_000],
+            pre_open: &[false],
+            session_key: &[0],
+            session_day: &[738_000],
+            contract_reset: &[false],
+            day_index: &[0],
+            ema20_paisa: &[None],
+            ema200_paisa: &[None],
+            day_pivot_levels: &[0; 12],
+            day_fib_levels: &[0; 19],
+            day_has_pivot: &[false],
+            day_has_fib: &[false],
+            pivot_bps: 10,
+            pdh_pdl_bps: 10,
+            fib_bps: 10,
+            swing_bps: 10,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+            supertrend_x2_paisa: None,
+            day_x1_hi_paisa: &[0],
+            day_x1_lo_paisa: &[0],
+            day_has_x1: &[false],
+            gap_mid_bps: 10,
+        };
+        let err = check_stage1a_batch_values(&inputs).unwrap_err();
+        assert!(err.contains("high_paisa"), "got: {err}");
+        assert!(
+            !err.contains(INPUT_REFUSED_MARKER),
+            "structural refusals must stay CLASS A/B, got: {err}"
+        );
+    }
+
+    /// The marker literal is the cross-crate contract fragment the facades
+    /// classify on — pinned so a rename cannot land silently on one side.
+    #[test]
+    fn input_refused_marker_is_the_shared_literal() {
+        assert_eq!(INPUT_REFUSED_MARKER, "input outside the crate envelope");
     }
 }
