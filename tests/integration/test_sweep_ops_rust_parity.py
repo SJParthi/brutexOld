@@ -18,7 +18,6 @@ from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Final
 
-import numpy as np
 import pytest
 
 brutex_sweep_ops = pytest.importorskip(
@@ -34,6 +33,7 @@ from brutex.engine.run_layout import (  # noqa: E402
 from brutex.engine.sweep_apriori import (  # noqa: E402
     _BUDGET_CHECK_STRIDE,
     _CONFLICT_PAIR_MASKS,
+    _frontier_array,
     _join_result_python,
     _mask_of,
     generate_apriori_candidates,
@@ -1544,7 +1544,15 @@ class TestAprioriJoinParity:
         pool = list(itertools.combinations(range(universe), k))
         subset = data.draw(st.sets(st.sampled_from(pool), min_size=1, max_size=min(len(pool), 12)))
         frontier = sorted(subset)
-        masks = np.array(sorted(_mask_of(t) for t in frontier), dtype=np.uint64)
+        # Build the frontier array through the PRODUCTION packer, never a
+        # hand-rolled ``np.array(..., dtype=np.uint64)``: ``_in_sorted``
+        # binary-searches the 16-byte big-endian TWO-LIMB ``(hi, lo)`` u128
+        # view, so a flat 1-D ``uint64`` array makes every ``searchsorted``
+        # probe miss and the oracle silently prunes EVERY candidate (the
+        # differential then compares a correct crate answer against an
+        # all-empty oracle). Using ``_frontier_array`` keeps the test honest
+        # against the u128 migration by construction.
+        masks = _frontier_array(sorted(_mask_of(t) for t in frontier))
         # The sweep-ops crate's ``apriori_join_prune`` takes ``conflict_masks:
         # Vec<u64>`` — the 74-bit vocab (V1 #1726) grows conflict pairs on bits
         # 64-67, so ``_CONFLICT_PAIR_MASKS`` now holds masks >= 2**64 that

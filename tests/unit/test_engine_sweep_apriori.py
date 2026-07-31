@@ -1003,10 +1003,48 @@ def test_resolver_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ────────────────────────── internal helpers ──────────────────────────
-# The subset-membership (``_in_sorted``: present / absent-mid / absent-past-end /
-# empty) and subset-prune (``_all_subsets_frequent``: all-present / one-missing)
-# numpy branches are exercised behaviourally by the oracle-parity + subset-prune
-# tests above (they reach 100% line+branch without touching the private helpers).
+# The subset-membership (``_in_sorted``: present / absent-mid / absent-past-end)
+# and subset-prune (``_all_subsets_frequent``: all-present / one-missing) numpy
+# branches are exercised behaviourally by the oracle-parity + subset-prune tests
+# above. The ONE arm they cannot reach is the empty-frontier short-circuit: the
+# only production caller chain is ``_join_and_prune`` → ``_all_subsets_frequent``
+# → ``_in_sorted``, and that loop is driven by the frontier BUCKETS, so an empty
+# frontier means zero iterations and ``_in_sorted`` is never called at all. It is
+# tested directly below rather than left uncovered (Golden Rule #10 — the earlier
+# revision of this comment claimed the empty arm WAS reached behaviourally, which
+# the ``--cov=brutex.engine`` gate refuted at line 540).
+
+
+class TestInSortedEmptyFrontier:
+    """Pin the ``_in_sorted`` empty-frontier short-circuit directly.
+
+    Structurally unreachable from production (see the note above), so this is a
+    deliberate private-helper call — the ``_frontier_array`` precedent earlier in
+    this file. The guard is a real O(1) short-circuit: it returns before
+    ``_frontier_probe`` allocates the 16-byte search key.
+    """
+
+    @staticmethod
+    def test_empty_frontier_is_never_a_member() -> None:
+        empty = sweep_apriori._frontier_array(())  # pyright: ignore[reportPrivateUsage]
+        assert empty.size == 0
+        assert sweep_apriori._in_sorted(empty, 0) is False  # pyright: ignore[reportPrivateUsage]
+        assert sweep_apriori._in_sorted(empty, 1 << 100) is False  # pyright: ignore[reportPrivateUsage]
+
+    @staticmethod
+    def test_short_circuit_skips_the_probe_allocation() -> None:
+        """The guard must return BEFORE building the probe — not merely agree."""
+        calls: list[int] = []
+
+        def _spy(value: int) -> object:  # pragma: no cover - must never run
+            calls.append(value)
+            raise AssertionError("the empty-frontier guard must short-circuit first")
+
+        empty = sweep_apriori._frontier_array(())  # pyright: ignore[reportPrivateUsage]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sweep_apriori, "_frontier_probe", _spy)
+            assert sweep_apriori._in_sorted(empty, 7) is False  # pyright: ignore[reportPrivateUsage]
+        assert calls == []
 
 
 # ────────────────────────── CI / mutation wiring pins ──────────────────────────
