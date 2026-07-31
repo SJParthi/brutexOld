@@ -2090,6 +2090,14 @@ def build_parser() -> argparse.ArgumentParser:
         "fake instant walls (R2 MAJOR-3)",
     )
     run.add_argument("--symbols", default="NIFTY,BANKNIFTY")
+    # DELIBERATELY a fixed literal, NOT
+    # ``brutex.data.timeframes.DEFAULT_SWEEP_INTERVALS`` (DEC-SWEEP-TF-SCOPE-5-001).
+    # This harness measures the worker kernel cache OFF vs ON, so its workload is a
+    # MEASUREMENT CONSTANT: binding it to a moving production scope would silently
+    # make historical soak reports incomparable to new ones. Two reasons, both real:
+    # (a) this module keeps every ``brutex`` import LAZY so it stays importable in a
+    # wheel-free env, and (b) a soak's value is cross-run comparability. Operators
+    # who want the production scope pass ``--intervals`` explicitly.
     run.add_argument("--intervals", default="1minute,5minute,15minute")
     run.add_argument("--start", default=None, help="grid start (default 2020-01-01)")
     run.add_argument("--end", default=None, help="grid end (default: previous UTC day)")

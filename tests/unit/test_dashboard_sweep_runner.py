@@ -39,6 +39,7 @@ from brutex.dashboard.sweep_runner import (
     sweep_finish_note,
     sweep_progress_file,
 )
+from brutex.data.timeframes import SWEEP_TIMEFRAMES
 
 _TODAY = date(2026, 6, 13)
 
@@ -916,8 +917,12 @@ def test_axes_counts_dedupes_repeated_csv_tokens() -> None:
     )
     k_values, other_axes_product, tuple_count = _axes_counts(req)
     assert k_values == [2, 3]  # deduped, order-preserving
-    # symbols(1 unique) * intervals(3) * directions(2) * sl(1 unique) * tp(1)
-    assert other_axes_product == 1 * 3 * 2 * 1 * 1
+    # symbols(1 unique) * intervals(scope) * directions(2) * sl(1 unique) * tp(1).
+    # The intervals term is DERIVED from the DEC-SWEEP-TF-SCOPE-5-001 scope, not a
+    # re-typed 3 — this test is about DEDUPE, and a hardcoded count made it fail
+    # for the wrong reason the moment the scope moved.
+    n_intervals = len(SWEEP_TIMEFRAMES)
+    assert other_axes_product == 1 * n_intervals * 2 * 1 * 1
     assert tuple_count == other_axes_product * len(k_values)
 
 

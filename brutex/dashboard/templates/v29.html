@@ -1069,7 +1069,11 @@
       </select>
     </label>
     <label>TIMEFRAMES
-      <input id="swIntervals" type="text" placeholder="blank = all 21 (e.g. 1minute,5minute,15minute)" style="min-width:240px;">
+      <!-- "blank = all 21" was FALSE: _normalise_intervals falls back to
+           DEFAULT_INTERVALS (the DEC-SWEEP-TF-SCOPE-5-001 scope), never to the
+           full 21-TF registry. The labels are not repeated here so the scope
+           cannot drift out of a placeholder string. -->
+      <input id="swIntervals" type="text" placeholder="blank = default sweep timeframes (e.g. 1minute,5minute)" style="min-width:240px;">
     </label>
     <label>FROM
       <input id="swStart" type="date" value="2020-01-01">

@@ -330,6 +330,52 @@ if set(LAKE_INTERVAL_LABELS.keys()) != set(
 ALL_LAKE_INTERVAL_LABELS: Final[tuple[str, ...]] = all_lake_labels_view(ALL_TFS)
 
 
+#: The operator's brute-force SWEEP timeframe scope (DEC-SWEEP-TF-SCOPE-5-001,
+#: 2026-07-31). The ONE home for the scope — the CLI ``--intervals`` default and
+#: the dashboard one-click ``DEFAULT_INTERVALS`` both DERIVE from it, so the two
+#: surfaces cannot disagree (they previously each hardcoded their own copy of a
+#: 3-TF string nobody had ruled on, §11 COMMON).
+#:
+#: SCOPE, not capability. :data:`ALL_TFS` registers 21 timeframes and the pull
+#: pipeline materialises every one of them into the lake
+#: (DEC-PIPELINE-AUTOPREBUILD-001). This tuple fixes only which of them the
+#: ENGINE sweeps. ``/movers``, ``/db`` and every read surface are unaffected.
+#:
+#: HONEST COST (measured — the arithmetic that makes this a decision rather than
+#: a preference). Sweep work scales as ``masks x bars``, and a coarser TF holds
+#: proportionally FEWER bars, so a TF set costs ``sum(1/minutes)`` relative to a
+#: single 1-minute sweep: **2.100x** for these five against **3.389x** for all
+#: 21. Narrowing 21 -> 5 therefore saves **1.61x**, NOT the 4.2x that counting
+#: tuples suggests. Recorded because the tuple count is the intuitive reading and
+#: it overstates the saving by 2.6x.
+#:
+#: ``1day`` is ABSENT deliberately. PDH/PDL, the pivot ladder and the Fibonacci
+#: anchors are SCALAR DAILY values broadcast across intraday bars — the
+#: Single-Timeframe Invariant (MIGRATION.md #97), which is why no condition in
+#: the vocabulary reads a second intraday series. So the ``1day`` partition must
+#: EXIST (Stage-1A reads it for those anchors, and the first session of any range
+#: has no prior day and is anchor-warm-up) but it is an anchor SOURCE, never a
+#: swept surface. Sweeping the daily series as its own strategy timeframe is a
+#: different product decision and needs its own DEC.
+SWEEP_TIMEFRAMES: Final[tuple[str, ...]] = (
+    "1minute",
+    "2minute",
+    "3minute",
+    "5minute",
+    "15minute",
+)
+
+if not set(SWEEP_TIMEFRAMES) <= set(
+    ALL_LAKE_INTERVAL_LABELS
+):  # pragma: no cover — defensive module-load assertion
+    raise AssertionError("SWEEP_TIMEFRAMES must be a subset of the registered lake labels")
+
+#: The ``--intervals`` / ``DEFAULT_INTERVALS`` default STRING, derived from
+#: :data:`SWEEP_TIMEFRAMES` so a future scope edit cannot leave a help string or
+#: a dashboard constant disagreeing with the value.
+DEFAULT_SWEEP_INTERVALS: Final[str] = ",".join(SWEEP_TIMEFRAMES)
+
+
 def lake_interval_label(tf_minutes: int) -> str:
     """Map minute-count to the canonical long-form LAKE interval label.
 

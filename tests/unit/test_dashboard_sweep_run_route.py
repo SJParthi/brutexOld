@@ -28,6 +28,7 @@ pytest.importorskip("duckdb", reason="the wired-store routes need duckdb")
 
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.data.instrument_store import InstrumentStore
+from brutex.data.timeframes import DEFAULT_SWEEP_INTERVALS
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
 
@@ -116,7 +117,10 @@ def test_default_params_start_job(client: TestClient, monkeypatch: pytest.Monkey
     body = resp.json()
     assert body["started"] is True
     assert body["symbols"] == "NIFTY,BANKNIFTY"
-    assert body["intervals"] == "1minute,5minute,15minute"
+    # DEC-SWEEP-TF-SCOPE-5-001: the route serves the ONE scope home, not a copy.
+    # Referenced (not re-typed) deliberately — this test pins THREADING; the scope
+    # VALUE itself is pinned once, in ``test_sweep_timeframe_scope.py``.
+    assert body["intervals"] == DEFAULT_SWEEP_INTERVALS
     assert body["start"] == "2020-01-01"
     assert body["exchange"] == "NSE"
     assert body["segment"] == "INDEX"

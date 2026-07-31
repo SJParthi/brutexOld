@@ -73,6 +73,7 @@ from brutex import __version__
 from brutex.config.hardware_envelope import apply_polars_thread_bound
 from brutex.config.paths import resolve_lake_root
 from brutex.config.runtime import RuntimeFileError, read_runtime_file, runtime_file_path
+from brutex.data.timeframes import DEFAULT_SWEEP_INTERVALS
 from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
 from brutex.vocabulary.bits import IMPLEMENTED_MASK, TOTAL_CONDITIONS
 
@@ -615,8 +616,13 @@ def _add_sweep_grid_args(
     parser.add_argument("--segment", default="INDEX", help="LAKE segment partition (default INDEX)")
     parser.add_argument(
         "--intervals",
-        default="1minute,5minute,15minute",
-        help="Comma-separated lake interval labels to sweep (default 1minute,5minute,15minute)",
+        default=DEFAULT_SWEEP_INTERVALS,
+        help=(
+            "Comma-separated lake interval labels to sweep (default "
+            f"{DEFAULT_SWEEP_INTERVALS} — the DEC-SWEEP-TF-SCOPE-5-001 operator "
+            "scope; the lake still materialises all 21 TFs, and '1day' is an "
+            "ANCHOR source for PDH/PDL/pivots/Fib, never a swept timeframe)"
+        ),
     )
     parser.add_argument(
         "--directions",
