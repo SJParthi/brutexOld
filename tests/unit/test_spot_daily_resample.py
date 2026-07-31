@@ -775,3 +775,150 @@ class TestFrameToCandleBarsOpenInterest:
     def test_present_null_oi_respects_explicit_absent_value(self) -> None:
         bars = frame_to_candle_bars(self._frame_with_oi([None, 42]), absent_open_interest=None)
         assert [bar.open_interest for bar in bars] == [None, 42]
+
+
+# ── strict-mode refusal escape (DEC-RUST-STRICT-NO-FALLBACK-001) ──────────────
+
+
+class TestStrictRefusalEscape:
+    """``RustFallbackRefused`` is NEVER absorbed by the per-target guard.
+
+    The per-target ``except Exception`` at :func:`derive_daily_for_targets` is
+    isolation BY DESIGN (one bad symbol must not stop the batch), but it also
+    ABSORBED a strict-mode refusal: the derive reported ``errored=N`` while the
+    ENCLOSING ``lake_heal`` sweep still logged ``sweep_complete healed=N`` and
+    STAMPED the swept sentinel, so the next boot skipped the re-scan over a
+    lake the recall never derived. The narrow escape re-raises exactly that one
+    class; every other exception keeps its absorbing behaviour byte-identically,
+    and a non-strict process never sees a refusal at all (so the escape is
+    inert there).
+    """
+
+    @staticmethod
+    def _refusing_read(_t: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        def _read() -> pl.DataFrame:
+            raise RustFallbackRefused("brutex.data.lake_rust_locks cannot serve")
+
+        return _read
+
+    def test_strict_refusal_propagates_out_of_the_derive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAIL-BEFORE: the pre-fix guard absorbed this into ``errored=1``."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        with pytest.raises(RustFallbackRefused):
+            derive_daily_for_targets(
+                targets=[_target("NSE-NIFTY")],
+                build_read_1m=self._refusing_read,
+                build_write_1day=lambda _t: len,
+                before=_BEFORE,
+            )
+
+    def test_strict_refusal_aborts_before_later_targets_derive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The trade-off, pinned: per-target isolation is deliberately given up
+        for this ONE class — the batch stops at the refusal."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        seen: list[str] = []
+
+        def _read(target: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+            seen.append(target.symbol)
+            if target.symbol == "NSE-NIFTY":
+                return self._refusing_read(target)
+            return lambda: _frame((date(2025, 11, 28), 14000.0))
+
+        with pytest.raises(RustFallbackRefused):
+            derive_daily_for_targets(
+                targets=[_target("NSE-NIFTY"), _target("NSE-BANKNIFTY")],
+                build_read_1m=_read,
+                build_write_1day=lambda _t: len,
+                before=_BEFORE,
+            )
+        assert seen == ["NSE-NIFTY"]  # the second target is never reached
+
+    def test_strict_off_never_mints_a_refusal_so_the_derive_proceeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The kill switch keeps TODAY's behaviour, proven at the REAL choke
+        point: a facade that would refuse under strict calls
+        :func:`~brutex.config.rust_strict.refuse_if_strict`, which raises
+        NOTHING when ``BRUTEX_RUST_STRICT=0`` — so the Python arm serves, the
+        derive completes, and the escape clause is structurally unreachable.
+        """
+        from brutex.config.rust_strict import RUST_STRICT_ENV, refuse_if_strict
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
+        def _degrading_read(_t: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+            def _read() -> pl.DataFrame:
+                # Exactly what a wired facade does at its fall-back choke point.
+                refuse_if_strict("brutex.data.lake_rust_locks", "crate_unavailable")
+                return _frame((date(2025, 11, 28), 14000.0))
+
+            return _read
+
+        report = derive_daily_for_targets(
+            targets=[_target("NSE-NIFTY")],
+            build_read_1m=_degrading_read,
+            build_write_1day=lambda _t: len,
+            before=_BEFORE,
+        )
+        assert report == DailyDeriveReport(derived=1, no_minute=0, errored=0, bars=1)
+
+    def test_strict_on_refuses_at_the_same_real_choke_point(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mirror of the kill-switch arm over the SAME facade call: strict
+        ON turns that degrade into a refusal that escapes the guard."""
+        from brutex.config.rust_strict import (
+            RUST_STRICT_ENV,
+            RustFallbackRefused,
+            refuse_if_strict,
+        )
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+
+        def _degrading_read(_t: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+            def _read() -> pl.DataFrame:
+                refuse_if_strict("brutex.data.lake_rust_locks", "crate_unavailable")
+                return _frame((date(2025, 11, 28), 14000.0))
+
+            return _read
+
+        with pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+            derive_daily_for_targets(
+                targets=[_target("NSE-NIFTY")],
+                build_read_1m=_degrading_read,
+                build_write_1day=lambda _t: len,
+                before=_BEFORE,
+            )
+
+    def test_other_exceptions_still_absorb_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The escape is NARROW — only ``RustFallbackRefused`` re-raises."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+
+        def _boom(_t: DailyDeriveTarget):  # type: ignore[no-untyped-def]
+            raise KeyError("symbol not in by_symbol")
+
+        report = derive_daily_for_targets(
+            targets=[_target("BADSYM"), _target("NSE-NIFTY")],
+            build_read_1m=lambda t: (
+                _boom(t)
+                if t.symbol == "BADSYM"
+                else (lambda: _frame((date(2025, 11, 28), 14000.0)))
+            ),
+            build_write_1day=lambda _t: len,
+            before=_BEFORE,
+        )
+        assert report == DailyDeriveReport(derived=1, no_minute=0, errored=1, bars=1)

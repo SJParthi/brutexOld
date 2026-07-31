@@ -82,6 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, cast
 import structlog
 
 from brutex.calendars.nse import IST_FIXED_OFFSET, daily_derive_cutoff
+from brutex.config.rust_strict import RustFallbackRefused
 from brutex.data.atomic_io import atomic_write_simple, atomic_write_via, lake_write_guard
 from brutex.data.catalog import Catalog
 from brutex.data.derive_stamp import remove_derive_stamp
@@ -1146,6 +1147,16 @@ def _rebuild_tf_months(
         )
     except LakeWriteHalt:
         raise
+    # DEC-RUST-STRICT-NO-FALLBACK-001: a strict-mode refusal is NEVER absorbed.
+    # TRADE-OFF, stated plainly: this trades the per-symbol recall isolation
+    # (one bad symbol never kills the batch) for a crash that aborts the WHOLE
+    # recall — accepted, because the refusal means the Rust arm could not serve
+    # and Python was forbidden, so "the batch continued" would report progress
+    # over months that stay quarantine-DELETED. Inert unless strict mode is on:
+    # `refuse_if_strict` raises nothing when BRUTEX_RUST_STRICT=0, so the
+    # kill-switched process keeps today's degrade byte-identically.
+    except RustFallbackRefused:
+        raise
     # _SWEEP_GUARD_ERRORS = Exception + the out-of-range-timestamp conversion
     # panics (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the round-18 idiom): a
     # planted 2**62-us stored stamp panics the rebuild's Rust→Python conversion
@@ -1303,6 +1314,16 @@ def _bump_stats(
             )
             stats_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_simple(stats_path, lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+    # DEC-RUST-STRICT-NO-FALLBACK-001: a strict-mode refusal is NEVER absorbed.
+    # TRADE-OFF, stated plainly: this trades "a stats-sidecar write must never
+    # masquerade as a lake halt" for exactly that — a refusal from
+    # `partition_write_lock` / `atomic_write_simple` (both route the strict-wired
+    # `lake_rust_locks` seam) now fails the heal instead of silently skipping the
+    # sidecar. Accepted: the sidecar is best-effort about ITS OWN I/O, not about
+    # the Rust arm being unable to serve at all. Inert unless strict mode is on
+    # (BRUTEX_RUST_STRICT=0 keeps today's degrade byte-identically).
+    except RustFallbackRefused:
+        raise
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort sidecar
         _LOG.warning("lake_heal.stats_write_failed", error=str(exc))
 
