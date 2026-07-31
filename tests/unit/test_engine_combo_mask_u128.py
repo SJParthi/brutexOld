@@ -29,6 +29,7 @@ from __future__ import annotations
 import fno_math
 import pytest
 import structlog.testing
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.engine.combo_mask import (
     KERNEL_NUMPY,
     KERNEL_RUST_U64,
@@ -46,6 +47,29 @@ from brutex.engine.combo_mask import (
 # A bar + mask that BOTH set a bit >= 64 (the u128 headroom) and a bit < 64.
 _HI_BAR = (1 << 70) | (1 << 80) | (1 << 3) | (1 << 1)
 _HI_MASK = (1 << 70) | (1 << 1)
+
+
+@pytest.fixture
+def _numpy_degrade_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``BRUTEX_RUST_STRICT=0`` for the u64 numpy-degrade tests.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 wired the ``<=64-bit`` stale-wheel arm of
+    :class:`~brutex.engine.combo_mask.ResidentBarBuffer` — previously the ONE
+    silent Python fall-back on the sweep hot path — to REFUSE under strict
+    mode, which now ships ON by default.  The handful of tests below exist
+    precisely to exercise the retained numpy oracle machinery, so they
+    declare the still-supported kill switch explicitly.
+
+    Deliberately **not** ``autouse``: an autouse module fixture that sets this
+    env var, combined with a shared-``monkeypatch`` mutation of the same var
+    in a strict-ON test, leaks ``BRUTEX_RUST_STRICT=0`` past the end of the
+    module and silently disarms strict mode for every later test file in the
+    process (diagnosed on this branch in ``test_rust_stats.py``).  Applying it
+    per test via ``usefixtures`` keeps the blast radius to the tests that
+    genuinely need the oracle, and the strict-ON refusal is pinned separately
+    in :class:`TestStrictRefusal` at the end of this module.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def test_u64_mask_constant() -> None:
@@ -288,6 +312,7 @@ def test_resident_buffer_rust_backed_promotes_on_wide_mask() -> None:
     assert rb.count_supermasks([0b101, 0]) == [2, 3]
 
 
+@pytest.mark.usefixtures("_numpy_degrade_allowed")
 def test_resident_buffer_numpy_fallback_promotes_on_wide_mask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -310,6 +335,7 @@ def test_resident_buffer_numpy_fallback_promotes_on_wide_mask(
     assert rb.wide_kernel_active is True
 
 
+@pytest.mark.usefixtures("_numpy_degrade_allowed")
 def test_resident_buffer_falls_back_when_rust_kernel_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -333,6 +359,7 @@ def test_resident_buffer_falls_back_when_rust_kernel_unavailable(
     assert rb.count_supermasks([0b101, 0b010, 0]) == [2, 2, 3]
 
 
+@pytest.mark.usefixtures("_numpy_degrade_allowed")
 def test_resident_buffer_numpy_path_empty_masks_returns_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -347,6 +374,7 @@ def test_resident_buffer_numpy_path_empty_masks_returns_empty(
     assert rb.count_supermasks([]) == []
 
 
+@pytest.mark.usefixtures("_numpy_degrade_allowed")
 def test_resident_buffer_numpy_path_empty_window_returns_zeros(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,3 +469,76 @@ def test_three_view_u128_parity() -> None:
     prod = count_supermasks(bars, masks)
     scalar = [sum(1 for b in bars if evaluate_mask(b, m)) for m in masks]
     assert ref == prod == scalar
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_numpy_degrade_allowed``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. The ``<=64-bit`` construction arm of
+    :class:`ResidentBarBuffer` was the ONE Python fall-back left on the
+    production sweep hot path that announced *nothing* — no env flag, no
+    warn-once, no structlog event — so neither the facade census nor the
+    degrade sentinel could observe it, and at today's 60-bit vocabulary EVERY
+    batch takes that arm.  These tests pin that it now REFUSES.
+
+    The kill switch is deleted per test in its OWN nested
+    :class:`pytest.MonkeyPatch` context rather than through the shared
+    ``monkeypatch`` fixture, so the deletion is undone strictly inside the
+    test body and cannot outlive the module (the leak shape diagnosed on this
+    branch in ``test_rust_stats.py``, where a shared-``monkeypatch`` delenv
+    layered over an autouse strict-off fixture re-set ``BRUTEX_RUST_STRICT=0``
+    at teardown and disarmed strict mode for every later test file).
+    """
+
+    @staticmethod
+    def _stale_u64_wheel(mp: pytest.MonkeyPatch) -> None:
+        """Make ``fno_math.ResidentBars`` unavailable (the stale-wheel shape)."""
+
+        def _raise(_values: object) -> object:
+            raise AttributeError("ResidentBars unavailable in this wheel")
+
+        mp.setattr("brutex.engine.combo_mask.fno_math.ResidentBars", _raise)
+
+    def test_stale_u64_wheel_refuses_under_strict_default(self) -> None:
+        """Strict mode is ON by default → the numpy degrade RAISES."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(RUST_STRICT_ENV, raising=False)
+            self._stale_u64_wheel(mp)
+            with pytest.raises(RustFallbackRefused, match="resident_bars_wheel_stale"):
+                ResidentBarBuffer([0b101, 0b111])
+
+    def test_refusal_message_names_the_facade_and_the_kill_switch(self) -> None:
+        """The refusal is actionable: it names the module and the escape."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(RUST_STRICT_ENV, raising=False)
+            self._stale_u64_wheel(mp)
+            with pytest.raises(RustFallbackRefused) as excinfo:
+                ResidentBarBuffer([0b1])
+        message = str(excinfo.value)
+        assert "brutex.engine.combo_mask" in message
+        assert RUST_STRICT_ENV in message
+
+    def test_junk_kill_switch_keeps_strict_on(self) -> None:
+        """Inverted junk polarity — a typo'd kill switch must NOT re-enable Python."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(RUST_STRICT_ENV, "maybe")
+            self._stale_u64_wheel(mp)
+            with pytest.raises(RustFallbackRefused):
+                ResidentBarBuffer([0b1])
+
+    def test_kill_switch_still_serves_the_numpy_oracle(self) -> None:
+        """The documented escape still works — strict OFF degrades as before."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(RUST_STRICT_ENV, "0")
+            self._stale_u64_wheel(mp)
+            buffer = ResidentBarBuffer([0b101, 0b111])
+        assert buffer.kernel_kind == KERNEL_NUMPY
+        assert buffer.count_supermasks([0b101]) == [2]
+
+    def test_healthy_wheel_never_refuses(self) -> None:
+        """Anti-vacuous: with the REAL wheel the strict arm is never reached."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(RUST_STRICT_ENV, raising=False)
+            buffer = ResidentBarBuffer([0b101, 0b111])
+        assert buffer.kernel_kind == KERNEL_RUST_U64
+        assert buffer.count_supermasks([0b101]) == [2]

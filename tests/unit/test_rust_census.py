@@ -95,6 +95,11 @@ _EXPECTED_FACADES: Final[tuple[str, ...]] = (
     "brutex.config.dotenv_rust",
     "brutex.config.hardware_envelope_rust",
     "brutex.config.paths_rust",
+    # Flag-free by design: the shared engaged-call core the milestone-3
+    # config seams (paths / dotenv / backup-env) all route through. It owns
+    # no flag of its own, but it imports ``brutex_core`` and now calls
+    # ``refuse_if_strict``, so the strict-enrolment signal finds it.
+    "brutex.config.seam_core",
     "brutex.crossverify.rust_seam",
     "brutex.data.detectors_rust",
     "brutex.data.fno_symbol_rust",
@@ -109,6 +114,15 @@ _EXPECTED_FACADES: Final[tuple[str, ...]] = (
     "brutex.data.lake_rust_waved",
     "brutex.data.window_ledger_rust",
     "brutex.engine.refine_rust",
+    # The find that motivated the strict-enrolment signal. No flag, no
+    # refusal class, and — until DEC-RUST-STRICT-NO-FALLBACK-001 — a
+    # stale-wheel arm that fell to the two-limb numpy backing without a
+    # word, on the sweep's innermost loop, for every batch the shipped
+    # 60-bit vocabulary produces. The three earlier signals all read a
+    # SYMPTOM (a flag, a refusal class, a fall-back announcement); this
+    # facade emitted none of the three, so only reading the ENFORCEMENT
+    # finds it. See ``discover_facades`` signal 4.
+    "brutex.engine.combo_mask",
     "brutex.engine.rust_enum",
     "brutex.engine.rust_metrics",
     "brutex.engine.rust_parity_core",

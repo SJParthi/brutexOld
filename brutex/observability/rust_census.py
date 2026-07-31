@@ -226,6 +226,70 @@ _DEGRADE_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"""|["'][a-z_0-9.]+\.(?:fallback|autoreverted|degraded)["']"""
 )
 
+#: The STRICT-ENROLMENT marker — a fourth discovery signal, and the only one
+#: that reads the enforcement rather than a symptom of it.
+#:
+#: The three signals above all infer enrolment from something adjacent: an env
+#: var's value, a ``require_*`` raise, an announcement string. Each is a proxy,
+#: and each proxy has a shape it cannot see. ``engine/combo_mask`` was the
+#: worst case of that: it carries no env flag, its ``<=64-bit`` stale-wheel arm
+#: raised nothing and announced nothing — no helper call, no ``.fallback``
+#: event — and it sits on the production sweep hot path, because at today's
+#: 60-bit vocabulary EVERY batch is ``fits_u64``. All three proxies read clean
+#: on a module that could silently move an entire grid sweep onto numpy.
+#:
+#: A ``refuse_if_strict`` / ``refuse`` call is not a proxy. It IS the thing the
+#: census exists to confirm: this module has been through
+#: DEC-RUST-STRICT-NO-FALLBACK-001 and its choke point refuses. A module that
+#: calls it is enrolled by construction, whatever else it does or does not
+#: spell. That makes this the signal least able to go stale — a facade cannot
+#: acquire the enforcement without acquiring the marker in the same edit.
+#:
+#: This is a CHEAP PRE-FILTER ONLY — never the decision. Text alone is not
+#: sufficient here and the repo has already paid for that lesson once: the
+#: hostile review's MAJOR-1 was a required-seam marker matched by regex, fixed
+#: by walking the AST instead. The identical trap fires here — a bare
+#: ``refuse(`` matches the ordinary English in ``config/backup_env``'s line
+#: 449, ``"run/restore-drill will refuse (EXIT_CONFIG)"``, and enrolled a
+#: module with no crate and no strict wiring as a phantom ``UNKNOWN`` row.
+#: :func:`_calls_strict_refusal` re-checks every hit against the parse tree, so
+#: prose, comments and imports are rejected and only a real CALL enrols.
+_STRICT_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"\brefuse(?:_if_strict)?\s*\(")
+
+#: The two names a strict-enrolled choke point calls.
+_STRICT_CALL_NAMES: Final[frozenset[str]] = frozenset({"refuse", "refuse_if_strict"})
+
+
+def _calls_strict_refusal(source: str) -> bool:
+    """Whether *source* really CALLS the strict-refusal gate (AST, not text).
+
+    :data:`_STRICT_MARKER_RE` is the cheap pre-filter; this is the decision.
+    Only a ``Call`` node counts, and only when the callee resolves to
+    ``refuse`` / ``refuse_if_strict`` either bare (``refuse_if_strict(...)``)
+    or attributed (``rust_strict.refuse(...)``).
+
+    Prose is therefore rejected — the sentence "run/restore-drill will refuse
+    (EXIT_CONFIG)" is a string constant, not a call — and so is a bare
+    ``import``. Unparseable source returns ``False`` rather than raising: a
+    module the census cannot parse must not blind it to the other 598.
+    """
+    if _STRICT_MARKER_RE.search(source) is None:
+        return False
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _STRICT_CALL_NAMES:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in _STRICT_CALL_NAMES:
+            return True
+    return False
+
+
 #: Package root scanned for facades.
 _PACKAGE: Final[str] = "brutex"
 
@@ -294,7 +358,19 @@ def _declares_rust_env(name: str) -> bool:
         source = Path(spec.origin).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    return _RUST_ENV_MARKER_RE.search(source) is not None
+    # The strict-enrolment marker admits a module the env test alone rejects.
+    # ``engine/combo_mask`` is the live case and the reason this arm exists:
+    # its tail carries neither "rust" nor "seam", it declares no ``BRUTEX_*``
+    # env constant, and it is a hot-path facade whose stale-wheel arm falls to
+    # numpy — so the CHEAP NAME PRE-FILTER dropped it before any of
+    # :func:`discover_facades`'s four signals could be asked. That is the same
+    # failure shape as the pre-filter bug this function was written to fix; a
+    # signal is worthless if a name test rejects the module first.
+    #
+    # It costs nothing: the source is already read and in hand at this point,
+    # so this is one extra regex over a string the function had to produce
+    # anyway. No additional stat, no additional import.
+    return _RUST_ENV_MARKER_RE.search(source) is not None or _calls_strict_refusal(source)
 
 
 def _raises_required_class(source: str) -> bool:
@@ -627,7 +703,7 @@ def _classify(
 def discover_facades() -> list[str]:
     """Return every module exposing the house Rust-facade signature.
 
-    Structural discovery on THREE independent signals, any one sufficient:
+    Structural discovery on FOUR independent signals, any one sufficient:
 
     1. **flag + predicate** — the module exposes a ``BRUTEX_*`` env-var
        VALUE (:data:`_BRUTEX_ENV_VALUE_RE`) *and* a ``<name>_enabled()``
@@ -638,6 +714,8 @@ def discover_facades() -> list[str]:
        actually RAISED (:func:`_is_required_seam`).
     3. **flag-free degrading seam** — it imports a crate *and* announces its
        fall-backs (:data:`_DEGRADE_MARKER_RE`).
+    4. **strict-enrolment marker** — it imports a crate *and* calls
+       ``refuse_if_strict`` / ``refuse`` (:data:`_STRICT_MARKER_RE`).
 
     Signal 3 is not decoration. ``engine/rust_trade_sim`` runs per-mask on
     the sweep hot path and satisfies neither of the first two — no flag, no
@@ -645,6 +723,15 @@ def discover_facades() -> list[str]:
     promotion, and once that bug was fixed it vanished entirely. A seam that
     can silently serve Python on the hottest path in the product is exactly
     the one the census must not lose.
+
+    Signal 4 exists because signals 1-3 are all PROXIES — an env value, a
+    raise, an announcement — and ``engine/combo_mask`` defeated all three at
+    once: no flag, no refusal class, and a ``<=64-bit`` stale-wheel arm that
+    fell to numpy in silence. At the shipped 60-bit vocabulary every batch
+    takes that arm, so the census read clean on the one module that could
+    quietly demote an entire grid sweep. Signal 4 does not infer enrolment
+    from a symptom; it reads the enforcement itself, so it cannot be defeated
+    by a facade that simply declines to speak.
 
     DISCLOSED EXCLUSION: ``dashboard/rust_front`` owns two real ``BRUTEX_*``
     flags but is a SUBPROCESS seam — it spawns the ``brutexd`` binary rather
@@ -741,7 +828,17 @@ def discover_facades() -> list[str]:
             _DEGRADE_MARKER_RE.search(source) is not None
             and _crate_for_source(source, _crate_names()) is not None
         )
-        if (has_env and has_enabled) or required_seam or degrading_seam:
+        # Fourth signal: a STRICT-ENROLLED seam — it imports a crate and its
+        # choke point calls ``refuse_if_strict``. ``engine/combo_mask`` is the
+        # live case: no flag, no refusal class, and a stale-wheel arm that fell
+        # to numpy without a word, on the hot path, for every batch the shipped
+        # 60-bit vocabulary produces. The other three signals all read a
+        # symptom; this one reads the enforcement, so a silent facade cannot
+        # hide from it.
+        strict_seam = (
+            _calls_strict_refusal(source) and _crate_for_source(source, _crate_names()) is not None
+        )
+        if (has_env and has_enabled) or required_seam or degrading_seam or strict_seam:
             found.append(name)
     return sorted(found)
 

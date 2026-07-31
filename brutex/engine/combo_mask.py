@@ -112,6 +112,8 @@ from typing import TYPE_CHECKING, Final
 import fno_math
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -680,7 +682,31 @@ class ResidentBarBuffer:
                 # Pre-existing <=64-bit stale-wheel degrade — byte-identical
                 # to the pre-DEC seam: the resident two-limb numpy backing
                 # serves u64-fit batches bit-exactly.
-                pass
+                #
+                # DEC-RUST-STRICT-NO-FALLBACK-001. This was the ONE silent
+                # Python fall-back left on the production sweep hot path: at
+                # today's 60-bit vocabulary EVERY batch is ``fits_u64``, so a
+                # wheel too old to carry ``ResidentBars`` quietly moved the
+                # whole grid onto the two-limb numpy backing. It announced
+                # nothing — no flag, no warn-once, no structlog event — so
+                # neither the facade census (which discovers seams by their
+                # env var or their degrade announcement) nor the degrade
+                # sentinel (which counts announcements) could see it. That
+                # invisibility is exactly why it is wired here rather than
+                # left to the census: a fall-back that never speaks cannot be
+                # proven absent by listening.
+                #
+                # CLASS A — the crate is absent or too old for the symbol,
+                # never a legitimate input shape, so refusing is correct and
+                # cannot turn a valid sweep into a crash. The >=64-bit arm
+                # below already refuses loudly (``_wide_kernel_unavailable``,
+                # DEC-ENUM-KERNEL-U128-001's LOUD-FAIL law); this closes the
+                # matching hole on the narrow arm.
+                refuse_if_strict(
+                    "brutex.engine.combo_mask",
+                    "resident_bars_wheel_stale",
+                    n_bars=len(self._raw),
+                )
             self._bar_lo, self._bar_hi = _split_limbs(bar_bits)
             return
         wide_cls = getattr(fno_math, "ResidentBarsU128", None)
