@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import sys
 import textwrap
 from pathlib import Path
 from types import ModuleType
@@ -264,22 +265,36 @@ class TestRustEnvMarker:
     def test_rejects_a_non_declaration(self, source: str, why: str) -> None:
         assert _RUST_ENV_MARKER_RE.search(f"{source}\n") is None, why
 
-    def test_reads_source_without_importing_the_module(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The cost argument only holds if no import happens.
+    def test_never_imports_the_probed_module_itself(self) -> None:
+        """The probed module never lands in ``sys.modules``.
 
-        Bomb ``import_module`` outright: the probe runs on ~550 modules the
-        name filter rejects, so an import here would drag polars and duckdb
-        in to answer a question a file read answers.
+        This is the claim that matters and the only one a test can make
+        honestly. The earlier shape of this test bombed
+        ``importlib.import_module`` and asserted the probe stayed green --
+        which it did, VACUOUSLY: ``_declares_rust_env`` never calls
+        ``import_module``, it calls ``find_spec``, and ``find_spec`` imports
+        the PARENT packages. Measured on the pre-fix body, that bomb passed
+        while 163 modules were imported, ``brutex.ranking.cvar_gate``
+        among them -- the exact module the assertion message swore was not.
+
+        So assert the delta instead. Both probes are run against a target
+        whose parents are already resident (``brutex.ranking`` and
+        ``brutex.calendars`` are imported by this test module's own
+        imports), which isolates the one import the probe could still make:
+        the module itself. It must not appear.
         """
+        target_true = "brutex.ranking.cvar_gate"
+        target_false = "brutex.calendars.market_hours"
+        for target in (target_true, target_false):
+            sys.modules.pop(target, None)
 
-        def bomb(*_args: object, **_kwargs: object) -> ModuleType:
-            raise AssertionError("_declares_rust_env must not import the module")
+        before = set(sys.modules)
+        assert _declares_rust_env(target_true) is True
+        assert _declares_rust_env(target_false) is False
+        added = set(sys.modules) - before
 
-        monkeypatch.setattr("brutex.observability.rust_census.importlib.import_module", bomb)
-        assert _declares_rust_env("brutex.ranking.cvar_gate") is True
-        assert _declares_rust_env("brutex.calendars.market_hours") is False
+        assert target_true not in added, f"{target_true} was imported by the probe"
+        assert target_false not in added, f"{target_false} was imported by the probe"
 
     @pytest.mark.parametrize(
         "name",
