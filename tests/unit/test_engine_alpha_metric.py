@@ -480,6 +480,22 @@ class TestCensusFlagDeclaration:
         # scan matches). Missing either half leaves the census mis-reading.
         assert {"ALPHA_GATE_ENV", "resolve_alpha_gate_enabled"} <= declared
 
+    def test_declaration_is_exported_in_dunder_all(self) -> None:
+        """The name is READ REFLECTIVELY, so it must be exported deliberately.
+
+        ``rust_census.census`` reads it with
+        ``getattr(module, "RUST_CENSUS_NON_RUST_FLAGS", None)`` — a consumer
+        no intra-module analysis can see, which is exactly why CodeQL's
+        ``py/unused-global-variable`` flagged it. The export is the honest
+        fix (it IS part of this module's public contract with the census),
+        and this pin stops a future ``__all__`` tidy-up from silently
+        reopening the alert.
+        """
+        assert "RUST_CENSUS_NON_RUST_FLAGS" in alpha_metric.__all__
+        # Every exported name must resolve — a stale entry is its own defect.
+        for name in alpha_metric.__all__:
+            assert hasattr(alpha_metric, name), name
+
     def test_census_reports_the_facade_engaged_not_off(self) -> None:
         """The census-visible effect, pinned end to end.
 

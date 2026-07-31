@@ -91,6 +91,7 @@ _LOG = structlog.get_logger("brutex.engine.alpha_metric")
 
 __all__ = [
     "ALPHA_GATE_ENV",
+    "RUST_CENSUS_NON_RUST_FLAGS",
     "AlphaBaseline",
     "AlphaMetricError",
     "AlphaValues",
@@ -123,6 +124,15 @@ ALPHA_GATE_ENV: Final[str] = "BRUTEX_ALPHA_GATE"
 #: Disowning both halves routes it to the census's flag-free branch, which
 #: reports ``ENGAGED`` when the crate is importable and ``DEGRADED`` when it
 #: is not — the true answer in both directions.
+#:
+#: Exported in :data:`__all__` deliberately. Nothing in THIS module reads the
+#: name — :func:`brutex.observability.rust_census.census` reads it reflectively
+#: via ``getattr(module, "RUST_CENSUS_NON_RUST_FLAGS", None)``, which no
+#: intra-module analysis can see, so CodeQL's ``py/unused-global-variable``
+#: flagged it. It is a genuine part of this module's public contract with the
+#: census, and saying so in ``__all__`` is the honest fix — not a suppression
+#: comment, which would have hidden a real "is this name dead?" question from
+#: the next reader.
 RUST_CENSUS_NON_RUST_FLAGS: Final[frozenset[str]] = frozenset(
     {"ALPHA_GATE_ENV", ALPHA_GATE_ENV, "resolve_alpha_gate_enabled"}
 )
