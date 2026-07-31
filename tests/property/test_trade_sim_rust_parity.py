@@ -24,12 +24,14 @@ bit-exactness invariant for the dual-feed kernel (Golden Rule #4).
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from brutex.calendars.nse import IST
+from brutex.config.rust_strict import RUST_STRICT_ENV
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import U64_MASK, mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
@@ -204,10 +206,21 @@ def _python_oracle_sim(
     (not the ``monkeypatch`` fixture) keeps hypothesis' function-scoped
     fixture health check satisfied; ``capture_logs`` swallows the expected
     per-example ``wheel_missing`` WARNING.
+
+    ``BRUTEX_RUST_STRICT`` is pinned off for exactly this construction. The
+    blocked wheel here is not a production fall-back -- it is how the test
+    MINTS the pure-Python comparand the parity law measures Rust against, so
+    DEC-RUST-STRICT-NO-FALLBACK-001's refusal would remove the very reference
+    the law needs. The window is the constructor call and nothing else: the
+    strict default is restored in the same ``finally`` that restores
+    ``sys.modules``, so every other call in this module -- the Rust arm under
+    test included -- still runs strict-ON.
     """
-    sentinel = object()
+    sentinel: object = object()
     prior = sys.modules.get("fno_math", sentinel)
+    prior_strict: object = os.environ.get(RUST_STRICT_ENV, sentinel)
     sys.modules["fno_math"] = None  # type: ignore[assignment]
+    os.environ[RUST_STRICT_ENV] = "0"
     try:
         with capture_logs():
             sim = ResidentTradeSim(decision, bits, tf_minutes=tf_minutes, exec_bars_1m=exec_bars)
@@ -216,6 +229,10 @@ def _python_oracle_sim(
             sys.modules.pop("fno_math", None)
         else:
             sys.modules["fno_math"] = prior  # type: ignore[assignment]
+        if isinstance(prior_strict, str):
+            os.environ[RUST_STRICT_ENV] = prior_strict
+        else:
+            os.environ.pop(RUST_STRICT_ENV, None)
     assert sim.rust_active is False  # provably the oracle arm
     return sim
 

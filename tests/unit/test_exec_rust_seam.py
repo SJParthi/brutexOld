@@ -20,7 +20,7 @@ UNMODIFIED frozen golden suites passing on a ``"0"``-armed run, that is the
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -1253,7 +1253,7 @@ class TestStrictRefusal:
 
     @staticmethod
     @contextmanager
-    def _strict_on() -> Iterator[None]:
+    def _strict_on() -> Generator[None]:
         """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
 
         Owns its OWN :class:`pytest.MonkeyPatch` context rather than the

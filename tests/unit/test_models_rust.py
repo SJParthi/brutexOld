@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import sys
 import types
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from decimal import (
     ROUND_05UP,
@@ -884,7 +884,7 @@ class TestStrictRefusal:
 
     @staticmethod
     @contextmanager
-    def _strict_on() -> Iterator[None]:
+    def _strict_on() -> Generator[None]:
         """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
 
         Owns its OWN :class:`pytest.MonkeyPatch` context rather than the

@@ -28,7 +28,7 @@ from brutex.vocabulary import CONFLICT_PAIRS, has_conflict
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Sequence
 
 #: The REAL compiled classes, captured BEFORE any monkeypatching so poison
 #: wrappers can delegate to the genuine kernel.
@@ -1225,7 +1225,7 @@ class TestStrictRefusal:
 
     @staticmethod
     @contextmanager
-    def _strict_on() -> Iterator[None]:
+    def _strict_on() -> Generator[None]:
         """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
 
         This owns its OWN :class:`pytest.MonkeyPatch` context rather than

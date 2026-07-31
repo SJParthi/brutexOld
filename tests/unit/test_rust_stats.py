@@ -60,7 +60,7 @@ from brutex.metrics.rust_stats import (
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
     import numpy.typing as npt
 
@@ -2436,7 +2436,7 @@ class TestStrictRefusal:
 
     @staticmethod
     @contextmanager
-    def _strict_on() -> Iterator[None]:
+    def _strict_on() -> Generator[None]:
         """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
 
         This owns its OWN :class:`pytest.MonkeyPatch` context rather than

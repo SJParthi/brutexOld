@@ -14,7 +14,7 @@ so the real-kernel tests run unconditionally).
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import ClassVar, NoReturn
@@ -537,7 +537,7 @@ class TestStrictRefusal:
 
     @staticmethod
     @contextmanager
-    def _strict_on() -> Iterator[None]:
+    def _strict_on() -> Generator[None]:
         """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
 
         Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
