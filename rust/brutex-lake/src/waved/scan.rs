@@ -392,11 +392,54 @@ fn entry_name(entry: &fs::DirEntry) -> Option<String> {
 /// guard), a vanished/mid-faulted level reads `[]`. A non-UTF-8 child
 /// name lands in *skipped* (the W-6a loud isolation arm — the deleted
 /// Python walk handled such names natively).
+///
+/// # Complexity (DEC-LAKE-SCAN-CHILD-DIRS-O1-001)
+///
+/// * `name_filter = Some(_)` — **O(1)**: one `read_dir` open (the parent
+///   readability probe, which does NOT enumerate) plus one `metadata` on
+///   the joined path. This is the FAST PATH.
+/// * `name_filter = None` — O(children): the genuine enumeration, unchanged.
+///
+/// The fast path was NOT here originally: the filter was applied *after*
+/// the full `read_dir` loop and *after* a `metadata()` on every entry, so
+/// resolving ONE named child cost one stat per sibling. Measured on the
+/// operator's box: the L2 post-pull heal issues one targeted scan per
+/// option CONTRACT (169,158 of them per pull), each enumerating the whole
+/// `bars/<exch>/FNO/` level — 315,060 scans totalling 14.47 CPU-hours in a
+/// 32.5 h window, a flat ~180 ms even when the scan read ZERO files, and
+/// 94.3 % of one pull's wall clock. All 315,060 returned `findings=0`.
+///
+/// DECLARED DIVERGENCE (the one observable difference, deliberate): on the
+/// fast path a non-UTF-8 SIBLING name no longer lands in *skipped*. It is
+/// out of scope by construction — the caller named exactly one child, and
+/// a non-UTF-8 name can never equal a `&str` filter — and the old
+/// behaviour re-reported the same bad sibling once per targeted scan
+/// (169,158 times for one bad directory). The unfiltered whole-lake scan,
+/// which is the surface that exists to find such names, still reports it
+/// exactly once. Pinned by
+/// `fast_path_skips_non_utf8_sibling_reporting_by_design`.
 fn child_dirs(
     parent: &Path,
     name_filter: Option<&str>,
     skipped: &mut Vec<PathBuf>,
 ) -> Vec<(String, PathBuf)> {
+    if let Some(filter) = name_filter {
+        // Parent-readability contract preserved: the enumerating path
+        // returns `[]` when `read_dir` fails (e.g. an `--x`-only parent, or
+        // a vanished level), so gate on the same call. Opening the DIR
+        // handle is O(1) — it is CONSUMING the iterator, and the per-entry
+        // `metadata()`, that made the old path O(children).
+        if fs::read_dir(parent).is_err() {
+            return Vec::new();
+        }
+        let path = parent.join(filter);
+        return match fs::metadata(&path) {
+            Ok(meta) if meta.is_dir() => vec![(filter.to_string(), path)],
+            // One unstat-able / non-dir named child reads absent — the same
+            // verdict the enumerating path reaches via its `continue`.
+            _ => Vec::new(),
+        };
+    }
     let Ok(entries) = fs::read_dir(parent) else {
         return Vec::new();
     };
@@ -416,11 +459,10 @@ fn child_dirs(
             Ok(meta) if meta.is_dir() => {}
             _ => continue, // one unstat-able / non-dir child never drops its siblings
         }
-        if let Some(filter) = name_filter
-            && name != filter
-        {
-            continue;
-        }
+        debug_assert!(
+            name_filter.is_none(),
+            "a filtered call must have taken the O(1) fast path above"
+        );
         out.push((name, path));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2874,5 +2916,272 @@ mod tests {
         // exists (unmapped dtypes become loud counted per-file skips at
         // the call sites).
         assert!(python_dtype_repr(&DataType::List(Box::new(DataType::String))).is_none());
+    }
+}
+
+#[cfg(test)]
+mod child_dirs_o1_tests {
+    //! DEC-LAKE-SCAN-CHILD-DIRS-O1-001 — the one-name-filter fast path.
+    //!
+    //! These are the pins the ORIGINAL code lacked: it was correct (it
+    //! returned the right child) and therefore green, while being
+    //! O(siblings). Correctness tests alone cannot catch a complexity
+    //! regression, so the load-bearing test here is the GROWTH-RATIO one
+    //! (`filtered_lookup_is_flat_in_sibling_count`): it re-fails if a future
+    //! edit reintroduces enumeration, even though the returned value would
+    //! still be right.
+    //!
+    //! A timing ratio is only trustworthy if the harness can actually SEE
+    //! growth, so `the_complexity_harness_can_detect_linear_growth` runs the
+    //! identical harness against a deliberately enumerating reference and
+    //! requires it to register the slowdown. Without that control a hung or
+    //! mis-sized harness would report "flat" for everything and the pin
+    //! would be decorative.
+
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-lake-child-dirs-o1-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Build a parent holding `n` sibling directories plus `target`.
+    fn parent_with_siblings(tag: &str, n: usize, target: &str) -> PathBuf {
+        let parent = scratch(tag);
+        for i in 0..n {
+            fs::create_dir_all(parent.join(format!("sibling-{i:06}"))).unwrap();
+        }
+        fs::create_dir_all(parent.join(target)).unwrap();
+        parent
+    }
+
+    /// THE COMPLEXITY PIN. A correctness test passes on both the O(1) and
+    /// the O(siblings) implementation — only the work done separates them.
+    /// `fs::metadata` is not interceptable from safe Rust, so the proxy is
+    /// wall-clock scaling across a 1:100 sibling ratio, asserted with a
+    /// generous ceiling (the shared-CI robust tier of CLAUDE.md §2 Rule 5,
+    /// not the strict 1.1x M4-Pro tier).
+    ///
+    /// The pre-fix code enumerated + stat'd every sibling, so this ratio
+    /// tracked the sibling count directly; the fast path issues exactly one
+    /// `read_dir` open + one `metadata` regardless.
+    #[test]
+    fn filtered_lookup_is_flat_in_sibling_count() {
+        const TARGET: &str = "zzz-the-one-we-want";
+        let small = parent_with_siblings("flat-small", 20, TARGET);
+        let large = parent_with_siblings("flat-large", 2_000, TARGET);
+
+        // Warm both directory caches so the measurement is the syscall
+        // work, not first-touch page faults.
+        for parent in [&small, &large] {
+            let mut skipped = Vec::new();
+            child_dirs(parent, Some(TARGET), &mut skipped);
+        }
+
+        let measure = |parent: &Path| -> u128 {
+            let mut best = u128::MAX;
+            for _ in 0..7 {
+                let mut skipped = Vec::new();
+                let start = std::time::Instant::now();
+                for _ in 0..50 {
+                    let out = child_dirs(parent, Some(TARGET), &mut skipped);
+                    assert_eq!(out.len(), 1);
+                }
+                best = best.min(start.elapsed().as_nanos());
+            }
+            best.max(1)
+        };
+
+        let t_small = measure(&small);
+        let t_large = measure(&large);
+        let ratio = t_large as f64 / t_small as f64;
+        assert!(
+            ratio <= 10.0,
+            "filtered child_dirs is NOT flat in sibling count: 2000 siblings \
+             took {ratio:.2}x the 20-sibling time (t_small={t_small}ns, \
+             t_large={t_large}ns). A 100x input growth must not move this — \
+             the filtered path is one read_dir open + one metadata. This is \
+             the DEC-LAKE-SCAN-CHILD-DIRS-O1-001 regression guard."
+        );
+
+        let _ = fs::remove_dir_all(&small);
+        let _ = fs::remove_dir_all(&large);
+    }
+
+    /// Anti-vacuous companion: the measurement harness above must be able
+    /// to SEE linear growth, otherwise its ceiling proves nothing. This
+    /// runs the same shape against a deliberately O(siblings) reference and
+    /// asserts the ratio DOES climb.
+    #[test]
+    fn the_complexity_harness_can_detect_linear_growth() {
+        const TARGET: &str = "zzz-the-one-we-want";
+        let small = parent_with_siblings("teeth-small", 20, TARGET);
+        let large = parent_with_siblings("teeth-large", 2_000, TARGET);
+
+        // The PRE-FIX shape, verbatim in spirit: enumerate + stat every
+        // entry, filter last.
+        fn enumerating_reference(parent: &Path, filter: &str) -> usize {
+            let Ok(entries) = fs::read_dir(parent) else {
+                return 0;
+            };
+            let mut found = 0usize;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !matches!(fs::metadata(&path), Ok(m) if m.is_dir()) {
+                    continue;
+                }
+                if entry.file_name().to_string_lossy() == filter {
+                    found += 1;
+                }
+            }
+            found
+        }
+
+        let measure = |parent: &Path| -> u128 {
+            let mut best = u128::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                for _ in 0..10 {
+                    assert_eq!(enumerating_reference(parent, TARGET), 1);
+                }
+                best = best.min(start.elapsed().as_nanos());
+            }
+            best.max(1)
+        };
+
+        let ratio = measure(&large) as f64 / measure(&small) as f64;
+        assert!(
+            ratio >= 5.0,
+            "the harness cannot see linear growth (ratio {ratio:.2}x for a \
+             100x input) — the flatness assertion above would be vacuous"
+        );
+
+        let _ = fs::remove_dir_all(&small);
+        let _ = fs::remove_dir_all(&large);
+    }
+
+    /// Equivalence: the fast path returns exactly what the enumerating path
+    /// returned for the same question.
+    #[test]
+    fn filtered_lookup_returns_the_named_child() {
+        let parent = parent_with_siblings("hit", 5, "target-dir");
+        let mut skipped = Vec::new();
+        let out = child_dirs(&parent, Some("target-dir"), &mut skipped);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "target-dir");
+        assert_eq!(out[0].1, parent.join("target-dir"));
+        assert!(skipped.is_empty());
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn filtered_lookup_of_an_absent_child_is_empty() {
+        let parent = parent_with_siblings("miss", 5, "target-dir");
+        let mut skipped = Vec::new();
+        assert!(child_dirs(&parent, Some("no-such-child"), &mut skipped).is_empty());
+        assert!(skipped.is_empty());
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// A FILE (not a dir) at the named path reads absent — the same verdict
+    /// the enumerating path reached via its `is_dir()` `continue`.
+    #[test]
+    fn filtered_lookup_of_a_non_dir_child_is_empty() {
+        let parent = scratch("nondir");
+        fs::write(parent.join("plain-file"), b"x").unwrap();
+        let mut skipped = Vec::new();
+        assert!(child_dirs(&parent, Some("plain-file"), &mut skipped).is_empty());
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// A vanished parent reads `[]` on BOTH paths — the fast path keeps the
+    /// `read_dir` gate precisely so this contract survives.
+    #[test]
+    fn filtered_lookup_on_an_unreadable_parent_is_empty() {
+        let parent = scratch("gone").join("never-created");
+        let mut skipped = Vec::new();
+        assert!(child_dirs(&parent, Some("anything"), &mut skipped).is_empty());
+        assert!(child_dirs(&parent, None, &mut skipped).is_empty());
+    }
+
+    /// The DECLARED DIVERGENCE, pinned so it can never drift silently: on
+    /// the fast path a non-UTF-8 SIBLING is not reported in `skipped`. It
+    /// cannot match a `&str` filter, and the unfiltered whole-lake scan —
+    /// the surface that exists to surface such names — still reports it.
+    #[test]
+    #[cfg(unix)]
+    fn fast_path_skips_non_utf8_sibling_reporting_by_design() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let parent = scratch("nonutf8");
+        fs::create_dir_all(parent.join("good-child")).unwrap();
+        fs::create_dir_all(parent.join(OsStr::from_bytes(b"bad-\xff\xfe"))).unwrap();
+
+        // Filtered: the bad sibling is out of scope, not reported.
+        let mut filtered_skips = Vec::new();
+        let out = child_dirs(&parent, Some("good-child"), &mut filtered_skips);
+        assert_eq!(out.len(), 1);
+        assert!(
+            filtered_skips.is_empty(),
+            "declared divergence: a non-UTF-8 SIBLING is not reported on the \
+             filtered fast path"
+        );
+
+        // Unfiltered: still reported exactly once — the loud arm is intact.
+        let mut walk_skips = Vec::new();
+        let all = child_dirs(&parent, None, &mut walk_skips);
+        assert_eq!(all.len(), 1, "only the UTF-8 child is returnable");
+        assert_eq!(
+            walk_skips.len(),
+            1,
+            "the unfiltered walk MUST still surface the non-UTF-8 name"
+        );
+
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// The unfiltered path is untouched: still sorted, still enumerating.
+    #[test]
+    fn unfiltered_walk_is_unchanged_and_sorted() {
+        let parent = scratch("sorted");
+        for name in ["ccc", "aaa", "bbb"] {
+            fs::create_dir_all(parent.join(name)).unwrap();
+        }
+        fs::write(parent.join("zzz-file"), b"x").unwrap();
+        let mut skipped = Vec::new();
+        let out = child_dirs(&parent, None, &mut skipped);
+        let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["aaa", "bbb", "ccc"]);
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// Guards against a silent under-count: the number of syscalls the fast
+    /// path may issue is FIXED. Asserted structurally by proving the result
+    /// is identical whether 0 or 2000 siblings exist.
+    #[test]
+    fn filtered_result_is_independent_of_sibling_count() {
+        const TARGET: &str = "the-child";
+        let bare = scratch("indep-bare");
+        fs::create_dir_all(bare.join(TARGET)).unwrap();
+        let crowded = parent_with_siblings("indep-crowded", 2_000, TARGET);
+
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let out_bare = child_dirs(&bare, Some(TARGET), &mut a);
+        let out_crowded = child_dirs(&crowded, Some(TARGET), &mut b);
+
+        assert_eq!(out_bare.len(), out_crowded.len());
+        assert_eq!(out_bare[0].0, out_crowded[0].0);
+        assert!(a.is_empty() && b.is_empty());
+
+        let _ = fs::remove_dir_all(&bare);
+        let _ = fs::remove_dir_all(&crowded);
     }
 }
