@@ -14,10 +14,10 @@ so the real-kernel tests run unconditionally).
 from __future__ import annotations
 
 import sys
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import ClassVar, NoReturn
+from typing import ClassVar, NoReturn, cast
 
 import pytest
 from brutex import ranking
@@ -78,6 +78,13 @@ def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _fake_wheel(kernel: object) -> SimpleNamespace:
     """A fake ``fno_math`` module carrying *kernel* as the fold symbol."""
     return SimpleNamespace(stats_cvar_tail_fold=kernel)
+
+
+#: The crate's CLASS-C input-envelope marker, spelled out LITERALLY here so
+#: a silent edit of the module constant cannot make these tests vacuous
+#: (the cross-language pin against the REAL wheel is
+#: :class:`TestInputRefusedMarker`).
+_MARKER = "input outside the crate envelope"
 
 
 # ────── config validation ──────
@@ -456,13 +463,18 @@ class TestRealKernel:
     def test_non_int_element_degrades_to_python_semantics(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The kernel's Vec<i64> extraction raises TypeError → oracle serves.
+        # The kernel's Vec<i64> extraction raises a MARKED TypeError → the
+        # oracle serves, under the CLASS-C ``kernel_input_refused`` reason
+        # (DEC-RUST-STRICT-NO-FALLBACK-001: it was ``kernel_error`` before
+        # the crate learned to stamp its input-envelope refusals).
         monkeypatch.setenv(CVAR_RUST_ENV, "1")
         pnls = [-1.5, 2, 3]  # float element — outside the int contract
         with capture_logs() as logs:
             fold = cvar_tail_fold(pnls, 500)  # type: ignore[arg-type]
         assert fold == _cvar_tail_fold_python(pnls, 500)  # type: ignore[arg-type]
-        assert [e["reason"] for e in logs if e["event"] == "cvar_gate.fallback"] == ["kernel_error"]
+        assert [e["reason"] for e in logs if e["event"] == "cvar_gate.fallback"] == [
+            "kernel_input_refused"
+        ]
 
     def test_int_past_i64_degrades_to_the_unbounded_oracle(
         self, monkeypatch: pytest.MonkeyPatch
@@ -472,7 +484,106 @@ class TestRealKernel:
         with capture_logs() as logs:
             fold = cvar_tail_fold(pnls, 500)
         assert fold == _cvar_tail_fold_python(pnls, 500)
-        assert [e["reason"] for e in logs if e["event"] == "cvar_gate.fallback"] == ["kernel_error"]
+        assert [e["reason"] for e in logs if e["event"] == "cvar_gate.fallback"] == [
+            "kernel_input_refused"
+        ]
+
+    def test_non_int_alpha_bps_degrades_to_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The float ``500.0`` passes the Python ``1 <= a <= 10_000`` gate.
+
+        …and then fails the crate's ``u32`` extraction — a CLASS-C input
+        refusal reachable through the PUBLIC API, which is why the
+        *alpha_bps* extraction is marked too.
+        """
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        with capture_logs() as logs:
+            fold = cvar_tail_fold([-7, 3, 11], 500.0)  # type: ignore[arg-type]
+        assert fold == _cvar_tail_fold_python([-7, 3, 11], 500)
+        assert [e["reason"] for e in logs if e["event"] == "cvar_gate.fallback"] == [
+            "kernel_input_refused"
+        ]
+
+
+# ────── the cross-language CLASS-C marker (real wheel) ──────
+
+
+class TestInputRefusedMarker:
+    """Pin the crate↔facade marker contract against the REAL wheel.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: the whole ``kernel_error`` split rests
+    on the crate STAMPING its input-envelope refusals and leaving genuine
+    faults UNMARKED. A drift on either side (a reworded Rust literal, an
+    edited Python constant) silently re-merges the two populations — these
+    tests fail first.
+    """
+
+    def test_python_marker_matches_the_crate_literal(self) -> None:
+        from brutex.ranking import cvar_gate
+
+        assert cvar_gate._INPUT_REFUSED_MARKER == _MARKER  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize(
+        ("label", "call"),
+        [
+            ("non-int element", lambda k: k([1.5, 2], 500)),
+            ("int past i64", lambda k: k([-(2**80), 5], 500)),
+            ("non-sequence pnls", lambda k: k("nope", 500)),
+            ("non-int alpha_bps", lambda k: k([1, 2], 500.0)),
+        ],
+    )
+    def test_real_crate_marks_input_envelope_refusals(self, label: str, call: object) -> None:
+        import fno_math
+
+        assert label
+        with pytest.raises((TypeError, ValueError, OverflowError)) as excinfo:
+            cast("Callable[[object], object]", call)(fno_math.stats_cvar_tail_fold)
+        assert _MARKER in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("label", "call"),
+        [
+            ("empty pnls", lambda k: k([], 500)),
+            ("alpha below range", lambda k: k([1], 0)),
+            ("alpha above range", lambda k: k([1], 10_001)),
+            ("arity (stale-wheel shape)", lambda k: k([1])),
+        ],
+    )
+    def test_real_crate_leaves_faults_and_structural_arms_unmarked(
+        self, label: str, call: object
+    ) -> None:
+        """The UNMARKED remainder — what strict mode REFUSES.
+
+        The three structural arms are deliberately unmarked (the seam
+        refuses the identical inputs before the FFI, so no legitimate call
+        reaches them); the arity error is PyO3's own, raised before the
+        kernel body — the stale-wheel fault shape.
+        """
+        import fno_math
+
+        assert label
+        with pytest.raises((TypeError, ValueError, OverflowError)) as excinfo:
+            cast("Callable[[object], object]", call)(fno_math.stats_cvar_tail_fold)
+        assert _MARKER not in str(excinfo.value)
+
+    def test_real_crate_happy_path_and_keyword_call_shape_unchanged(self) -> None:
+        """The explicit extraction did not move the contract: same values,
+        same argument NAMES (a keyword call still binds)."""
+        import fno_math
+
+        pnls = [7, -9, 3, -9, 0, 12, -1, -1000, 55, 2]
+        expected = _cvar_tail_fold_python(pnls, 2_500)
+        assert fno_math.stats_cvar_tail_fold(pnls, 2_500) == (
+            expected.k,
+            expected.var_paisa,
+            expected.tail_sum_paisa,
+        )
+        assert fno_math.stats_cvar_tail_fold(pnls=pnls, alpha_bps=2_500) == (
+            expected.k,
+            expected.var_paisa,
+            expected.tail_sum_paisa,
+        )
 
 
 # ────── mutation-workflow wiring pin ──────
@@ -623,37 +734,105 @@ class TestStrictRefusal:
         with self._strict_on():
             assert cvar_rust_enabled() is CVAR_RUST_DEFAULT
 
-    def test_class_c_exempt_set_is_exactly_the_advisory_token(self) -> None:
+    def test_class_c_exempt_set_is_exactly_the_two_ruled_tokens(self) -> None:
         from brutex.ranking import cvar_gate
 
         assert (
             frozenset(  # pyright: ignore[reportPrivateUsage]
-                {"flag_engine_unavailable"}
+                {"flag_engine_unavailable", "kernel_input_refused"}
             )
             == cvar_gate._STRICT_EXEMPT_REASONS
         )
 
-    # ── The HELD (overloaded) token ────────────────────────────────────────
-
-    def test_unresolved_kernel_error_is_held_not_refused(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("label", "exc"),
+        [
+            ("non-int element", TypeError(f"pnls — {_MARKER}: 'float' object …")),
+            ("int past i64", OverflowError(f"pnls — {_MARKER}: int too large …")),
+            ("non-int alpha", TypeError(f"alpha_bps — {_MARKER}: 'float' object …")),
+        ],
+    )
+    def test_class_c_marked_input_refusal_does_not_refuse(
+        self, monkeypatch: pytest.MonkeyPatch, label: str, exc: Exception
     ) -> None:
-        """``kernel_error`` is genuinely TWO classes at once (the crate's own
-        ``Err`` arms vs a PyO3 ``Vec<i64>`` extraction failure), so it is HELD
-        in ``_STRICT_UNRESOLVED_REASONS`` and NOT refused — guessing would
-        either crash a legal call or hide a genuine kernel refusal. Splitting
-        the token is the real fix (see the module constant's evidence)."""
-        from brutex.ranking import cvar_gate
+        """A crate-MARKED refusal keeps degrading, even under strict mode.
 
-        assert frozenset({"kernel_error"}) == cvar_gate._STRICT_UNRESOLVED_REASONS  # pyright: ignore[reportPrivateUsage]
+        The marker is the crate SAYING "this INPUT is outside my envelope" —
+        the Python oracle was always the intended handler for these
+        (module honest envelope), so refusing would crash a legitimate,
+        pinned, byte-equal call. Classified on the crate's own evidence,
+        never on the exception CLASS (shared with the fault population).
+        """
+        assert label  # the parametrize id carries the population name
 
         def _raises(*_a: object, **_k: object) -> NoReturn:
-            raise TypeError("Vec<i64> extraction failed")
+            raise exc
 
         monkeypatch.setenv(CVAR_RUST_ENV, "1")
         monkeypatch.setitem(sys.modules, "fno_math", _fake_wheel(_raises))
-        with self._strict_on():
+        with self._strict_on(), capture_logs() as logs:
             assert cvar_tail_fold(self._PNLS, 500) == _cvar_tail_fold_python(self._PNLS, 500)
+        assert [e["reason"] for e in logs if e["event"] == "cvar_gate.fallback"] == [
+            "kernel_input_refused"
+        ]
+
+    # ── CLASS A/B — an UNMARKED kernel error is a genuine FAULT ─────────────
+
+    @pytest.mark.parametrize(
+        ("label", "exc"),
+        [
+            # A stale wheel whose call shape drifted — PyO3's own arity
+            # TypeError, raised BEFORE the kernel body, hence unmarked.
+            ("stale-wheel arity", TypeError("stats_cvar_tail_fold() takes 2 arguments")),
+            # A byzantine module bound to the symbol.
+            ("byzantine value", ValueError("boom")),
+            # The crate's structural arms — deliberately left UNMARKED
+            # (rust/fno-math/src/stats/cvar.rs): the Python pre-gate refuses
+            # the identical inputs, so no legitimate call reaches them.
+            ("structural empty", ValueError("stats_cvar_tail_fold: pnls must be non-empty")),
+            ("structural alpha", ValueError("stats_cvar_tail_fold: alpha_bps must be in [1, …]")),
+        ],
+    )
+    def test_class_a_b_unmarked_kernel_error_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, label: str, exc: Exception
+    ) -> None:
+        """``kernel_error`` is now fault-ONLY and strict mode REFUSES it.
+
+        Before the CLASS-C split this token was HELD in
+        ``_STRICT_UNRESOLVED_REASONS`` and every one of these quietly served
+        the Python oracle — a silent fall-back the mandate forbids.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        assert label
+
+        def _raises(*_a: object, **_k: object) -> NoReturn:
+            raise exc
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", _fake_wheel(_raises))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="kernel_error"):
+            cvar_tail_fold(self._PNLS, 500)
+
+    # ── The HELD (overloaded) set is now EMPTY ─────────────────────────────
+
+    def test_unresolved_set_is_empty(self) -> None:
+        """Nothing is held out of the taxonomy any more.
+
+        ``kernel_error`` used to live here because ONE ``except`` bundled the
+        crate's genuine faults with the PyO3 extraction failures,
+        indistinguishable at the choke point. The crate now MARKS every
+        input-envelope refusal it raises, so the two populations split into
+        ``kernel_input_refused`` (CLASS C, exempt) and ``kernel_error``
+        (CLASS A/B, refused) — the set is EMPTY, honestly.
+        """
+        from brutex.ranking import cvar_gate
+
+        assert frozenset() == cvar_gate._STRICT_UNRESOLVED_REASONS  # pyright: ignore[reportPrivateUsage]
+        assert (  # the union point stays the two provenances, nothing else
+            cvar_gate._STRICT_NOT_REFUSED  # pyright: ignore[reportPrivateUsage]
+            == cvar_gate._STRICT_EXEMPT_REASONS  # pyright: ignore[reportPrivateUsage]
+        )
 
     # ── The kill switch still works ────────────────────────────────────────
 

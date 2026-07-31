@@ -135,6 +135,13 @@ pub mod optcost;
 /// Python twin (`brutex.ranking.multi_select`) is the parity ORACLE.
 pub mod rank_select;
 
+/// DEC-RUST-STRICT-NO-FALLBACK-001: the CLASS-C input-envelope refusal
+/// marker + its stamping helper. A MARKED error tells the Python facade
+/// "the INPUT was outside this crate's envelope — serve the oracle"; an
+/// UNMARKED one is a genuine crate FAULT strict mode REFUSES. Same literal
+/// text as `rust/brutex-strategies/src/python.rs` — one doctrine repo-wide.
+pub mod input_refused;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
