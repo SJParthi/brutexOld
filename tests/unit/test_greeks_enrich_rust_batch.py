@@ -827,3 +827,156 @@ class TestChunking:
 
     def test_default_cap_is_the_documented_constant(self) -> None:
         assert GREEKS_BATCH_MAX_ROWS == 65_536
+
+
+class TestStrictRefusal:
+    """DEC-RUST-STRICT-NO-FALLBACK-001 — all THREE crate-degrade announce sites.
+
+    This facade has no shared funnel: the crate-degrade path announces at
+    three independent sites — the ``greeks_rust_batch_enabled`` junk-flag
+    arm, the ``_batch_solve_outcomes`` except-fence, and its burn-in
+    self-check mismatch. Each calls ``_refuse_rust_batch_if_strict`` BEFORE
+    its own state write (``flag_warned`` / ``disabled``), so under strict
+    mode ``_RUST_BATCH_STATE.disabled`` can never be set and the latched
+    early-return is structurally unreachable.
+
+    SCOPE (the honesty clause): strict mode covers ONLY the crate-degrade
+    path. The per-bar DOMAIN demotions — NO_RATE / NO_SPOT /
+    BELOW_INTRINSIC / BAD_INPUT / AT_EXPIRY / NO_SOLUTION, plus the
+    non-finite-bar and invalid-spot screens — are honest outcomes of the
+    INPUT, identical on both arms, and are NOT Rust fall-backs. They must
+    keep working under strict mode; the last test pins exactly that.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Arm strict mode on the SHARED monkeypatch the autouse fixture used."""
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    @staticmethod
+    def _rows() -> tuple[list[dict[str, object]], dict[datetime, Decimal]]:
+        ts = [_BAR_TS + timedelta(minutes=i) for i in range(3)]
+        rows = [_row(t, close=180.0 + i) for i, t in enumerate(ts)]
+        return rows, dict.fromkeys(ts, _SPOT)
+
+    # ---- SITE 1: the junk-flag arm (CLASS A) ------------------------
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused) as excinfo:
+            greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"})
+        message = str(excinfo.value)
+        assert "brutex.data.greeks_enrich" in message
+        assert "flag_unrecognised" in message
+        assert _RUST_BATCH_STATE.flag_warned is False
+
+    def test_class_a_flag_unrecognised_falls_off_when_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SAME path with strict OFF falls OFF with the warn-once."""
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        assert greeks_rust_batch_enabled({GREEKS_RUST_BATCH_ENV: "maybe?"}) is False
+
+    # ---- SITE 2: the except-fence (CLASS A) -------------------------
+
+    def test_class_a_batch_exception_refuses_before_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crate fault refuses; ``disabled`` stays clear (refusal precedes it)."""
+        self._strict_on(monkeypatch)
+        rows, spots = self._rows()
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "1")
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise AttributeError("module 'trading_core' has no attribute 'greeks_batch'")
+
+        monkeypatch.setattr(greeks_enrich, "compute_greeks_batch", _raise)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="exception"):
+            enrich_option_bars(
+                rows, parts=_parts(), spot_by_ts=spots, rate_source=_RATE, style_flag=_STYLE
+            )
+        assert _RUST_BATCH_STATE.disabled is False
+
+    def test_class_a_batch_exception_ships_oracle_when_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SAME path with strict OFF ships the oracle bars and latches."""
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        rows, spots = self._rows()
+        bars_off, stats_off = enrich_option_bars(
+            rows, parts=_parts(), spot_by_ts=spots, rate_source=_RATE, style_flag=_STYLE
+        )
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "1")
+        reset_rust_batch_for_tests()
+
+        def _raise(*_a: object, **_k: object) -> object:
+            raise AttributeError("module 'trading_core' has no attribute 'greeks_batch'")
+
+        monkeypatch.setattr(greeks_enrich, "compute_greeks_batch", _raise)
+        bars_on, stats_on = enrich_option_bars(
+            rows, parts=_parts(), spot_by_ts=spots, rate_source=_RATE, style_flag=_STYLE
+        )
+        assert [_bar_key(b) for b in bars_on] == [_bar_key(b) for b in bars_off]
+        assert stats_on == stats_off
+        assert _RUST_BATCH_STATE.disabled is True
+
+    # ---- SITE 3: the burn-in self-check (CLASS B) -------------------
+
+    def test_class_b_self_check_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wrong Rust ANSWER refuses — never papered over by a quiet re-run."""
+        self._strict_on(monkeypatch)
+        rows, spots = self._rows()
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "1")
+        real = compute_greeks_batch
+
+        def _perturbed(requests: object) -> list[GreeksBatchOutcome]:
+            outcomes = real(requests)  # type: ignore[arg-type]
+            first = outcomes[0]
+            assert first.result is not None
+            poisoned = dataclasses.replace(first.result, iv=first.result.iv + 1e-12)
+            return [GreeksBatchOutcome(result=poisoned, invalid_input=None), *outcomes[1:]]
+
+        monkeypatch.setattr(greeks_enrich, "compute_greeks_batch", _perturbed)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="self_check_mismatch"):
+            enrich_option_bars(
+                rows, parts=_parts(), spot_by_ts=spots, rate_source=_RATE, style_flag=_STYLE
+            )
+        assert _RUST_BATCH_STATE.disabled is False
+
+    # ---- the honesty clause: DOMAIN demotions are NOT fall-backs ----
+
+    def test_domain_demotions_do_not_refuse_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NO_SPOT / NO_RATE are input outcomes, never a Rust fall-back.
+
+        A bar with no joined spot (and one with no rate) must still enrich
+        to its honest demoted status with strict mode ON — refusing here
+        would crash a legitimate input, which is exactly the failure mode
+        the three-class taxonomy exists to prevent.
+        """
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(GREEKS_RUST_BATCH_ENV, "1")
+        rows, _spots = self._rows()
+        bars, stats = enrich_option_bars(
+            rows,
+            parts=_parts(),
+            spot_by_ts={},  # no spot joined for ANY bar
+            rate_source=_RATE,
+            style_flag=_STYLE,
+        )
+        assert len(bars) == len(rows)
+        statuses = {unpack_greeks_provenance(bar.greeks_provenance_id or 0).status for bar in bars}
+        assert statuses == {STATUS_NO_SPOT}
+        assert stats.solved == 0
+        assert _RUST_BATCH_STATE.disabled is False
+
+    def test_no_class_c_exemption_frozenset_exists(self) -> None:
+        """Pin the structural absence of a CLASS-C carve-out on this facade.
+
+        The domain demotions above never reach an announcement site, so they
+        need no frozenset entry — a future carve-out must be deliberate.
+        """
+        assert not hasattr(greeks_enrich, "_STRICT_EXEMPT_REASONS")
+        assert not hasattr(greeks_enrich, "_STRICT_UNRESOLVED_REASONS")

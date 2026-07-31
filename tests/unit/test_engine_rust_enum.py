@@ -1286,7 +1286,10 @@ class TestStrictRefusal:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(fno_math, "ResidentSweepEnum", _BadRange)
             mp.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
-            with self._strict_on(), pytest.raises(RustFallbackRefused, match="kernel_result_refused"):
+            with (
+                self._strict_on(),
+                pytest.raises(RustFallbackRefused, match="kernel_result_refused"),
+            ):
                 _call(bits=[0, 1, 2], k=2)
 
     @pytest.mark.parametrize("reason", sorted(rust_enum._STRICT_EXEMPT_REASONS))

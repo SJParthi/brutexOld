@@ -358,9 +358,7 @@ class TestStrictRefusal:
         # The refusal fires BEFORE the latch write, so the latch stays clear.
         assert backup_env_rust.backupenv_rust_disabled() is False
 
-    def test_same_path_serves_the_oracle_strict_off(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_same_path_serves_the_oracle_strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The SAME class-A path degrades normally with the kill switch on."""
         monkeypatch.setenv(backup_env_rust.BACKUPENV_RUST_ENV, "1")
         monkeypatch.setitem(sys.modules, "brutex_core", None)

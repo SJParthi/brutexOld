@@ -391,3 +391,150 @@ class TestShapeHelpers:
         assert nightly_rust.is_hm_tuple_or_none((1, "30")) is False
         assert nightly_rust.is_hm_tuple_or_none((True, 30)) is False
         assert nightly_rust.is_hm_tuple_or_none([1, 30]) is False
+
+
+class TestStrictRefusal:
+    """DEC-RUST-STRICT-NO-FALLBACK-001 — both choke points + the UNRESOLVED set.
+
+    Every Python fall-back this facade takes announces through exactly two
+    functions: ``_warn_once`` (the memo) and ``_disable`` (the process
+    latch). Both call ``refuse_if_strict`` BEFORE their memo/latch write,
+    so under strict mode the latch can never be set and ``route_kernel``'s
+    ``nightly_rust_disabled()`` early-return is structurally unreachable.
+
+    ``_STRICT_UNRESOLVED_REASONS`` is NOT a CLASS-C exemption — it is the
+    honest "do not guess" holding pen for four ``{kernel}_error`` tokens
+    whose crate side raises for BOTH a genuine fault and a deliberate
+    "python oracle decides" abstain (per-token ``rust/brutex-ops`` evidence
+    on the constant). They are reported, not refused; splitting the token
+    crate-side is the real fix and lives in another lane.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Arm strict mode on the SHARED monkeypatch the autouse fixture used."""
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    # ---- CHOKE 1: _warn_once ----------------------------------------
+
+    def test_class_a_kernel_error_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A degrade-set exception on a NON-unresolved kernel refuses."""
+        self._strict_on(monkeypatch)
+
+        def _raise(_crate: types.ModuleType) -> str:
+            raise RuntimeError("r")
+
+        with pytest.raises(rust_strict.RustFallbackRefused) as excinfo:
+            _route(_raise)
+        message = str(excinfo.value)
+        assert "brutex.nightly.nightly_rust" in message
+        assert "unit_kernel_error" in message
+
+    def test_class_a_kernel_error_serves_python_when_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SAME path with strict OFF degrades to the oracle value."""
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+        def _raise(_crate: types.ModuleType) -> str:
+            raise RuntimeError("r")
+
+        assert _route(_raise) == "PY"
+        assert nightly_rust.nightly_rust_disabled() is False
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(nightly_rust.NIGHTLY_RUST_ENV, "banana")
+        with pytest.raises(rust_strict.RustFallbackRefused, match="flag_unrecognised"):
+            nightly_rust.nightly_rust_enabled()
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wrong-shape Rust RESULT is a crate answer, never an input."""
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="unit_kernel_result_refused"):
+            _route(b"bytes")
+
+    # ---- CHOKE 2: _disable ------------------------------------------
+
+    def test_class_a_crate_unavailable_refuses_before_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The clear latch proves the refusal precedes the latch write."""
+        self._strict_on(monkeypatch)
+        monkeypatch.setitem(sys.modules, "brutex_ops", None)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="crate_unavailable"):
+            _route()
+        assert nightly_rust.nightly_rust_disabled() is False
+        assert nightly_rust._DISABLED_REASON[0] is None
+
+    def test_class_b_burn_in_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="burn_in_mismatch"):
+            _route("WRONG")
+        assert nightly_rust.nightly_rust_disabled() is False
+
+    def test_class_a_crate_panic_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An out-of-degrade-set exception takes the panic belt, which latches."""
+        self._strict_on(monkeypatch)
+
+        def _raise(_crate: types.ModuleType) -> str:
+            raise KeyError("out of set")
+
+        with pytest.raises(rust_strict.RustFallbackRefused, match="crate_panic"):
+            _route(_raise)
+        assert nightly_rust.nightly_rust_disabled() is False
+
+    # ---- the UNRESOLVED holding pen (reported, NOT refused) ---------
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            "summary_lines",
+            "parse_at",
+            "pmset_wake_command",
+            "seconds_since_scheduled_fire",
+        ],
+    )
+    def test_unresolved_kernel_errors_do_not_refuse(
+        self, monkeypatch: pytest.MonkeyPatch, kernel: str
+    ) -> None:
+        """The four ambiguous ``{kernel}_error`` tokens serve the oracle.
+
+        Their crate side raises both for a genuine fault AND for a
+        deliberate "python oracle decides" abstain on an out-of-domain
+        input, so refusing would crash a legitimate input. Held + reported,
+        never guessed.
+        """
+        self._strict_on(monkeypatch)
+
+        def _raise(_crate: types.ModuleType) -> str:
+            raise ValueError("outside the faithful mirror domain")
+
+        with capture_logs() as logs:
+            served = nightly_rust.route_kernel(
+                kernel,
+                crate_call=_raise,
+                python_call=lambda: "PY",
+                validate=nightly_rust.is_str,
+            )
+        assert served == "PY"
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert [entry["reason"] for entry in warns] == [f"{kernel}_error"]
+        assert nightly_rust.nightly_rust_disabled() is False
+
+    def test_unresolved_set_is_exactly_the_four_reported_tokens(self) -> None:
+        """Pin the holding pen so it can never silently grow into a loophole."""
+        assert (
+            frozenset(
+                {
+                    "summary_lines_error",
+                    "parse_at_error",
+                    "pmset_wake_command_error",
+                    "seconds_since_scheduled_fire_error",
+                }
+            )
+            == nightly_rust._STRICT_UNRESOLVED_REASONS
+        )
+        # And there is no CLASS-C exemption carve-out on this facade.
+        assert not hasattr(nightly_rust, "_STRICT_EXEMPT_REASONS")

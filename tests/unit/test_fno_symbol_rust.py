@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -134,6 +135,29 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
 def _english_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the locale probe to the English table (the engage-ready state)."""
     monkeypatch.setattr(fsr, "_live_month_table", lambda: fsr._ENGLISH_MONTHS)
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """Pin ``BRUTEX_RUST_STRICT=0`` — this FILE drives the degrade lattice.
+
+    Under DEC-RUST-STRICT-NO-FALLBACK-001 the shipped default is strict-ON, so
+    every CLASS-A/CLASS-B degrade this suite exercises (``crate_unavailable``,
+    ``crate_stale``, ``parse_error``, ``crate_panic``, ``result_refused``, the
+    burn-in mismatch autorevert) would RAISE instead of serving the oracle. The
+    mode is DECLARED here rather than by weakening a single assertion; the
+    strict-ON refusals of the SAME reasons — and the CLASS-C ``locale_unsupported``
+    exemption — are pinned in :class:`TestStrictRefusal` below.
+
+    Owns its OWN :class:`pytest.MonkeyPatch` context (never the shared
+    ``monkeypatch``) so its teardown cannot interleave with the per-test
+    ``delenv`` in :meth:`TestStrictRefusal._strict_on`.
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -888,3 +912,204 @@ class TestMutationWorkflowWiring:
         assert '"brutex/data/fno_symbol_rust.py:tests/unit/test_fno_symbol_rust.py:"' in text, (
             "fno_symbol_rust.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``
+    (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    Every OTHER test in this module runs with ``BRUTEX_RUST_STRICT=0``. These
+    DELETE the kill switch so strict mode takes its shipped default (ON) and
+    pin that the two choke points (:func:`fsr._warn_once` / :func:`fsr._disable`)
+    REFUSE the CLASS-A/CLASS-B reasons — and that the CLASS-C
+    ``locale_unsupported`` guard and the non-ASCII pre-gate still serve the
+    oracle, because refusing THERE would break a non-English box.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Iterator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
+        shared ``monkeypatch`` fixture: ``_strict_off_degrade_lattice`` sets
+        ``BRUTEX_RUST_STRICT=0`` in a *separate* context and pytest tears
+        fixtures down LIFO across fixture objects — a shared-``monkeypatch``
+        ``delenv`` here would record ``"0"`` as the value to restore and leak
+        the kill switch into every later test file in the process.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    # ── CLASS A — crate absent / stale / errored ────────────────────────────
+
+    def test_class_a_crate_absent_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+
+        def _import(name: str) -> object:
+            raise ImportError("No module named 'brutex_data'")
+
+        monkeypatch.setattr(fsr.importlib, "import_module", _import)
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+            _routed(FUT_SYM)
+
+    def test_class_a_refusal_precedes_the_latch_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal sits BEFORE ``_DISABLED_REASON[0] = reason``.
+
+        That makes the latched ``data_rust_disabled()`` early-return on the
+        routed dispatch structurally unreachable under strict mode — the
+        wiring is complete by construction, not by sampling.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+
+        def _import(name: str) -> object:
+            raise ImportError("No module named 'brutex_data'")
+
+        monkeypatch.setattr(fsr.importlib, "import_module", _import)
+        with self._strict_on(), pytest.raises(RustFallbackRefused):
+            _routed(FUT_SYM)
+        assert fsr.data_rust_disabled() is False
+        assert fsr._DISABLED_REASON[0] is None
+
+    def test_class_a_crate_stale_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, SimpleNamespace(__version__="0.0.1"))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="crate_stale"):
+            _routed(FUT_SYM)
+
+    def test_class_a_parse_error_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The crate RAN and raised a degrade-set fault."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+        _english_probe(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate(coords=ValueError("bad")))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="parse_error"):
+            _routed(FUT_SYM)
+
+    def test_class_a_crate_panic_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+        from polars.exceptions import PanicException
+
+        _flag_on(monkeypatch)
+        _english_probe(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate(coords=PanicException("kernel panicked")))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="crate_panic"):
+            _routed(FUT_SYM)
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A typo'd kill switch must be fatal, never a quiet OFF."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(fsr.DATA_RUST_ENV, "banana")
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="flag_unrecognised"):
+            fsr.data_rust_enabled()
+
+    # ── CLASS B — Rust ran, returned a structurally-refused RESULT ──────────
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A poison coords tuple is a crate BUG — never papered over."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+        _english_probe(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate(coords=(0, 3, 4, 9, 2025, 13, 30, 0, 0)))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="result_refused"):
+            _routed(FUT_SYM)
+
+    def test_class_b_burn_in_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The crate returned a well-shaped but WRONG answer."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+        _english_probe(monkeypatch)
+        # A structurally VALID tuple for FUT_SYM whose DAY disagrees (29≠30).
+        _install_crate(monkeypatch, _fake_crate(coords=(0, 3, 4, 9, 2025, 9, 29, 0, 0)))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="burn_in_mismatch"):
+            _routed(FUT_SYM)
+
+    # ── CLASS C — the INPUT was never the crate's to serve ─────────────────
+
+    def test_class_c_exempt_set_is_exactly_the_locale_guard(self) -> None:
+        assert frozenset({"locale_unsupported"}) == fsr._STRICT_EXEMPT_REASONS
+
+    @pytest.mark.parametrize("reason", sorted(fsr._STRICT_EXEMPT_REASONS))
+    def test_class_c_exempt_reason_never_refuses_at_either_choke_point(self, reason: str) -> None:
+        """Both choke points must let the exemption through under strict-ON.
+
+        ``locale_unsupported`` is emitted through ``_warn_once`` AND
+        ``_disable`` (the probe-raise arm and the non-English-table arm), so
+        both are pinned.
+        """
+        with self._strict_on():
+            fsr._warn_once(reason)
+            fsr._disable(reason)
+        assert fsr._DISABLED_REASON[0] == reason
+
+    def test_class_c_non_english_locale_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Trap #3 — refusing here would break a non-English box.
+
+        The fail-closed LOCALE guard routes to the oracle BY DESIGN: the
+        ``%b`` month table the crate bakes in is English, so on a Spanish box
+        the crate simply cannot answer and Python was ALWAYS the intended
+        handler. Widening the crate (a locale-aware month table) is the real
+        fix — a crash is not.
+        """
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, _fake_crate())
+        spanish = (
+            "ene", "feb", "mar", "abr", "may", "jun",
+            "jul", "ago", "sep", "oct", "nov", "dic",
+        )  # fmt: skip
+        monkeypatch.setattr(fsr, "_live_month_table", lambda: spanish)
+        with self._strict_on():
+            assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
+        assert fsr._DISABLED_REASON[0] == "locale_unsupported"
+
+    def test_class_c_non_ascii_pre_gate_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The non-ASCII pre-gate is silent BY CONSTRUCTION.
+
+        A non-ASCII symbol never reaches a choke point (no reason token is
+        minted at all — bomb-import spy), so it is CLASS C without needing an
+        exemption entry. Refusing would crash a symbol the oracle accepts.
+        """
+        _flag_on(monkeypatch)
+
+        def _bomb_import(name: str) -> object:
+            raise AssertionError("non-ASCII symbol reached the crate resolve")
+
+        monkeypatch.setattr(fsr.importlib, "import_module", _bomb_import)
+        sym = "NSE-NIFTY-30Sep٢٥-FUT"
+        with self._strict_on(), capture_logs() as logs:
+            result = _routed(sym)
+        assert result == _parse_fno_symbol_python(sym)
+        assert result is not None
+        assert logs == []
+
+    # ── The kill switch still works ────────────────────────────────────────
+
+    def test_strict_off_still_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        _flag_on(monkeypatch)
+        _install_crate(monkeypatch, SimpleNamespace(__version__="0.0.1"))
+        assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
+        assert fsr._DISABLED_REASON[0] == "crate_stale"

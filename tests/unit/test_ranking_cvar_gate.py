@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import ClassVar, NoReturn
 
@@ -38,6 +39,29 @@ from brutex.ranking.cvar_gate import (
     reset_cvar_rust_for_tests,
 )
 from structlog.testing import capture_logs
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """Pin ``BRUTEX_RUST_STRICT=0`` — this FILE drives the degrade lattice.
+
+    Under DEC-RUST-STRICT-NO-FALLBACK-001 the shipped default is strict-ON, so
+    every CLASS-A/CLASS-B degrade this suite exercises (``wheel_missing``,
+    ``wheel_stale``, ``kernel_result_refused``, the burn-in autorevert +
+    ``kernel_disabled``) would RAISE instead of serving the oracle triple. The
+    mode is DECLARED here rather than by weakening a single assertion; the
+    strict-ON refusals of the SAME reasons are pinned in
+    :class:`TestStrictRefusal` below.
+
+    Owns its OWN :class:`pytest.MonkeyPatch` context (never the shared
+    ``monkeypatch``) so its teardown cannot interleave with the per-test
+    ``delenv`` in :meth:`TestStrictRefusal._strict_on`.
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -494,3 +518,149 @@ class TestPackageSurface:
         # a ResultMetrics row; the CVaR verdict needs the per-trade P&L list
         # that never reaches it — the token must NOT join that vocabulary.
         assert GATE_CVAR_TAIL not in ranking.GATE_REASON_ORDER
+
+
+# ────── strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ──────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Every OTHER test in this module runs with ``BRUTEX_RUST_STRICT=0``. These
+    DELETE the kill switch so strict mode takes its shipped default (ON) and
+    pin that the choke points (``_warn_fallback_once`` / ``_disable_kernel``
+    / the inline ``kernel_result_refused`` gate) REFUSE instead of quietly
+    serving the Python oracle triple.
+    """
+
+    _PNLS: ClassVar[list[int]] = [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Iterator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
+        shared ``monkeypatch`` fixture: ``_strict_off_degrade_lattice`` sets
+        ``BRUTEX_RUST_STRICT=0`` in a *separate* context and pytest tears
+        fixtures down LIFO across fixture objects — a shared-``monkeypatch``
+        ``delenv`` here would record ``"0"`` as the value to restore and leak
+        the kill switch into every later test file in the process.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    # ── CLASS A — wheel absent / stale / flag junk ──────────────────────────
+
+    def test_class_a_wheel_missing_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", None)  # import raises
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="wheel_missing"):
+            cvar_tail_fold(self._PNLS, 500)
+
+    def test_class_a_wheel_stale_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", SimpleNamespace())
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="wheel_stale"):
+            cvar_tail_fold(self._PNLS, 500)
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A typo'd kill switch must be fatal, never a quiet OFF."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "banana")
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="flag_unrecognised"):
+            cvar_rust_enabled()
+
+    # ── CLASS B — Rust ran, returned a structurally-refused RESULT ──────────
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed kernel triple is a crate BUG — never papered over."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", _fake_wheel(lambda *_a, **_k: (1, 2)))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="kernel_result_refused"):
+            cvar_tail_fold(self._PNLS, 500)
+
+    def test_class_b_burn_in_mismatch_refuses_before_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The autorevert refuses BEFORE ``_KERNEL_DISABLED_REASON`` is set.
+
+        That is what makes the latched ``cvar_kernel_disabled()``
+        early-return structurally unreachable under strict mode — the wiring
+        is complete by construction, not by sampling.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        wrong = (5, -10, -100)  # valid shape for n=10, WRONG answer
+        monkeypatch.setitem(sys.modules, "fno_math", _fake_wheel(lambda *_a, **_k: wrong))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="self_check_mismatch"):
+            cvar_tail_fold(self._PNLS, 500)
+        assert cvar_kernel_disabled() is False
+
+    # ── CLASS C — the Rust arm still serves ────────────────────────────────
+
+    def test_class_c_flag_engine_unavailable_does_not_refuse(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The engine package is unimportable, so the flag CLASSIFIER is —
+        but the resolver then returns :data:`CVAR_RUST_DEFAULT` and the RUST
+        arm still serves. An advisory, not a fall-back: refusing here would
+        crash a call the crate is about to handle."""
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex.engine.sweep_lookahead", None)
+        with self._strict_on():
+            assert cvar_rust_enabled() is CVAR_RUST_DEFAULT
+
+    def test_class_c_exempt_set_is_exactly_the_advisory_token(self) -> None:
+        from brutex.ranking import cvar_gate
+
+        assert (
+            frozenset(  # pyright: ignore[reportPrivateUsage]
+                {"flag_engine_unavailable"}
+            )
+            == cvar_gate._STRICT_EXEMPT_REASONS
+        )
+
+    # ── The HELD (overloaded) token ────────────────────────────────────────
+
+    def test_unresolved_kernel_error_is_held_not_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``kernel_error`` is genuinely TWO classes at once (the crate's own
+        ``Err`` arms vs a PyO3 ``Vec<i64>`` extraction failure), so it is HELD
+        in ``_STRICT_UNRESOLVED_REASONS`` and NOT refused — guessing would
+        either crash a legal call or hide a genuine kernel refusal. Splitting
+        the token is the real fix (see the module constant's evidence)."""
+        from brutex.ranking import cvar_gate
+
+        assert frozenset({"kernel_error"}) == cvar_gate._STRICT_UNRESOLVED_REASONS  # pyright: ignore[reportPrivateUsage]
+
+        def _raises(*_a: object, **_k: object) -> NoReturn:
+            raise TypeError("Vec<i64> extraction failed")
+
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", _fake_wheel(_raises))
+        with self._strict_on():
+            assert cvar_tail_fold(self._PNLS, 500) == _cvar_tail_fold_python(self._PNLS, 500)
+
+    # ── The kill switch still works ────────────────────────────────────────
+
+    def test_strict_off_still_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        monkeypatch.setenv(CVAR_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "fno_math", None)
+        assert cvar_tail_fold(self._PNLS, 500) == _cvar_tail_fold_python(self._PNLS, 500)

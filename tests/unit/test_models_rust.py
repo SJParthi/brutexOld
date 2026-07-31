@@ -13,6 +13,7 @@ import math
 import sys
 import types
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from decimal import (
     ROUND_05UP,
     ROUND_CEILING,
@@ -38,6 +39,28 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 # ── Harness ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """Pin ``BRUTEX_RUST_STRICT=0`` — this FILE drives the degrade lattice.
+
+    Under DEC-RUST-STRICT-NO-FALLBACK-001 the shipped default is strict-ON, so
+    every CLASS-A/CLASS-B degrade this suite exercises (``crate_unavailable``,
+    ``crate_stale``, ``crate_panic``, the burn-in autorevert, the refuse-poison
+    latch) would RAISE instead of serving the oracle. The mode is DECLARED here
+    rather than by weakening a single assertion; the strict-ON refusals of the
+    SAME reasons are pinned in :class:`TestStrictRefusal` below.
+
+    Owns its OWN :class:`pytest.MonkeyPatch` context (never the shared
+    ``monkeypatch``) so its teardown cannot interleave with the per-test
+    ``delenv`` in :meth:`TestStrictRefusal._strict_on`.
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -844,3 +867,210 @@ class TestWorkflowWiring:
         assert "tests/unit/test_models_type_contract.py" in text, (
             "core-rust-parity.yml no longer runs the frozen type-contract battery"
         )
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ──────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Every OTHER test in this module runs with ``BRUTEX_RUST_STRICT=0``. These
+    DELETE the kill switch so strict mode takes its shipped default (ON) and
+    pin that the two choke points (:func:`models_rust._warn_once` and
+    :func:`models_rust._disable`) REFUSE instead of quietly serving the
+    Python oracle — and that the CLASS-C paths still serve it.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Iterator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
+        shared ``monkeypatch`` fixture: ``_strict_off_degrade_lattice`` sets
+        ``BRUTEX_RUST_STRICT=0`` in a *separate* context and pytest tears
+        fixtures down LIFO across fixture objects — a shared-``monkeypatch``
+        ``delenv`` here would record ``"0"`` as the value to restore and leak
+        the kill switch into every later test file in the process.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    # ── CLASS A — crate absent / stale / errored ────────────────────────────
+
+    def test_class_a_absent_wheel_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``crate_unavailable`` — an absent wheel is not a legitimate input."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _arm(monkeypatch, None)  # sys.modules[name] = None → ImportError
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+            _route(Decimal("0.05"))
+
+    def test_class_a_refusal_precedes_the_latch_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal sits BEFORE ``_DISABLED_REASON[0] = reason``.
+
+        That is what makes the latched ``models_rust_disabled()`` early-return
+        on the dispatch structurally unreachable under strict mode — the
+        wiring is complete by construction, not by sampling.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _arm(monkeypatch, None)
+        with self._strict_on(), pytest.raises(RustFallbackRefused):
+            _route(Decimal("0.05"))
+        assert models_rust.models_rust_disabled() is False
+        assert models_rust._DISABLED_REASON[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_class_a_stale_wheel_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``crate_stale`` — a wheel without the API member."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _arm(monkeypatch, types.ModuleType("brutex_core"))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="crate_stale"):
+            _route(Decimal("0.05"))
+
+    def test_class_a_kernel_error_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``<law>_error`` — the crate RAN and raised a non-refusal fault."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        def _boom(_kind: str, _payload: str) -> str:
+            raise ValueError("crate says no")  # no REFUSE_PREFIX ⇒ a fault
+
+        _arm(monkeypatch, _fake_crate(models_normalise_tick_size_str=_boom))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="_error"):
+            _route(Decimal("0.05"))
+
+    def test_class_a_crate_panic_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``crate_panic`` — the PyO3 belt caught a panic (the ``_disable`` arm)."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        fake = types.ModuleType("pyo3_runtime")
+
+        class PanicException(BaseException):
+            pass
+
+        fake.PanicException = PanicException  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", fake)
+
+        def _panic(_kind: str, _payload: str) -> str:
+            raise PanicException("boom")
+
+        _arm(monkeypatch, _fake_crate(models_normalise_tick_size_str=_panic))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="crate_panic"):
+            _route(Decimal("0.05"))
+
+    # ── CLASS B — Rust ran, returned a structurally-refused RESULT ──────────
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``<law>_result_refused`` — a non-member string is a crate BUG."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _arm(monkeypatch, _fake_crate(models_normalise_tick_size_str=lambda *_: "0.07"))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="result_refused"):
+            _route(Decimal("0.05"))
+
+    def test_class_b_burn_in_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``burn_in_mismatch_<law>`` — the crate disagreed with the oracle."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        # A MEMBER string (passes refuse-poison) that is the WRONG answer.
+        _arm(monkeypatch, _fake_crate(models_normalise_tick_size_str=lambda *_: "0.10"))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="burn_in_mismatch"):
+            _route(Decimal("0.05"))
+
+    # ── CLASS C — the input was never the crate's to serve ─────────────────
+
+    def test_exempt_set_is_deliberately_empty(self) -> None:
+        """No reason token in this facade is CLASS C.
+
+        Both CLASS-C paths here are STRUCTURALLY SILENT — they reach the
+        oracle by returning early, never through a choke point — so the
+        exemption set is empty BY CONSTRUCTION, not by omission. The two
+        tests below pin that structure end-to-end.
+        """
+        assert frozenset() == models_rust._STRICT_EXEMPT_REASONS  # pyright: ignore[reportPrivateUsage]
+
+    def test_exemption_mechanism_works_when_a_token_is_added(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The empty set is a VALUE, not a missing feature.
+
+        ``_refuse_if_strict`` still carries the exemption gate so the moment a
+        genuine CLASS-C token is discovered here it can be added as data
+        alone. Pinned by injecting one: the gate must return silently for the
+        exempt reason while a non-exempt sibling still refuses.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setattr(models_rust, "_STRICT_EXEMPT_REASONS", frozenset({"future_class_c"}))
+        with self._strict_on():
+            models_rust._refuse_if_strict("future_class_c")  # pyright: ignore[reportPrivateUsage]
+            with pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+                models_rust._refuse_if_strict("crate_unavailable")  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            " 0.05 ",  # whitespace str — Decimal() accepts, the crate grammar not
+            "5e-2",  # exponent form
+            Decimal("1E+30"),  # adjusted > 6
+            Decimal("1E-31"),  # exponent < -30
+            10**9,  # int magnitude bound
+            1e16,  # str(float) → "1e+16" — not fixed-point
+            True,  # bool — the oracle owns the trap
+        ],
+    )
+    def test_class_c_ineligible_input_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch, raw: float | int | Decimal | str
+    ) -> None:
+        """The eligibility gate (``_encode_tick_input`` → ``None``) is silent.
+
+        The input is outside the crate's envelope, so the Python arm was
+        ALWAYS the intended handler: no choke point fires and the crate is
+        never touched (bomb spy). Refusing here would crash a legal call —
+        the outcome must be the ORACLE's, byte-for-byte, under strict-ON.
+        """
+        _arm(monkeypatch, _bomb_crate())
+        try:
+            expected: object = models._normalise_tick_size_python(raw)  # pyright: ignore[reportPrivateUsage]
+        except Exception as exc:
+            expected = type(exc)
+        with self._strict_on():
+            try:
+                actual: object = _route(raw)
+            except Exception as exc:
+                actual = type(exc)
+        assert actual == expected
+        assert models_rust.models_rust_disabled() is False
+
+    def test_class_c_law_refusal_serves_the_oracle_raise_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crate LAW refusal (``tick_refuse:``) is the OUTCOME, not a fault.
+
+        ``adopted is None`` re-raises the oracle's exact typed error — no
+        choke point fires, so strict mode must not convert a legitimate
+        refusal into a :class:`RustFallbackRefused`.
+        """
+        models_rust.reset_models_rust_for_tests(remaining=0)  # past burn-in
+        _arm(monkeypatch, _fake_crate())  # the law-faithful default
+        with self._strict_on(), pytest.raises(models.TickSizeFormatError):
+            _route("0.07")
+
+    # ── The kill switch still works ────────────────────────────────────────
+
+    def test_strict_off_still_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        _arm(monkeypatch, None)
+        assert _route(Decimal("0.05")) == Decimal("0.05")
+        assert models_rust._DISABLED_REASON[0] == "crate_unavailable"  # pyright: ignore[reportPrivateUsage]

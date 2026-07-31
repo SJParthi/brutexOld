@@ -61,6 +61,7 @@ from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
+
 @pytest.fixture(autouse=True)
 def _strict_off_degrade_lattice() -> Iterator[None]:
     """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
@@ -2441,8 +2442,9 @@ class TestStrictRefusal:
             """A kernel object lacking the counted twin (stale-wheel shape)."""
 
         sim._rust = _NoCounts()
-        with self._strict_on(), pytest.raises(
-            RustFallbackRefused, match="wheel_missing_exit_counts"
+        with (
+            self._strict_on(),
+            pytest.raises(RustFallbackRefused, match="wheel_missing_exit_counts"),
         ):
             sim.simulate_masks([0b1], direction=Side.BUY, stop_loss_paisa=300)
 
