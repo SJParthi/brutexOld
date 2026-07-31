@@ -75,6 +75,19 @@ from brutex.observability.rust_census import (
 #: under ADR-0026, where enrolling a facade means CLASSIFYING it (posture
 #: B REQUIRED, posture C MUST-STAY, or promotable), which is a decision
 #: that deserves a diff and a reviewer rather than silent absorption.
+#:
+#: 39 -> 42 when discovery gained its second and third signals. Every one of
+#: the three is a live Rust seam the census could not previously see, and
+#: each was invisible for a different reason:
+#:
+#: * ``brutex.exec_rust`` — spells its flag ``ENV_FLAG``, not ``*_ENV``, so a
+#:   NAME-based scan missed it. Value-based matching finds it.
+#: * ``brutex.data.lake_keys_rust`` — shares ``BRUTEX_DATA_RUST`` with
+#:   ``data/fno_symbol_rust``, so it owns no local flag constant. Found via
+#:   its crate import plus its ``lake_keys_rust.fallback`` announcement.
+#: * ``brutex.engine.rust_parity_core`` — the shared burn-in helper other
+#:   facades call. Genuinely flag-free, but it imports ``fno_math`` and
+#:   degrades, so its silence is worth watching.
 _EXPECTED_FACADES: Final[tuple[str, ...]] = (
     "brutex.backup.backup_rust",
     "brutex.calendars.calendar_rust",
@@ -86,6 +99,7 @@ _EXPECTED_FACADES: Final[tuple[str, ...]] = (
     "brutex.data.detectors_rust",
     "brutex.data.fno_symbol_rust",
     "brutex.data.greeks_enrich",
+    "brutex.data.lake_keys_rust",
     "brutex.data.lake_rust_locks",
     "brutex.data.lake_rust_merge",
     "brutex.data.lake_rust_render",
@@ -97,10 +111,12 @@ _EXPECTED_FACADES: Final[tuple[str, ...]] = (
     "brutex.engine.refine_rust",
     "brutex.engine.rust_enum",
     "brutex.engine.rust_metrics",
+    "brutex.engine.rust_parity_core",
     "brutex.engine.rust_rank_select",
     "brutex.engine.rust_stage1a",
     "brutex.engine.rust_trade_sim",
     "brutex.engine.sweep_ops_rust",
+    "brutex.exec_rust",
     "brutex.feed_rust",
     "brutex.meta.meta_rust",
     "brutex.metrics.compute_rust",
@@ -153,6 +169,55 @@ class TestDiscovery:
             "Add them to _EXPECTED_FACADES and give each an ADR-0026 posture "
             "(B REQUIRED / C MUST-STAY / promotable) in the same change."
         )
+
+    def test_reports_a_value_named_flag_rather_than_no_flag(self) -> None:
+        """``exec_rust`` spells its flag ``ENV_FLAG``, not ``*_ENV``.
+
+        A NAME-based scan for ``*_ENV`` leaves ``env_var`` at ``None``, which
+        sends the row down the flag-free branch and prints "no flag
+        (unconditionally attempted)" for a seam that has a perfectly good
+        ``BRUTEX_EXEC_RUST`` kill switch. That is not a cosmetic slip: it
+        tells an operator no switch exists, so nobody looks for the one that
+        is silently off.
+        """
+        rows = {row.module: row for row in census(["brutex.exec_rust"])}
+        assert rows["brutex.exec_rust"].env_var == "BRUTEX_EXEC_RUST"
+        assert "no flag" not in rows["brutex.exec_rust"].detail
+
+    def test_discovers_a_value_named_flag_with_no_other_signal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The value-based env signal, isolated from the other two.
+
+        In the live tree every value-named facade also announces its
+        fall-backs, so the degrade signal alone would find them and this
+        branch reads as redundant. It is not: a facade may be added tomorrow
+        that carries a real kill switch, a real predicate, and no degrade
+        announcement at all -- exactly the seam whose silence is least
+        visible. Pinning it against a synthetic package proves the signal
+        works on its own merits rather than riding a neighbour's.
+        """
+        pkg = tmp_path / "synthfacades"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        # Name carries "rust" so it clears the cheap pre-filter; the flag is
+        # spelled by VALUE only, and there is deliberately no degrade marker
+        # and no refusal class to fall back on.
+        (pkg / "valueflag_rust.py").write_text(
+            textwrap.dedent(
+                """
+                ENV_FLAG = "BRUTEX_SYNTHETIC_VALUE_FLAG"
+
+
+                def valueflag_enabled() -> bool:
+                    return False
+                """
+            ).strip()
+            + "\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setattr("brutex.observability.rust_census._PACKAGE", "synthfacades")
+        assert discover_facades() == ["synthfacades.valueflag_rust"]
 
     def test_finds_facades_whose_name_carries_no_rust_hint(self) -> None:
         """The §D9.1 regression: real flags under names the filter missed.
@@ -366,6 +431,29 @@ class TestRequiredSeam:
         """
         assert _is_required_seam(f"{conditional}\n") is False
 
+    def test_a_docstring_mention_does_not_promote(self) -> None:
+        """The measured regression the ``ast`` rewrite exists to close.
+
+        ``engine/rust_trade_sim`` names ``HolidayDataUnavailableError`` in
+        three docstrings and raises no refusal class anywhere. A text scan
+        promoted it to REQUIRED — the tier whose whole meaning is
+        "completion proves Rust ran" — for the one hot-path seam that
+        provably CAN serve Python silently. String content is not an
+        expression node, so walking ``ast.Raise`` cannot be fooled by prose.
+        """
+        source = '"""Docs mentioning HolidayDataUnavailableError in prose."""\nx = 1\n'
+        assert _is_required_seam(source) is False
+
+    def test_unparseable_source_is_not_promoted(self) -> None:
+        """An unparseable facade is never given the gold-standard tier.
+
+        ``ast.parse`` raising is a fact about the module, not a licence to
+        assume the strongest posture. Falling back to the text scan here
+        would reopen the docstring hole above for exactly the modules the
+        census understands least.
+        """
+        assert _is_required_seam("def broken(:\n    raise FooUnavailableError()\n") is False
+
 
 class TestSourceOf:
     """Source reading must degrade, never abort the census."""
@@ -388,6 +476,57 @@ class TestClassify:
             env_var=None, flag_on=None, crate="brutex_feed", crate_present=True, required_seam=True
         )
         assert verdict == REQUIRED
+
+    def test_flagless_seam_with_missing_crate_is_degraded(self) -> None:
+        """The shape ``rust_trade_sim`` takes on a box with no wheel.
+
+        A flag-free seam has no kill switch to blame, so an absent crate is
+        the whole story: Rust never ran and nothing chose that. This is the
+        verdict the census exists to surface, and it is only reachable for
+        facades discovered by the degrade-announcement signal.
+        """
+        verdict, detail = _classify(
+            env_var=None,
+            flag_on=None,
+            crate="fno_math",
+            crate_present=False,
+            required_seam=False,
+        )
+        assert verdict == DEGRADED
+        assert "no flag (unconditionally attempted)" in detail
+        assert "SILENTLY" in detail
+
+    def test_sibling_held_flag_off_is_off_not_degraded(self) -> None:
+        """A shared flag resolved OFF is a CHOICE, never an alarm.
+
+        ``data/lake_keys_rust`` shares ``BRUTEX_DATA_RUST`` with
+        ``data/fno_symbol_rust``, so it exposes a working ``*_enabled()``
+        predicate but no local flag constant. An earlier cut sent that shape
+        down the flag-free branch and reported DEGRADED whenever the shared
+        flag was off — turning a deliberate operator decision into a
+        false-positive that fails the strict gate.
+        """
+        verdict, detail = _classify(
+            env_var=None,
+            flag_on=False,
+            crate="brutex_data",
+            crate_present=True,
+            required_seam=False,
+        )
+        assert verdict == OFF
+        assert "sibling module" in detail
+        assert "no flag" not in detail
+
+    def test_sibling_held_flag_on_with_crate_is_engaged(self) -> None:
+        verdict, detail = _classify(
+            env_var=None,
+            flag_on=True,
+            crate="brutex_data",
+            crate_present=True,
+            required_seam=False,
+        )
+        assert verdict == ENGAGED
+        assert "sibling module" in detail
 
     def test_flag_off_is_off_regardless_of_crate(self) -> None:
         verdict, _ = _classify(

@@ -87,6 +87,7 @@ WHAT THIS DOES NOT DO (stated so the guarantee is not oversold).
 
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import inspect
@@ -177,6 +178,54 @@ _RUST_ENV_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     re.MULTILINE,
 )
 
+#: A facade's env flag recognised by its VALUE, not by its constant's name.
+#: The house convention names the constant ``<NAME>_ENV``, but two live
+#: seams do not follow it — ``brutex/exec_rust.py`` spells it ``ENV_FLAG``
+#: and ``brutex/dashboard/rust_front.py`` spells it ``ENV_RUST_FRONT``. Both
+#: hold a real ``BRUTEX_*`` kill switch; both were invisible to a name-only
+#: test, so a degrade from either went unwatched while the census read clean.
+#:
+#: Matching the VALUE is the narrower test, not the looser one: every env var
+#: this repo owns is namespaced ``BRUTEX_``, and the discovery gate still
+#: demands the ``*_enabled()`` half alongside it, so a module that merely
+#: mentions a neighbour's flag name in a string never qualifies.
+_BRUTEX_ENV_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"BRUTEX_[A-Z0-9_]+")
+
+#: The fall-back ANNOUNCEMENT — the third discovery signal, and the one that
+#: makes the census independent of how a facade spells its choke point.
+#:
+#: It exists for a specific hole. ``engine/rust_trade_sim`` runs per-mask on
+#: the sweep hot path, carries NO env flag at all, and raises no refusal
+#: class — so neither the signature test nor the required-seam test can see
+#: it. It was in the census only by accident, via a false REQUIRED promotion
+#: that the ``ast`` rewrite of :func:`_is_required_seam` correctly removed.
+#: Without a third signal, fixing one hole opened a larger one.
+#:
+#: TWO shapes, because the repo genuinely has two and matching only the first
+#: is what left ``rust_trade_sim`` invisible:
+#:
+#: * a named helper CALL — ``warn_fallback_once`` (76 sites),
+#:   ``warn_fallback`` (9), ``_log_fallback`` (8), ``note_degrade`` (5),
+#:   ``warn_stored_stale_fallback`` (3);
+#: * an INLINE ``structlog`` event whose NAME ends ``.fallback`` /
+#:   ``.autoreverted`` / ``.degraded`` — ``rust_trade_sim`` emits
+#:   ``"rust_trade_sim.fallback"`` directly, with no helper in between.
+#:
+#: The event-name half is the more principled of the two: it matches the
+#: ANNOUNCEMENT rather than one particular helper's identifier, so a facade
+#: that invents a new helper tomorrow is still discovered as long as it obeys
+#: the house event-naming law. It is the exact mirror of
+#: :data:`_ENGAGED_LITERAL_RE`, which scans for the ``.engaged`` counterpart.
+#:
+#: Requiring a call paren / a quoted literal (never the bare identifier) means
+#: an ``import`` of a helper, or prose naming an event in a docstring, does
+#: not enrol a module that never actually degrades.
+_DEGRADE_MARKER_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:warn_stored_stale_fallback|warn_fallback_once|warn_fallback"
+    r"|_log_fallback|note_degrade)\s*\("
+    r"""|["'][a-z_0-9.]+\.(?:fallback|autoreverted|degraded)["']"""
+)
+
 #: Package root scanned for facades.
 _PACKAGE: Final[str] = "brutex"
 
@@ -245,20 +294,65 @@ def _declares_rust_env(name: str) -> bool:
     return _RUST_ENV_MARKER_RE.search(source) is not None
 
 
+def _raises_required_class(source: str) -> bool:
+    """Whether *source* RAISES a retired-axis refusal class (AST, not text).
+
+    A text scan cannot tell a ``raise FooUnavailableError(...)`` from a
+    docstring that merely *names* it — and that is not hypothetical: the
+    earlier ``re.search`` over raw source promoted
+    :mod:`brutex.engine.rust_trade_sim` to ``REQUIRED`` purely because three
+    of its docstrings mention ``HolidayDataUnavailableError``. That module
+    raises no refusal class at all and does carry degrade tokens, so the
+    census reported the one hot-path seam that CAN silently serve Python as
+    the gold-standard "cannot degrade" tier — a false guarantee in exactly
+    the direction this census exists to catch.
+
+    Walking ``ast.Raise`` nodes fixes it structurally: string content is not
+    an expression node, so no amount of docstring prose can match. Both the
+    bare (``raise Foo``) and called (``raise Foo(...)``) forms are handled;
+    a dotted ``raise mod.FooUnavailableError`` matches on its attribute name.
+
+    A syntactically-invalid module returns ``False`` — an unparseable facade
+    is never promoted to the tier whose whole meaning is "completion proves
+    Rust ran".
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        exc = node.exc
+        if isinstance(exc, ast.Call):
+            exc = exc.func
+        name = (
+            exc.id
+            if isinstance(exc, ast.Name)
+            else exc.attr
+            if isinstance(exc, ast.Attribute)
+            else None
+        )
+        if name is not None and _REQUIRED_CLASS_RE.fullmatch(name) is not None:
+            return True
+    return False
+
+
 def _is_required_seam(source: str) -> bool:
     """Report whether a facade REFUSES rather than degrades on a bad wheel.
 
     Two independent signals, either sufficient: an explicit ``require_*``
-    helper call, or a refusal class named by the retired-axis convention
-    (see :data:`_REQUIRED_CLASS_RE`). The distinction is load-bearing —
-    a required seam that cannot find its crate raises, so "the run
-    completed" is itself proof the Rust path executed. A degrading seam
-    offers no such proof, which is exactly the gap this census exists to
-    surface.
+    helper call, or a refusal class actually RAISED (see
+    :func:`_raises_required_class` — an AST check, deliberately not a text
+    scan). The distinction is load-bearing — a required seam that cannot find
+    its crate raises, so "the run completed" is itself proof the Rust path
+    executed. A degrading seam offers no such proof, which is exactly the gap
+    this census exists to surface, so a false promotion here is worse than no
+    census at all.
     """
     if any(marker in source for marker in _REQUIRED_SEAM_MARKERS):
         return True
-    return _REQUIRED_CLASS_RE.search(source) is not None
+    return _raises_required_class(source)
 
 
 def _crate_names() -> frozenset[str]:
@@ -488,24 +582,82 @@ def _classify(
         )
     if crate is None:
         return UNKNOWN, "no crate import found in source — facade shape may have changed"
+    if env_var is None and flag_on is None:
+        # GENUINELY FLAG-FREE: no kill switch exists, so the Rust arm is
+        # unconditionally attempted and the only question is whether the crate
+        # is there. ``engine/rust_trade_sim`` is the live case — per-mask on
+        # the sweep hot path, no env flag, and warn-once degrade tokens
+        # (``wheel_missing``, ``*_kernel_stale``) that hand the call to
+        # Python. It was previously visible ONLY through a false REQUIRED
+        # promotion off a docstring mention; once that was fixed it vanished
+        # from the census entirely — strictly worse, an unwatched hot-path
+        # seam reported as nothing at all.
+        #
+        # Note the AND: a facade with no flag CONSTANT but a resolvable
+        # PREDICATE is not flag-free, it merely keeps the constant in a
+        # sibling module, and it falls through to the ordinary flag logic
+        # below. Routing it here instead reported ``lake_keys_rust`` as
+        # DEGRADED whenever its shared ``BRUTEX_DATA_RUST`` was off — turning
+        # a deliberate operator choice into an alarm.
+        if crate_present:
+            return ENGAGED, f"no flag (unconditionally attempted) and {crate} importable"
+        return (
+            DEGRADED,
+            f"no flag (unconditionally attempted) but {crate} is NOT importable — "
+            "Python runs SILENTLY",
+        )
     if flag_on is None:
         return UNKNOWN, "flag state could not be resolved"
+    # ``env_var`` may still be None here — the flag resolved through a
+    # predicate whose constant lives elsewhere (``data/lake_keys_rust`` shares
+    # ``BRUTEX_DATA_RUST``; ``engine/rust_parity_core`` calls an imported
+    # ``env_flag_enabled``). Name the shape rather than claiming "no flag",
+    # which would invite someone to "fix" a kill switch that already exists.
+    label = env_var if env_var is not None else "the flag (held in a sibling module)"
     if not flag_on:
-        return OFF, f"{env_var} resolves falsy — Python oracle runs by choice"
+        return OFF, f"{label} resolves falsy — Python oracle runs by choice"
     if crate_present:
-        return ENGAGED, f"{env_var} on and {crate} importable"
-    return DEGRADED, f"{env_var} is ON but {crate} is NOT importable — Python runs SILENTLY"
+        return ENGAGED, f"{label} on and {crate} importable"
+    return DEGRADED, f"{label} is ON but {crate} is NOT importable — Python runs SILENTLY"
 
 
 def discover_facades() -> list[str]:
     """Return every module exposing the house Rust-facade signature.
 
-    Structural discovery: a module qualifies when it exports a
-    ``<NAME>_ENV`` string AND a ``<name>_enabled()`` callable, or when it
-    carries a wheel-REQUIRED marker. Import failures are skipped rather
-    than raised so one broken optional module cannot blind the whole
-    census (the skip is visible as an absent row, and the count pins in
-    the tests catch a collapse).
+    Structural discovery on THREE independent signals, any one sufficient:
+
+    1. **flag + predicate** — the module exposes a ``BRUTEX_*`` env-var
+       VALUE (:data:`_BRUTEX_ENV_VALUE_RE`) *and* a ``<name>_enabled()``
+       callable. Both halves are required: the constant alone appears in
+       consumers that merely reference a neighbour's flag, the predicate
+       alone in wheel-REQUIRED seams that carry no flag.
+    2. **wheel-REQUIRED marker** — a ``require_*`` helper or a refusal class
+       actually RAISED (:func:`_is_required_seam`).
+    3. **flag-free degrading seam** — it imports a crate *and* announces its
+       fall-backs (:data:`_DEGRADE_MARKER_RE`).
+
+    Signal 3 is not decoration. ``engine/rust_trade_sim`` runs per-mask on
+    the sweep hot path and satisfies neither of the first two — no flag, no
+    refusal class. It appeared in the census only through a false REQUIRED
+    promotion, and once that bug was fixed it vanished entirely. A seam that
+    can silently serve Python on the hottest path in the product is exactly
+    the one the census must not lose.
+
+    DISCLOSED EXCLUSION: ``dashboard/rust_front`` owns two real ``BRUTEX_*``
+    flags but is a SUBPROCESS seam — it spawns the ``brutexd`` binary rather
+    than importing a PyO3 wheel. It has no ``*_enabled()`` predicate and no
+    crate, so ``importlib.util.find_spec`` — the census's whole
+    "did Rust actually arrive" test — has nothing to ask about it. Admitting
+    it would mean reporting ``crate=None`` for a seam that genuinely has no
+    crate, which reads as a defect rather than a fact. Covering it needs a
+    binary-presence probe, i.e. a feature; it is recorded in
+    ADR-0026 §D9.3's invisible-seam list rather than faked here. It is off
+    the sweep path (it serves ``/static/*`` and ``/health``), so this costs
+    the sweep guarantee nothing.
+
+    Import failures are skipped rather than raised so one broken optional
+    module cannot blind the whole census (the skip is visible as an absent
+    row, and the count pins in the tests catch a collapse).
 
     A CANDIDATE PRE-FILTER RUNS FIRST, and it is part of the contract
     rather than an implementation detail — stated here because omitting it
@@ -559,9 +711,17 @@ def discover_facades() -> list[str]:
             module = importlib.import_module(name)
         except Exception:  # noqa: S112 - a broken optional module must not blind the census
             continue
+        # The env signal is VALUE-based, not name-based. A name test on
+        # ``*_ENV`` misses a real facade that spells its constant otherwise:
+        # ``brutex/exec_rust.py`` declares ``ENV_FLAG: Final[str] =
+        # "BRUTEX_EXEC_RUST"`` and ``brutex/dashboard/rust_front.py`` uses
+        # ``ENV_RUST_FRONT``. Both are live flag-gated Rust seams with real
+        # kill switches, and both were dropped with NO diagnostic — so a
+        # degrade from either was unwatched while the census reported clean.
         has_env = any(
-            attr.endswith(_ENV_SUFFIX) and isinstance(getattr(module, attr, None), str)
+            _BRUTEX_ENV_VALUE_RE.fullmatch(value)
             for attr in dir(module)
+            if isinstance(value := getattr(module, attr, None), str)
         )
         has_enabled = any(
             attr.endswith(_ENABLED_SUFFIX) and callable(getattr(module, attr, None))
@@ -569,7 +729,16 @@ def discover_facades() -> list[str]:
         )
         source = _source_of(module)
         required_seam = _is_required_seam(source)
-        if (has_env and has_enabled) or required_seam:
+        # Third signal: a FLAG-FREE degrading seam — no kill switch, but it
+        # imports a crate and announces its fall-backs. ``rust_trade_sim`` is
+        # the live case (per-mask on the sweep hot path). Without this it is
+        # invisible: it has no flag to find and, since the AST fix, no false
+        # REQUIRED promotion to ride in on either.
+        degrading_seam = (
+            _DEGRADE_MARKER_RE.search(source) is not None
+            and _crate_for_source(source, _crate_names()) is not None
+        )
+        if (has_env and has_enabled) or required_seam or degrading_seam:
             found.append(name)
     return sorted(found)
 
@@ -596,13 +765,23 @@ def census(modules: list[str] | None = None) -> list[FacadeStatus]:
             )
             continue
 
+        # VALUE-based, matching :func:`discover_facades`. A name-only scan for
+        # ``*_ENV`` finds the flag in most facades but not in ``exec_rust``
+        # (``ENV_FLAG``) or ``rust_front`` (``ENV_RUST_FRONT``) — and once
+        # discovery admits those two, a ``None`` here would send them down the
+        # ``_classify`` no-flag branch and report them as unconditionally
+        # attempted when in fact they each hold a live kill switch. The two
+        # scans must therefore agree, so they share one regex.
+        #
+        # ``sorted(dir(...))`` keeps the pick deterministic when a module owns
+        # several flags; the resolved-predicate loop below is the part that
+        # speaks for ALL of them.
         env_var: str | None = None
         for attr in sorted(dir(module)):
-            if attr.endswith(_ENV_SUFFIX):
-                value = getattr(module, attr, None)
-                if isinstance(value, str) and value.startswith("BRUTEX_"):
-                    env_var = value
-                    break
+            value = getattr(module, attr, None)
+            if isinstance(value, str) and _BRUTEX_ENV_VALUE_RE.fullmatch(value):
+                env_var = value
+                break
 
         # Resolve EVERY zero-arg ``*_enabled`` predicate and AND them, rather
         # than taking the first alphabetically. Three reasons, each hit in
