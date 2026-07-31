@@ -14,6 +14,7 @@ import types
 from typing import TYPE_CHECKING
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.nightly import nightly_rust
 from brutex.nightly.chain import (
     LinkOutcome,
@@ -206,6 +207,19 @@ class TestFlagOnParity:
 
 
 class TestFlagOnRefuseAndDegrade:
+    """The legacy warn-and-degrade arms, pinned under the kill switch.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON, so every arm in
+    this class would now raise instead of degrading. The degrade law is
+    still the behaviour ``BRUTEX_RUST_STRICT=0`` restores, so it is pinned
+    here with the switch explicitly off; :class:`TestStrictRefusesTheSameArms`
+    pins that the *same* three arms refuse when it is not.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
     def test_poisoned_summary_shape_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(
             monkeypatch,
@@ -235,3 +249,62 @@ class TestFlagOnRefuseAndDegrade:
             assert summary_lines(_FULL_OK) == _summary_lines_python(_FULL_OK)
         assert nightly_rust.nightly_rust_disabled() is True
         assert any(entry["event"] == "nightly_rust.kernel_autoreverted" for entry in logs)
+
+
+class TestStrictRefusesTheSameArms:
+    """Strict mode (the shipped default) turns each degrade above into a raise.
+
+    Same three fake-crate poisonings, no kill switch — each must raise
+    :class:`RustFallbackRefused` naming the facade and the one way back.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+
+    @staticmethod
+    def _assert_names_facade_and_switch(excinfo: pytest.ExceptionInfo[RustFallbackRefused]) -> None:
+        text = str(excinfo.value)
+        assert "brutex.nightly.nightly_rust" in text
+        assert f"{RUST_STRICT_ENV}=0" in text
+
+    def test_poisoned_summary_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_summary_lines=lambda *args: ["lines", "OK"]),
+        )
+        with pytest.raises(RustFallbackRefused, match="summary_lines_result_refused") as excinfo:
+            summary_lines(_FULL_OK)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_crate_fault_still_degrades_because_the_token_is_held(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``summary_lines_error`` is one of the six HELD-UNRESOLVED tokens.
+
+        It is *not* classified Class C (a legitimate Python-owned input) — it
+        is held out of the refusal set because the crate lumps a genuine
+        crate fault together with an out-of-envelope argument under one
+        token, so refusing it would crash on inputs Python was always meant
+        to serve. Splitting it crate-side is the named follow-up. Until then
+        this arm degrades even under strict, and that is pinned here so the
+        hold is visible rather than assumed.
+        """
+
+        def _boom(*args: object) -> tuple[list[str], str]:
+            raise TypeError("junk count value")
+
+        _flag_on(monkeypatch, build_fake_crate(nightly_summary_lines=_boom))
+        with capture_logs() as logs:
+            assert summary_lines(_FULL_OK) == _summary_lines_python(_FULL_OK)
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert warns and warns[0]["reason"] == "summary_lines_error"
+
+    def test_wrong_lines_refuse_at_the_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_summary_lines=lambda *args: (["wrong"], "OK")),
+        )
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch") as excinfo:
+            summary_lines(_FULL_OK)
+        self._assert_names_facade_and_switch(excinfo)
