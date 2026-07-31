@@ -116,6 +116,16 @@ DEGRADED: Final[str] = "DEGRADED"
 #:   (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a complexity degrade, which is
 #:   exactly as worth knowing as a language one.
 #: * ``degrad`` — ``degraded``.
+#: * ``unavail`` — ``kernel_unavailable``. The wheel or the symbol was not
+#:   importable, so the oracle served. Added with
+#:   DEC-RUST-STRICT-ALPHA-METRIC-001 when ``engine/alpha_metric`` was
+#:   enrolled; the blast radius was MEASURED before adding, not assumed —
+#:   over all 172 events on all facade namespaces exactly ONE was newly
+#:   classified, the alpha one this exists for. Every other ``*_unavailable``
+#:   in ``brutex/`` (``crossverify.regate_gate_unavailable``,
+#:   ``acceptance.singleflight_unavailable``, ``power.keepawake.unavailable``
+#:   and the rest) lives outside a facade namespace, so the namespace gate —
+#:   not this stem — keeps them out.
 #:
 #: Completeness is not asserted here; it is PROVEN on every CI run by the
 #: exhaustive classification pin in ``tests/unit/test_rust_sentinel.py``,
@@ -131,6 +141,7 @@ DEGRADE_STEMS: Final[tuple[str, ...]] = (
     "refused",
     "uncertified",
     "degrad",
+    "unavail",
 )
 
 #: Events that carry a degrade STEM inside a Rust namespace and are still

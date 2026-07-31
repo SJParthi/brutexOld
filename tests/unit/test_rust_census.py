@@ -114,6 +114,15 @@ _EXPECTED_FACADES: Final[tuple[str, ...]] = (
     "brutex.data.lake_rust_stats",
     "brutex.data.lake_rust_waved",
     "brutex.data.window_ledger_rust",
+    # 44 -> 45. Invisible to all four signals until it was wired: it owns no
+    # Rust flag at all (its two ``BRUTEX_ALPHA_GATE`` switches govern the
+    # DEC-ALPHA-BUYHOLD-METRIC-001 ranking gate, not the kernel), and it had
+    # no refusal class. Enrolling it under DEC-RUST-STRICT-NO-FALLBACK-001
+    # made the strict-enrolment signal see it; the ``RUST_CENSUS_NON_RUST_FLAGS``
+    # declaration it now carries keeps the business gate out of the census's
+    # flag attribution, so it classifies ENGAGED (flag-free) rather than a
+    # false OFF driven by an unrelated ranking switch.
+    "brutex.engine.alpha_metric",
     "brutex.engine.refine_rust",
     # The find that motivated the strict-enrolment signal. No flag, no
     # refusal class, and — until DEC-RUST-STRICT-NO-FALLBACK-001 — a

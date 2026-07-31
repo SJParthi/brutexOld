@@ -195,6 +195,57 @@ _RUST_ENV_MARKER_RE: Final[re.Pattern[str]] = re.compile(
 #: mentions a neighbour's flag name in a string never qualifies.
 _BRUTEX_ENV_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"BRUTEX_[A-Z0-9_]+")
 
+#: The attribute a facade uses to DISOWN a switch the two heuristics above
+#: would otherwise read as its Rust flag.
+#:
+#: Both heuristics are shape tests: "a ``BRUTEX_*`` string constant" and "a
+#: zero-arg ``*_enabled`` callable". They are right about every seam whose
+#: only switch IS the Rust kill switch, and they cannot be right about a
+#: module that owns TWO unrelated switches — because nothing in the shape
+#: distinguishes a Rust kill switch from a business gate that happens to be
+#: spelled the same way.
+#:
+#: ``engine/alpha_metric`` is the live case and the reason this exists. It
+#: owns ``BRUTEX_ALPHA_GATE`` / ``resolve_alpha_gate_enabled`` — the
+#: DEFAULT-OFF operator RANKING gate of DEC-ALPHA-BUYHOLD-METRIC-001, which
+#: decides whether alpha<=0 candidates are EXCLUDED from the top-100 build.
+#: It does not gate the Rust arm: ``_kernel()`` is resolved and the
+#: ``fno_math.alpha_vs_buyhold_pct`` kernel attempted on every call whatever
+#: that gate says. Read as a Rust flag it reported the facade ``OFF`` —
+#: "Python oracle runs by choice" — of a seam that runs Rust unconditionally.
+#:
+#: Why a DECLARATION rather than another shape rule: there is none available.
+#: The distinction is semantic (what the switch governs), and every syntactic
+#: proxy was measured and rejected — a ``RUST``-in-the-name rule breaks
+#: ``meta/meta_rust`` (``BRUTEX_META_GATE`` genuinely IS its Rust flag), and a
+#: "predicate is called inside its own module" rule breaks 24 facades whose
+#: caller legitimately lives elsewhere (``lake_rust_render_enabled`` is
+#: consulted by ``parquet_writer``).
+#:
+#: The blast radius is exactly the module that declares it, and the failure
+#: mode is bounded: a facade that disowns EVERY switch it has falls to
+#: :func:`_classify`'s flag-free branch, which still reports ``DEGRADED``
+#: when the crate is absent. So the worst a wrong declaration can do is
+#: under-report an operator's deliberate OFF — it can never hide a missing
+#: wheel. A test pins the census-visible effect of the one live declaration.
+_NON_RUST_FLAGS_ATTR: Final[str] = "RUST_CENSUS_NON_RUST_FLAGS"
+
+
+def _non_rust_flags(module: ModuleType) -> frozenset[str]:
+    """Return the switch names *module* declares as NOT gating its Rust arm.
+
+    Holds env VALUES (``"BRUTEX_ALPHA_GATE"``) and/or predicate ATTRIBUTE
+    names (``"resolve_alpha_gate_enabled"``) in one set — the census filters
+    both loops through it. A malformed declaration (not an iterable of
+    strings) is ignored rather than raised: a diagnostic must not crash on a
+    facade's typo, and ignoring it fails toward the pre-declaration reading.
+    """
+    declared = getattr(module, _NON_RUST_FLAGS_ATTR, None)
+    if not isinstance(declared, (frozenset, set, tuple, list)):
+        return frozenset()
+    return frozenset(item for item in declared if isinstance(item, str))
+
+
 #: The fall-back ANNOUNCEMENT — the third discovery signal, and the one that
 #: makes the census independent of how a facade spells its choke point.
 #:
@@ -970,12 +1021,21 @@ def census(modules: list[str] | None = None) -> list[FacadeStatus]:
         # ``sorted(dir(...))`` keeps the pick deterministic when a module owns
         # several flags; the resolved-predicate loop below is the part that
         # speaks for ALL of them.
+        # Switches the facade DISOWNS — see :data:`_NON_RUST_FLAGS_ATTR`. The
+        # same set filters both loops below, because a business gate that
+        # fools the value test fools the predicate test too (they are the two
+        # halves of one shape).
+        disowned = _non_rust_flags(module)
+
         env_var: str | None = None
         for attr in sorted(dir(module)):
             value = getattr(module, attr, None)
-            if isinstance(value, str) and _BRUTEX_ENV_VALUE_RE.fullmatch(value):
-                env_var = value
-                break
+            if not isinstance(value, str) or not _BRUTEX_ENV_VALUE_RE.fullmatch(value):
+                continue
+            if attr in disowned or value in disowned:
+                continue
+            env_var = value
+            break
 
         # Resolve EVERY zero-arg ``*_enabled`` predicate and AND them, rather
         # than taking the first alphabetically. Three reasons, each hit in
@@ -991,7 +1051,7 @@ def census(modules: list[str] | None = None) -> list[FacadeStatus]:
         # "could not resolve", never an assumed True.
         resolved: list[bool] = []
         for attr in sorted(dir(module)):
-            if not attr.endswith(_ENABLED_SUFFIX):
+            if not attr.endswith(_ENABLED_SUFFIX) or attr in disowned:
                 continue
             fn = getattr(module, attr, None)
             if not callable(fn):

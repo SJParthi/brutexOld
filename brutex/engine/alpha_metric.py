@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.models import BruteXError
 from brutex.money import round_money
@@ -104,6 +105,27 @@ __all__ = [
 
 #: The DEFAULT-OFF alpha rejection-gate switch (module docstring).
 ALPHA_GATE_ENV: Final[str] = "BRUTEX_ALPHA_GATE"
+
+#: This module owns TWO unrelated switches, and only one of them is a Rust
+#: flag — in fact neither is: the Rust arm here has NO kill switch at all.
+#:
+#: :data:`ALPHA_GATE_ENV` / :func:`resolve_alpha_gate_enabled` govern the
+#: operator RANKING gate (DEC-ALPHA-BUYHOLD-METRIC-001): whether a candidate
+#: with computable ``alpha <= 0`` is EXCLUDED from the top-100 build. They say
+#: nothing about which language computes alpha. :func:`_kernel` resolves the
+#: ``fno_math.alpha_vs_buyhold_pct`` kernel and attempts it on EVERY call
+#: whatever that gate reads, exactly like ``engine/rust_trade_sim``.
+#:
+#: The facade census matches switches by SHAPE — a ``BRUTEX_*`` constant plus
+#: a zero-arg ``*_enabled`` callable — so without this declaration it read the
+#: ranking gate as the Rust flag and reported the facade ``OFF``
+#: ("Python oracle runs by choice") for a seam that runs Rust unconditionally.
+#: Disowning both halves routes it to the census's flag-free branch, which
+#: reports ``ENGAGED`` when the crate is importable and ``DEGRADED`` when it
+#: is not — the true answer in both directions.
+RUST_CENSUS_NON_RUST_FLAGS: Final[frozenset[str]] = frozenset(
+    {"ALPHA_GATE_ENV", ALPHA_GATE_ENV, "resolve_alpha_gate_enabled"}
+)
 
 #: The i64 FFI envelope — values outside it never cross into the kernel
 #: (they cannot arise from real paisa magnitudes; refused loudly).
@@ -190,6 +212,34 @@ def alpha_vs_buyhold_pct_python(
     return strat_pct - bh_pct
 
 
+#: The facade name carried on every strict-mode refusal raised here.
+_STRICT_FACADE: Final = "brutex.engine.alpha_metric"
+
+#: Reasons this facade may NOT refuse under strict mode. EMPTY, and provably
+#: so: every fall-back reason alpha_metric can emit is class A (Rust absent or
+#: broke — ``wheel_missing``, ``symbol_missing``, ``kernel_raised``) or class B
+#: (Rust answered wrongly — ``result_not_float``, ``alpha_cross_check_failed``).
+#: There is no class-C arm because the crate's envelope is the FULL int domain
+#: the Python oracle accepts: :func:`_validate_inputs` runs BEFORE the kernel is
+#: consulted and raises :class:`AlphaMetricError` on every domain violation, so
+#: an input that reaches the kernel is one the kernel is defined on. Nothing to
+#: exempt (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note").
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset()
+
+
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse the Python fall-back for *reason* when strict mode is on.
+
+    The ONE strict choke point for this facade. Both announcement sites route
+    through here — :func:`_kernel`'s two ``kernel_unavailable`` arms and
+    :func:`_disable_kernel` — so there is no unannounced path left for the
+    oracle to serve through.
+    """
+    if reason in _STRICT_EXEMPT_REASONS:  # pragma: no cover - empty by proof
+        return
+    refuse_if_strict(_STRICT_FACADE, reason, **context)
+
+
 def _warn_once(event: str, **context: object) -> None:
     """Log *event* at WARNING exactly once per process (the facade idiom)."""
     if event in _WARNED:
@@ -212,6 +262,7 @@ def _resolve_kernel() -> Callable[[int, int, int, int], object] | None:
     try:
         import fno_math
     except ImportError as exc:
+        _refuse_if_strict("wheel_missing", error=str(exc))
         _warn_once(
             "alpha_metric.kernel_unavailable",
             reason="wheel_missing",
@@ -222,6 +273,7 @@ def _resolve_kernel() -> Callable[[int, int, int, int], object] | None:
         return None
     candidate: object = getattr(fno_math, "alpha_vs_buyhold_pct", None)
     if not callable(candidate):
+        _refuse_if_strict("symbol_missing")
         _warn_once(
             "alpha_metric.kernel_unavailable",
             reason="symbol_missing",
@@ -235,7 +287,12 @@ def _resolve_kernel() -> Callable[[int, int, int, int], object] | None:
 
 
 def _disable_kernel(reason: str, **context: object) -> None:
-    """Latch the kernel OFF for the process (refuse-poison / fault law)."""
+    """Latch the kernel OFF for the process (refuse-poison / fault law).
+
+    Strict mode refuses BEFORE the latch write, so an already-latched reason
+    cannot slip through a later warn-once early return.
+    """
+    _refuse_if_strict(reason, **context)
     _KERNEL_MEMO["fn"] = None
     _warn_once("alpha_metric.kernel_disabled", reason=reason, **context)
 
