@@ -591,8 +591,23 @@ class TestRealFacadeDegrade:
         pytest.importorskip("brutex_lake")
         assert self._run(pl.__version__).verdict == CLEAN
 
-    def test_a_version_bump_is_caught(self) -> None:
-        """The exact failure mode PR #1764 would introduce."""
+    def test_a_version_bump_is_caught(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The exact failure mode PR #1764 would introduce.
+
+        Pinned ``BRUTEX_RUST_STRICT=0`` for this test ONLY.  This test
+        deliberately INDUCES the ``polars_version_mismatch`` degrade so the
+        sentinel can observe it; under the shipped strict-ON default
+        (DEC-RUST-STRICT-NO-FALLBACK-001) that degrade RAISES
+        ``RustFallbackRefused`` at the ``lake_rust_render`` choke point
+        before any event reaches the sentinel.  Declaring the mode here
+        keeps the sentinel's assertions intact rather than weakening them,
+        and leaves the sibling ``test_the_pinned_wheel_runs_clean`` — which
+        exercises the REAL installed/crate version pair — under the shipped
+        default.
+        """
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
         pytest.importorskip("brutex_lake")
         sentinel = self._run("1.43.0")
         assert sentinel.verdict == DEGRADED

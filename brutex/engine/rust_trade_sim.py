@@ -782,18 +782,24 @@ class ResidentTradeSim:
             # (the promotion is unreachable off the oracle arm).
             self._rust = None
             reason = "fill_law_kernel_stale"
-        if self._rust is None:
-            # Structurally: ``self._rust is None`` here IFF a reason was set
-            # above (every branch that leaves it None assigns one) — the
-            # narrowing guard keeps that visible to mypy --strict without an
-            # ignore. Strict mode refuses BEFORE the WARNING is emitted.
-            if reason is not None:
-                _refuse_if_strict(
-                    reason,
-                    n_bars=len(self._decision_bars),
-                    n_exec_bars=len(self._exec_bars),
-                    tf_minutes=tf_minutes,
-                )
+        if reason is not None:
+            # ``reason is not None`` is EQUIVALENT to ``self._rust is None``
+            # here — every branch that leaves the kernel unbuilt assigns a
+            # reason, and the only branch that builds one leaves the reason
+            # None (the fill-law demotion above sets BOTH together). Keying
+            # the block on ``reason`` instead of ``self._rust`` says the same
+            # thing while narrowing ``str | None`` -> ``str`` for
+            # ``mypy --strict`` at the refusal call WITHOUT a second,
+            # structurally-unreachable guard branch. Strict mode
+            # (DEC-RUST-STRICT-NO-FALLBACK-001) refuses BEFORE the WARNING is
+            # emitted, so a refused construction never logs a fallback it did
+            # not take.
+            _refuse_if_strict(
+                reason,
+                n_bars=len(self._decision_bars),
+                n_exec_bars=len(self._exec_bars),
+                tf_minutes=tf_minutes,
+            )
             # The width reason additionally NAMES the offending word (value +
             # bit) — spec PR-1, DEC-SWEEP-RUST-WIRE-001 part 1; other reasons
             # carry no width offender.
