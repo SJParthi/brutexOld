@@ -114,21 +114,51 @@ class TestFlagTristate:
 
     def test_leaf_import_discipline_ast_pin(self) -> None:
         # seam_core must stay a CONFIG leaf: stdlib + structlog ONLY at
-        # module scope (it sits under brutex.config.paths/dotenv, which
+        # MODULE scope (it sits under brutex.config.paths/dotenv, which
         # bootstrap the CLI before any wheel-bearing package may load).
+        # Deferred (function-local) imports are exempt by construction —
+        # they cannot affect what loading this module pulls in — and the
+        # separate pin below enumerates the only one that exists.
         import ast
         from pathlib import Path
 
         source = Path(seam_core.__file__).read_text(encoding="utf-8")
         allowed = {"importlib", "os", "typing", "structlog", "__future__"}
         allowed_from = allowed | {"collections.abc", "types"}
-        for node in ast.walk(ast.parse(source)):
+        tree = ast.parse(source)
+        module_scope: list[ast.stmt] = list(tree.body)
+        for node in tree.body:  # e.g. `if TYPE_CHECKING:` blocks
+            if isinstance(node, ast.If):
+                module_scope.extend(node.body)
+        for node in module_scope:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     assert alias.name.split(".")[0] in allowed, alias.name
             elif isinstance(node, ast.ImportFrom):
                 assert node.module is not None
                 assert node.module in allowed_from, node.module
+
+    def test_deferred_imports_are_the_enumerated_set(self) -> None:
+        # The ONE deferred brutex import (DEC-RUST-STRICT-NO-FALLBACK-001):
+        # `brutex.config.rust_strict`, imported inside `_refuse_if_strict` so
+        # the strict gate never becomes a module-scope edge. Enumerated here
+        # so a future deferred import cannot slip in unreviewed.
+        import ast
+        from pathlib import Path
+
+        source = Path(seam_core.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        module_scope_ids = {id(n) for n in tree.body}
+        for node in tree.body:
+            if isinstance(node, ast.If):
+                module_scope_ids.update(id(n) for n in node.body)
+        deferred: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and id(node) not in module_scope_ids:
+                deferred.append(str(node.module))
+            elif isinstance(node, ast.Import) and id(node) not in module_scope_ids:
+                deferred.extend(alias.name for alias in node.names)
+        assert deferred == ["brutex.config.rust_strict"]
 
 
 class TestLatchAndReset:

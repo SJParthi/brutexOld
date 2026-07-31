@@ -51,6 +51,24 @@ _48_GIB = 48 * 2**30
 
 
 @pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Every test starts flag-unset with a fresh latch/burn-in/memo."""
     monkeypatch.delenv(her.HWENV_RUST_ENV, raising=False)
@@ -144,22 +162,61 @@ class TestFlagParsing:
 
     def test_leaf_import_discipline_ast_pin(self) -> None:
         # hardware_envelope_rust must stay a CONFIG-leaf module: stdlib +
-        # structlog ONLY at module scope (brutex.data / brutex.engine
+        # structlog ONLY at MODULE SCOPE (brutex.data / brutex.engine
         # would cycle or drag the fno_math wheel under every config
         # consumer). AST pin — the money_rust/feed_rust precedent.
+        #
+        # DEC-RUST-STRICT-NO-FALLBACK-001: the walk is MODULE-SCOPE only
+        # (``tree.body`` + ``if TYPE_CHECKING:`` bodies) rather than the
+        # prior recursive ``ast.walk``, because the strict gate is imported
+        # FUNCTION-LOCALLY inside ``_refuse_if_strict``. That deferred
+        # import is enumerated + pinned by the companion test below, so the
+        # leaf law loses no teeth: a module-scope brutex import still fails
+        # here, and an UNDECLARED deferred one still fails there.
         import ast
         from pathlib import Path
 
         source = Path(her.__file__).read_text(encoding="utf-8")
         allowed = {"importlib", "math", "os", "typing", "structlog", "__future__"}
         allowed_from = allowed | {"collections.abc", "types"}
-        for node in ast.walk(ast.parse(source)):
+        tree = ast.parse(source)
+        module_scope: list[ast.stmt] = list(tree.body)
+        for node in tree.body:
+            if isinstance(node, ast.If):  # ``if TYPE_CHECKING:``
+                module_scope.extend(node.body)
+        for node in module_scope:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     assert alias.name.split(".")[0] in allowed, alias.name
             elif isinstance(node, ast.ImportFrom):
                 assert node.module is not None
                 assert node.module in allowed_from, node.module
+
+    def test_deferred_imports_are_the_enumerated_set(self) -> None:
+        # The leaf may defer exactly ONE brutex import: the
+        # DEC-RUST-STRICT-NO-FALLBACK-001 gate, reached once per ANNOUNCED
+        # fall-back (never on a hot path). Any other function-local brutex
+        # import is a leaf-discipline regression and fails here.
+        import ast
+        from pathlib import Path
+
+        source = Path(her.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        module_scope = set(map(id, tree.body))
+        for node in tree.body:
+            if isinstance(node, ast.If):
+                module_scope.update(map(id, node.body))
+
+        deferred: list[str] = []
+        for node in ast.walk(tree):
+            if id(node) in module_scope:
+                continue
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module.split(".")[0] == "brutex":
+                    deferred.append(node.module)
+            elif isinstance(node, ast.Import):
+                deferred.extend(a.name for a in node.names if a.name.split(".")[0] == "brutex")
+        assert deferred == ["brutex.config.rust_strict"], deferred
 
     def test_truthy_falsy_mirror_money_rust(self) -> None:
         # The leaf may not IMPORT env_flag_tristate (module docstring), so
@@ -917,3 +974,37 @@ class TestWorkflowWiring:
         assert "tests/unit/test_hardware_envelope_rust.py" in text, (
             "core-rust-parity.yml no longer runs the hwenv facade suite"
         )
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_warn_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            her._warn_once("crate_stale_probe_reason")
+
+    def test_class_a_disable_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            her._disable("crate_unavailable")

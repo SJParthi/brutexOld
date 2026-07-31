@@ -295,8 +295,37 @@ def reset_hwenv_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Route a fall-back reason through the DEC-RUST-STRICT-NO-FALLBACK-001 gate.
+
+    The import is DEFERRED (function-local) to keep this module a CONFIG LEAF:
+    ``test_hardware_envelope_rust.py``'s AST pin requires stdlib + structlog
+    ONLY at module scope, and ``brutex.config.rust_strict`` pulls in
+    ``brutex.models``. The gate runs once per *announced fall-back*, never on
+    the hot path, so the import cost is irrelevant.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.config.hardware_envelope_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``hwenv_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``hwenv_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Every reason funnelled here is CLASS A
+    (``flag_unrecognised`` — the junk-flag arm; ``{law}_error`` — the crate
+    raised) or CLASS B (``{law}_result_refused`` — refuse-poison rejected the
+    crate's answer); both refuse under ``BRUTEX_RUST_STRICT``.
+
+    NO class-C reason reaches this choke point. This facade routes only the
+    DERIVATION laws; hardware DETECTION is deliberately Python-only and never
+    enters the seam, and the per-route eligibility gates (``_eligible_count``
+    / ``_eligible_pool`` / ``_eligible_library`` / ``_eligible_memory`` /
+    ``_eligible_key`` — inputs the crate never claimed) return the Python law
+    SILENTLY, so they still serve Python under strict mode exactly as today.
+    Strict-OFF is byte-identical to the prior behaviour.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -304,13 +333,23 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``crate_unavailable`` / ``crate_stale`` / ``crate_panic``) or CLASS B
+    (``burn_in_mismatch_{law}`` — the crate disagreed with the oracle on a
+    pool-sizing law). The refusal fires BEFORE the latch is written, so under
+    strict mode the latch is never set and the ``hwenv_rust_disabled()``
+    early-returns in the four routes are structurally unreachable — wiring
+    these two functions therefore covers every ANNOUNCED fall-back.
+    Strict-OFF is byte-identical to the prior behaviour.
 
     ``error=True`` logs ``hwenv_rust.autoreverted`` at ERROR (the burn-in
     autorevert — a genuine wrongness signal on a pool-sizing law); guard
     latches log ``hwenv_rust.rust_path_disabled`` at WARN. Repeats are
     no-ops.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

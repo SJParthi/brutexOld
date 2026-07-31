@@ -139,6 +139,7 @@ class ConfigRustSeam:
         laws: tuple[str, ...],
         redact_values: bool = False,
         default_on: bool = False,
+        strict_facade: str | None = None,
     ) -> None:
         self.seam = seam
         self.env_var = env_var
@@ -146,6 +147,14 @@ class ConfigRustSeam:
         self.laws = laws
         self.redact_values = redact_values
         self.default_on = default_on
+        #: OPT-IN strict-mode wiring (DEC-RUST-STRICT-NO-FALLBACK-001). When a
+        #: facade passes its module path here, every fall-back this seam
+        #: ANNOUNCES (``_warn_once``/``_disable``) refuses under
+        #: ``BRUTEX_RUST_STRICT`` instead of degrading. Left ``None`` the seam
+        #: behaves exactly as before — so a consumer that has NOT been
+        #: classified (currently ``brutex.config.backup_env_rust``) is
+        #: byte-identical, never silently swept into strict mode.
+        self.strict_facade = strict_facade
         self._disabled_reason: str | None = None
         self._burn_in: dict[str, int] = dict.fromkeys(laws, BURN_IN_SAMPLES)
         self._memo: set[str] = set()
@@ -205,20 +214,53 @@ class ConfigRustSeam:
 
     # ── Observability ───────────────────────────────────────────────────
 
+    def _refuse_if_strict(self, reason: str, **context: object) -> None:
+        """Strict-mode gate for the two announcement choke points.
+
+        No-op unless the OWNING facade opted in via ``strict_facade`` (see
+        :meth:`__init__`). Imported FUNCTION-LOCALLY on purpose: this module
+        is a LEAF whose module-scope imports are AST-pinned to stdlib +
+        structlog (``tests/unit/test_config_seam_core.py::
+        test_leaf_import_discipline_ast_pin``), and ``rust_strict`` itself
+        follows the same in-function-import convention.
+        """
+        if self.strict_facade is None:
+            return
+        from brutex.config.rust_strict import refuse_if_strict
+
+        refuse_if_strict(self.strict_facade, reason, seam=self.seam, **context)
+
     def _warn_once(self, reason: str, **context: object) -> None:
-        """Log ``<seam>_rust.fallback`` WARN once per process per reason."""
+        """Refuse under strict mode; else log ``<seam>_rust.fallback`` warn-once.
+
+        Every reason funnelled here is CLASS A (the crate is absent, stale or
+        raised: ``flag_unrecognised``, ``{law}_error``) or CLASS B (the crate
+        answered but the answer was refused: ``{law}_result_refused``) — both
+        refuse under ``BRUTEX_RUST_STRICT``. There is NO class-C reason at
+        this choke point: the facades' input-envelope gates (paths'
+        ``_eligible_lake_root``/``_eligible_volume_parent``, dotenv's
+        ``_eligible_text``) return the Python law WITHOUT announcing, so an
+        out-of-envelope input still reaches Python under strict mode exactly
+        as it does today. Strict-OFF is byte-identical to the prior behaviour.
+        """
+        self._refuse_if_strict(reason, **context)
         if reason in self._memo:
             return
         self._memo.add(reason)
         _LOG.warning(f"{self.seam}_rust.fallback", reason=reason, **context)
 
     def _disable(self, reason: str, *, error: bool = False, **context: object) -> None:
-        """Latch the Rust path OFF for the remainder of the process.
+        """Refuse under strict mode; else latch the Rust path OFF for the process.
 
-        ``error=True`` logs ``<seam>_rust.autoreverted`` at ERROR (the
-        burn-in autorevert — a genuine wrongness signal); guard latches
-        log ``<seam>_rust.rust_path_disabled`` at WARN. Repeats no-op.
+        Reasons here are CLASS A (``crate_unavailable``/``crate_stale``/
+        ``crate_panic``) or CLASS B (``burn_in_mismatch_{law}`` — the crate
+        DISAGREED with the oracle). The refusal fires BEFORE the latch is
+        written, so under strict mode the latch can never be set and the
+        latched early-return in :meth:`adopt` is structurally unreachable —
+        i.e. wiring these two functions covers every announced fall-back.
+        Strict-OFF is byte-identical to the prior behaviour.
         """
+        self._refuse_if_strict(reason, error=error, **context)
         if self._disabled_reason is not None:
             return
         self._disabled_reason = reason

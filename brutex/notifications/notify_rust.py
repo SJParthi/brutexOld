@@ -96,6 +96,8 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
+
 if TYPE_CHECKING:
     from types import ModuleType
 
@@ -213,7 +215,19 @@ def reset_notify_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
 
 
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``notify_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``notify_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``flag_unrecognised``; ``{law}_error`` — the crate raised) or CLASS B
+    (``{law}_result_refused`` — refuse-poison rejected the crate's return);
+    both refuse. NO class-C reason reaches this choke point: the routed laws
+    (the MarkdownV2 escape, the honest-unknown count, the dedupe-window drop
+    predicate over IEEE-754 bit patterns, the ``[:12]`` code-point truncation)
+    accept their full input domain — the network send, threads and f-string
+    builders are simply never routed. Strict-OFF is byte-identical to the
+    prior behaviour.
+    """
+    refuse_if_strict("brutex.notifications.notify_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -221,12 +235,21 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``crate_unavailable`` / ``crate_stale`` / ``crate_panic``) or CLASS B
+    (``burn_in_mismatch_{law}``); none is class C, so none is exempt. The
+    refusal fires BEFORE the latch is written, so under strict mode the latch
+    is never set and the ``notify_rust_disabled()`` early-return in
+    :func:`_routed` is structurally unreachable. Strict-OFF is byte-identical
+    to the prior behaviour.
 
     ``error=True`` logs ``notify_rust.autoreverted`` at ERROR (the burn-in
     autorevert — a genuine wrongness signal); guard latches log
     ``notify_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
     """
+    refuse_if_strict("brutex.notifications.notify_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

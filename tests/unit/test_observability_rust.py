@@ -96,6 +96,24 @@ _EXPECTED_BUILD_PATH: Final[Path] = _SHIM_PATH.parent / "EXPECTED_BUILD.json"
 _CARGO_TOML_PATH: Final[Path] = _SHIM_PATH.parents[2] / "Cargo.toml"
 
 
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
 def _oracle_bomb(*args: object, **kwargs: object) -> NoReturn:
     """A ``python_law`` stand-in that must NEVER be consulted (steady state)."""
     raise AssertionError("the routed path consulted the Python oracle")
@@ -426,6 +444,17 @@ class TestCycleFreeTypeSurface:
         # in the facade source (TYPE_CHECKING blocks included) is stdlib or
         # structlog — never a `brutex.*` module (absolute or relative), so
         # the consumer→facade edge can never become a cycle again.
+        #
+        # ONE narrow, enumerated exemption (DEC-RUST-STRICT-NO-FALLBACK-001):
+        # `brutex.config.rust_strict` — the strict-mode gate — is a LEAF
+        # (stdlib + `brutex.config.env_flags` + `brutex.models`; none of them
+        # imports `brutex.observability`), and the facade imports it
+        # FUNCTION-LOCALLY inside `_refuse_if_strict`, so it cannot re-form the
+        # cycle this pin exists to prevent. Everything else — every consumer
+        # module, every TYPE_CHECKING import, every relative import — still
+        # fails here. Pinned as a module-scope offender too: the exemption is
+        # only for the deferred call-time import (asserted below).
+        allowed: set[str] = {"brutex.config.rust_strict"}
         source = Path(obs.__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
         offenders: list[str] = []
@@ -434,14 +463,37 @@ class TestCycleFreeTypeSurface:
                 offenders.extend(
                     alias.name
                     for alias in node.names
-                    if alias.name == "brutex" or alias.name.startswith("brutex.")
+                    if (alias.name == "brutex" or alias.name.startswith("brutex."))
+                    and alias.name not in allowed
                 )
             elif isinstance(node, ast.ImportFrom):
                 if node.level != 0:  # any relative import is a brutex edge
                     offenders.append(f"level-{node.level} relative import")
-                elif node.module == "brutex" or (node.module or "").startswith("brutex."):
+                elif (
+                    node.module == "brutex" or (node.module or "").startswith("brutex.")
+                ) and node.module not in allowed:
                     offenders.append(str(node.module))
         assert offenders == []
+
+    def test_strict_gate_import_is_deferred_not_module_scope(self) -> None:
+        # The exemption above is scoped to a DEFERRED import: no `brutex.*`
+        # import may sit at module scope (or in a TYPE_CHECKING block), so the
+        # facade still imports clean with a partially-initialized consumer.
+        source = Path(obs.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        module_scope: list[str] = []
+        for node in tree.body:
+            targets = [node] if isinstance(node, ast.Import | ast.ImportFrom) else []
+            if isinstance(node, ast.If):  # e.g. `if TYPE_CHECKING:`
+                targets = [n for n in node.body if isinstance(n, ast.Import | ast.ImportFrom)]
+            for stmt in targets:
+                if isinstance(stmt, ast.Import):
+                    module_scope.extend(
+                        alias.name for alias in stmt.names if alias.name.startswith("brutex")
+                    )
+                elif (stmt.module or "").startswith("brutex"):
+                    module_scope.append(str(stmt.module))
+        assert module_scope == []
 
     def test_typevar_names_bounds_variance_exact(self) -> None:
         # (bound, covariant, contravariant) per TypeVar — exact pins.
@@ -1799,3 +1851,44 @@ class TestRealWheelDifferential:
         assert routed == "ok"
         warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
         assert warns[0]["reason"] == "stamp_verdict_error"
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_warn_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            obs._warn_once("crate_stale")
+
+    def test_class_a_disable_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            obs._disable("crate_unavailable")
+
+    def test_class_c_exempt_reason_does_not_refuse(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Class C: the INPUT is outside the crate's envelope, so Python was
+        # ALWAYS the intended handler — enumerated in the facade's
+        # ``_STRICT_EXEMPT_REASONS`` frozenset. Must NOT raise.
+        self._strict_on(monkeypatch)
+        obs._warn_once("sla_input_refused")

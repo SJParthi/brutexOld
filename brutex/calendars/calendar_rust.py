@@ -104,6 +104,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from brutex.config.env_flags import env_flag_tristate
+from brutex.config.rust_strict import refuse_if_strict
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -238,8 +239,42 @@ def reset_calendar_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+#: CLASS-C reasons EXEMPT from the strict-mode refusal
+#: (DEC-RUST-STRICT-NO-FALLBACK-001). Enumerated + reviewable here, never
+#: buried in an inline condition. Everything NOT listed refuses.
+#:
+#: * ``observed_error`` — the law-3 ``parse_observed_sidecar`` crate RAISES
+#:   ``ValueError`` on a serde-vs-CPython parse-engine divergence (a
+#:   ``NaN``/``Infinity`` literal, a lone surrogate, >128-deep nesting): all
+#:   payloads CPython's ``json`` accepts and serde does not. That is the
+#:   documented parse-engine ABSTAIN (``observed_sessions._materialize_observed``
+#:   docstring) — the input is outside the crate's envelope and the Python
+#:   oracle was ALWAYS the intended handler, so refusing here would crash on a
+#:   legitimate overlay. HONEST LIMIT: this one token is genuinely MIXED — the
+#:   same ``{law}_error`` funnel also carries a hypothetical class-B surprise
+#:   (a malformed ISO day the crate returned reaching ``date.fromisoformat``).
+#:   The crate cannot distinguish them at this choke point, so the exemption is
+#:   deliberately conservative: never crash a valid input. The honest fix is to
+#:   widen the crate's parser until the class-C arm is unreachable, then delete
+#:   this entry.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({f"{_LAW_OBSERVED}_error"})
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``calendar_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``calendar_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``flag_unrecognised``; ``classify_error`` / ``settle_error`` — the crate
+    raised) or CLASS B (``observed_shape`` / ``classify_shape`` /
+    ``classify_legs`` — refuse-poison rejected the crate's return), and refuse
+    under ``BRUTEX_RUST_STRICT``. The ONE class-C exemption is
+    :data:`_STRICT_EXEMPT_REASONS` (see its comment). The designed silent
+    abstains (a law-2 serde ``None``, the whole-reject overlay decision) never
+    reach this function, so they still serve Python under strict mode exactly
+    as today. Strict-OFF is byte-identical to the prior behaviour.
+    """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        refuse_if_strict("brutex.calendars.calendar_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -260,12 +295,21 @@ def warn_fallback(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``crate_unavailable`` / ``crate_stale`` / ``crate_panic``) or CLASS B
+    (``burn_in_mismatch_{law}`` — the crate disagreed with the oracle); none is
+    class C, so none is exempt. The refusal fires BEFORE the latch is written,
+    so under strict mode the latch is never set and the
+    ``rust_calendar_disabled()`` early-return in :func:`routed` is structurally
+    unreachable. Strict-OFF is byte-identical to the prior behaviour.
 
     ``error=True`` logs ``calendar_rust.autoreverted`` at ERROR (the burn-in
     autorevert — a genuine wrongness signal); guard latches log
     ``calendar_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
     """
+    refuse_if_strict("brutex.calendars.calendar_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.sweep_lookahead import env_flag_tristate
 from brutex.ranking.multi_select import (
     PARETO_EPS_LOSING_TRADES,
@@ -157,11 +158,20 @@ def kernel_disabled() -> bool:
 
 
 def disable_kernel(reason: str, **context: object) -> None:
-    """Latch the kernels OFF for the rest of the process (the autorevert).
+    """Refuse under strict mode; else latch the kernels OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. The reasons routed here
+    (``frontier_mismatch`` / ``quota_mismatch``) are CLASS B — the kernel's
+    selection DISAGREED with the oracle's. None is class C, so none is exempt.
+    The refusal fires BEFORE the latch is written, so under strict mode the
+    latch is never set and the ``kernel_disabled`` early-returns become
+    structurally unreachable. Strict-OFF is byte-identical to the prior
+    behaviour.
 
     First call logs ``rust_rank_select.kernel_autoreverted`` (ERROR); repeats
     are no-ops. The mismatching call ships the ORACLE result either way.
     """
+    refuse_if_strict("brutex.engine.rust_rank_select", reason, **context)
     if _KERNEL_DISABLED_REASON[0] is None:
         _KERNEL_DISABLED_REASON[0] = reason
         _LOG.error("rust_rank_select.kernel_autoreverted", reason=reason, **context)
@@ -180,7 +190,16 @@ def reset_observability_memo_for_tests() -> None:
 
 
 def warn_fallback_once(reason: str, **context: object) -> None:
-    """Log ``rust_rank_select.fallback`` (WARNING) once per process per reason."""
+    """Refuse under strict mode; else log ``rust_rank_select.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons routed here are CLASS A
+    (``flag_unrecognised``, ``wheel_missing``, ``wheel_stale``,
+    ``kernel_error``) or CLASS B (``kernel_disabled`` — a prior mismatch
+    latched the kernels off). None is class C: both selection kernels accept
+    the full survivor domain, so there is no out-of-envelope arm to exempt.
+    Strict-OFF is byte-identical to the prior behaviour.
+    """
+    refuse_if_strict("brutex.engine.rust_rank_select", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -283,6 +302,13 @@ def frontier_select(
         warn_fallback_once("kernel_error", function="frontier", error=repr(exc))
         return oracle()
     if not _valid_index_list(result, len(net_pnl_paisa), ascending=True):
+        # DEC-RUST-STRICT-NO-FALLBACK-001: this refuse-poison arm logs its own
+        # ERROR rather than routing through ``warn_fallback_once``, so it needs
+        # the strict gate explicitly. CLASS B (the kernel returned a
+        # domain-invalid index list) — refused, never exempt.
+        refuse_if_strict(
+            "brutex.engine.rust_rank_select", "kernel_result_refused", function="frontier"
+        )
         if "kernel_result_refused_frontier" not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add("kernel_result_refused_frontier")
             _LOG.error("rust_rank_select.kernel_result_refused", function="frontier")
@@ -353,6 +379,11 @@ def axis_quota_select(
             for axis in result
         )
     ):
+        # DEC-RUST-STRICT-NO-FALLBACK-001: same explicit gate as the frontier
+        # arm above — CLASS B, refused, never exempt.
+        refuse_if_strict(
+            "brutex.engine.rust_rank_select", "kernel_result_refused", function="quota"
+        )
         if "kernel_result_refused_quota" not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add("kernel_result_refused_quota")
             _LOG.error("rust_rank_select.kernel_result_refused", function="quota")

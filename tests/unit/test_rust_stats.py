@@ -22,6 +22,7 @@ import ast
 import math
 import struct
 import sys
+from contextlib import contextmanager
 from decimal import Decimal
 from itertools import combinations
 from pathlib import Path
@@ -58,6 +59,8 @@ from brutex.metrics.rust_stats import (
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     import numpy.typing as npt
 
 
@@ -1710,6 +1713,31 @@ from brutex.metrics.rust_stats import (  # noqa: E402
 _PSR_RADICAND = 1.0 - (-0.6) * 0.15 + (5.5 - 1.0) / 4.0 * 0.15 * 0.15
 
 
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+
+    The patch runs in its OWN :class:`pytest.MonkeyPatch` context, not the
+    shared ``monkeypatch`` fixture: several tests here call
+    ``monkeypatch.undo()`` mid-test, which would otherwise silently revert
+    this declaration and re-arm strict mode half-way through a degrade test.
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
+
+
 def _psr_true() -> float:
     return _psr_tail(0.15, 0.0, 250, _PSR_RADICAND)
 
@@ -2357,3 +2385,59 @@ def test_wfo_steady_state_skips_the_oracle() -> None:
     calls: list[int] = []
     got = _call_wfo(oracle_calls=calls)
     assert got == 1 and calls == []
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Iterator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        This owns its OWN :class:`pytest.MonkeyPatch` context rather than
+        using the shared ``monkeypatch`` fixture, and the difference is
+        load-bearing.  ``_strict_off_degrade_lattice`` (the module autouse
+        fixture) sets ``BRUTEX_RUST_STRICT=0`` inside a *separate* context;
+        pytest tears fixtures down LIFO **across fixture objects**, so a
+        shared-``monkeypatch`` ``delenv`` here would record ``"0"`` as the
+        value to restore, the autouse context would exit FIRST (restoring the
+        true original — unset), and the shared undo would then RE-SET ``"0"``,
+        leaking the kill switch into every later test file in the process.
+        Nesting the context inside the test body makes the delenv provably
+        undone before the module fixture's context exits.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    def test_class_a_warn_choke_point_refuses(self) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        with self._strict_on(), pytest.raises(RustFallbackRefused):
+            rust_stats.warn_fallback_once("psr", "wheel_missing")
+
+    def test_class_a_disable_choke_point_refuses(self) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        with self._strict_on(), pytest.raises(RustFallbackRefused):
+            rust_stats.disable_kernel("psr", "crate_stale")
+
+    def test_class_c_exempt_reason_does_not_refuse(self) -> None:
+        # Class C: the INPUT is outside the crate's envelope, so Python was
+        # ALWAYS the intended handler — enumerated in the facade's
+        # ``_STRICT_EXEMPT_REASONS`` frozenset. Must NOT raise.
+        with self._strict_on():
+            rust_stats.warn_fallback_once("psr", "arg_inexact")

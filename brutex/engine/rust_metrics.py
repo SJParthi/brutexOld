@@ -94,6 +94,31 @@ test isolation (the documented exception to the no-global-mutable-state rule,
 same in kind as Phase A's instance-level warn-once memo — there is no
 instance at this stateless seam to hang it on).
 
+## Strict mode — no silent Python fall-back (DEC-RUST-STRICT-NO-FALLBACK-001)
+
+With ``BRUTEX_RUST_STRICT`` on (the default) every path that would hand a
+mask to the Python oracle RAISES
+:class:`~brutex.config.rust_strict.RustFallbackRefused` instead. This facade
+has THREE such paths, and each carries its own gate call —
+:func:`warn_fallback_once` (``flag_unrecognised`` / ``wheel_missing`` /
+``wheel_stale`` / ``kernel_disabled`` / ``kernel_error`` /
+``equity_envelope_exceeded``), :func:`disable_kernel` (the burn-in mismatch,
+whose mask ships the ORACLE value) and the ``kernel_result_refused`` arm of
+:func:`drawdown_stats_via_kernel` — so the block is complete.
+
+The gate's scope note forbids refusing a CLASS-C "input outside the crate's
+envelope" reason until it is widened away or proven unreachable. This facade
+has exactly one, ``equity_envelope_exceeded``, and it is refused on the
+PROVEN-UNREACHABLE branch, not the widened one — the 2⁵² bound is
+provably TIGHT for the current ``drop/peak`` formulation (``drop ≤ 2·M``
+must stay ``≤ 2⁵³``, so ``M ≤ 2⁵²``), and widening it would mean
+hand-rolling a correctly-rounded big-int division inside run identity for
+zero reachable benefit. See :func:`exceeds_exact_equity_envelope` for the
+arithmetic.
+
+``exit_indices_demoted`` is deliberately NOT refused: it is not a
+fall-back at all (Rust still serves) — see :data:`_NOT_A_FALLBACK`.
+
 ## Honest envelope (Golden Rule #10)
 
 * Constant-factor win only: the per-tuple tail stays ``O(kept · N_bars)``.
@@ -129,6 +154,7 @@ import structlog
 # module's PUBLIC ``env_flag_tristate`` re-export — the sweep env flags accept
 # the identical vocabulary with zero copied strip/lower/membership logic
 # (CLAUDE.md §11 COMMON; reviewer-directed "import it, don't copy").
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -189,6 +215,30 @@ _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
 #: Memo key for the engaged-once INFO (namespaced apart from warn reasons).
 _ENGAGED_KEY: Final[str] = "__engaged__"
+
+#: The ONE reason routed through :func:`warn_fallback_once` that is **NOT a
+#: Python fall-back** — excluded from the strict gate
+#: (DEC-RUST-STRICT-NO-FALLBACK-001).
+#:
+#: ``brutex.engine.sweep_driver._exit_pairs`` announces ``exit_indices_demoted``
+#: when the walker's certified 1-minute index stream cannot be consumed (no
+#: ``exec_map``, or an ``exit_indices_consistent`` validation miss). It then
+#: computes the **identical** ``(decision_idx, pnl_paisa)`` pairs through the
+#: owning-bucket bisect fold and hands them to the SAME Rust kernel — its own
+#: docstring says so ("NEVER to the Python oracle"), and a spy on the ONE FFI
+#: call site confirms it: the demoted path still makes exactly one
+#: ``sweep_drawdown_stats`` call, with byte-identical ``exits`` and a
+#: byte-identical 4-tuple, versus the certified fast path. Rust SERVES; only
+#: the cost of deriving the pairs changes (``O(N_bars)`` instead of
+#: ``O(trades)``).
+#:
+#: Refusing it would therefore crash a mask Rust answered correctly, which is
+#: precisely the "legitimate input turned into a crash" the strict gate's own
+#: scope note forbids. It stays on the fall-back CHANNEL only for log/census
+#: continuity (the degrade sentinel counts the call site, and six test sites
+#: pin the event); giving it its own non-fallback event is the named follow-up
+#: ``DEC-SWEEP-METRICS-DEMOTE-EVENT-RENAME-001``.
+_NOT_A_FALLBACK: Final[frozenset[str]] = frozenset({"exit_indices_demoted"})
 
 #: Arity of the ``_drawdown_stats`` result tuple the kernel mirrors.
 _DRAWDOWN_ARITY: Final[int] = 4
@@ -277,7 +327,15 @@ def disable_kernel(reason: str, **context: object) -> None:
     :func:`drawdown_stats_via_kernel` call short-circuits to the Python
     oracle, so a wrong kernel can poison at most the ONE mismatching mask —
     and even that mask ships the ORACLE value (the caller's contract).
+
+    That oracle value IS a Python fall-back, and it is announced HERE rather
+    than through :func:`warn_fallback_once`, so strict mode is gated here too
+    (DEC-RUST-STRICT-NO-FALLBACK-001): under a no-fall-back mandate "Rust
+    answered wrongly" must surface, never be papered over by a quiet Python
+    re-run. Refused BEFORE the latch is set, so a refused process is not left
+    in a silently-degraded steady state.
     """
+    refuse_if_strict("brutex.engine.rust_metrics", reason, **context)
     if _KERNEL_DISABLED_REASON[0] is None:
         _KERNEL_DISABLED_REASON[0] = reason
         _LOG.error("sweep_rust_metrics.kernel_autoreverted", reason=reason, **context)
@@ -319,14 +377,42 @@ def reset_observability_memo_for_tests() -> None:
 
 
 def warn_fallback_once(reason: str, **context: object) -> None:
-    """Log ``sweep_rust_metrics.fallback`` ONCE per process per *reason*.
+    """Refuse under strict mode; else log ``sweep_rust_metrics.fallback`` warn-once.
 
-    The seam runs once per MASK, so a sticky fallback reason would flood the
-    logs at production sweep scale (the Phase-A per-(instance, reason) memo
-    rationale — module docstring). The first occurrence is loud (WARNING);
-    repeats of the same reason fall back silently. The fallback itself is
-    bit-exact regardless (the Python oracle serves the mask).
+    This is the choke point every reason that hands a mask to the Python
+    oracle funnels through, so
+    :func:`~brutex.config.rust_strict.refuse_if_strict` here blocks the Python
+    arm for all of them (DEC-RUST-STRICT-NO-FALLBACK-001) — with ONE
+    documented exception, :data:`_NOT_A_FALLBACK`: ``exit_indices_demoted``
+    keeps Rust serving (see that constant) and must never be turned into a
+    crash. The two OTHER choke points that also return a Python-served
+    sentinel — :func:`disable_kernel` and the ``kernel_result_refused`` arm of
+    :func:`drawdown_stats_via_kernel` — carry their own gate call, so the
+    block is complete.
+
+    Reason classes (the strict gate's own taxonomy): ``wheel_missing`` /
+    ``wheel_stale`` / ``kernel_error`` mean Rust is absent or broke;
+    ``kernel_disabled`` means Rust already answered wrongly;
+    ``flag_unrecognised`` means a typo'd kill switch silently disarmed Rust
+    — refusing all four is exactly the intent. The one CLASS-C
+    ("input outside the crate's envelope") reason,
+    ``equity_envelope_exceeded``, is refused only because it is *proven
+    unreachable* on every production path: ``start_equity_paisa`` has no CLI
+    flag and is pinned at the ₹1 lakh :data:`DEFAULT_START_EQUITY_PAISA`, so
+    tripping ``start + Σ|pnl| > 2⁵²`` needs ₹45.04 lakh crore of summed
+    absolute price-delta P&L — 3,843× more than a 5-year 1-minute window can
+    physically produce even if EVERY trade captured the entire NIFTY index
+    value (see :func:`exceeds_exact_equity_envelope`).
+
+    With strict mode OFF the historic behaviour is byte-identical: the seam
+    runs once per MASK, so a sticky fallback reason would flood the logs at
+    production sweep scale (the Phase-A per-(instance, reason) memo rationale
+    — module docstring). The first occurrence is loud (WARNING); repeats of
+    the same reason fall back silently. The fallback itself is bit-exact
+    regardless (the Python oracle serves the mask).
     """
+    if reason not in _NOT_A_FALLBACK:
+        refuse_if_strict("brutex.engine.rust_metrics", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -340,6 +426,32 @@ def exceeds_exact_equity_envelope(start_equity_paisa: int, trades: Sequence[Clos
     negligible next to the ``O(N_bars)`` scan it guards. ``True`` means the
     kernel could double-round the ``drop/peak`` division (or, far beyond,
     overflow i64), so the caller must route this mask to the Python oracle.
+
+    Why the bound is TIGHT, not arbitrary (the widening question): the ONLY
+    f64-exactness requirement is that ``(drop as f64) / (peak as f64)`` equal
+    CPython's correctly-rounded ``int / int``, which holds iff BOTH operands
+    are exactly representable, i.e. ``≤ 2⁵³``. Under an envelope ``M`` every
+    equity value satisfies ``|e| ≤ M``, so ``peak ≤ M`` and
+    ``drop = peak − e ≤ 2M``; requiring ``2M ≤ 2⁵³`` gives exactly
+    ``M ≤ 2⁵²``. Raising the bound to 2⁵³ would put ``drop`` at 2⁵⁴, where
+    odd values are NOT representable and the division double-rounds. The
+    equity FOLD is already integer (``i64`` in the kernel); the f64 appears
+    only where the Python oracle itself produces floats, so "accumulate in
+    integers instead" does not widen anything.
+
+    Why the ``True`` branch is UNREACHABLE in production (the reason strict
+    mode may refuse it — module docstring): ``start_equity_paisa`` has NO CLI
+    flag anywhere and every production site threads
+    ``grid.start_equity_paisa``, pinned at
+    :data:`~brutex.engine.sweep_driver.DEFAULT_START_EQUITY_PAISA` = 10⁷
+    paisa (₹1 lakh). That leaves ``Σ|pnl|`` a budget of 2⁵² − 10⁷ paisa =
+    **₹45.04 lakh crore**. ``pnl_paisa`` is a ONE-UNIT price delta
+    (``exit − entry``, signal-only), and a 5-year 1-minute window holds
+    468,750 bars with at most one trade per bar, so even the physically
+    impossible case of EVERY trade capturing the entire NIFTY index value
+    (~2.5 · 10⁶ paisa) sums to 1.17 · 10¹² paisa — **3,843× below** the
+    budget. Tripping it at that trade count needs ₹9.6 crore of price delta
+    per trade, 3,843× the index itself.
     """
     magnitude = start_equity_paisa
     for trade in trades:
@@ -445,6 +557,16 @@ def drawdown_stats_via_kernel(
         # A domain-invalid result is a kernel BUG: refuse it LOUDLY (never
         # silently adopted — the never-adopt stance of the Phase-A
         # re-attribution path) and serve the mask from the Python oracle.
+        # That Python serve is announced HERE, not through
+        # `warn_fallback_once`, so the strict gate is applied here too —
+        # otherwise a poisoned kernel return would be the ONE unrefused
+        # Python path left (DEC-RUST-STRICT-NO-FALLBACK-001).
+        refuse_if_strict(
+            "brutex.engine.rust_metrics",
+            "kernel_result_refused",
+            result=repr(result),
+            n_bars=n_bars,
+        )
         if "kernel_result_refused" not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add("kernel_result_refused")
             _LOG.error(

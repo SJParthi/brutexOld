@@ -157,6 +157,12 @@ from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
+# DEC-RUST-STRICT-NO-FALLBACK-001. Safe at module scope: ``rust_strict`` is a
+# LEAF (stdlib + ``brutex.config.env_flags`` + ``brutex.models``) and pulls
+# NEITHER ``brutex.engine`` nor the trading_core wheel, so the cycle guard
+# documented in :func:`stats_rust_enabled` is untouched.
+from brutex.config.rust_strict import refuse_if_strict
+
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Mapping, Sequence
 
@@ -307,8 +313,60 @@ def kernel_disabled(fn: str) -> bool:
     return fn in _KERNEL_DISABLED_REASON
 
 
+#: CLASS-C reasons EXEMPT from the strict-mode refusal
+#: (DEC-RUST-STRICT-NO-FALLBACK-001). Enumerated + reviewable here, never
+#: buried in an inline condition. Everything NOT listed refuses.
+#:
+#: **The input-envelope family.** These arms fire when the INPUT is outside
+#: what the FFI can carry losslessly — a value the kernel never claimed, whose
+#: arbitrary-precision Python oracle was ALWAYS the intended handler. Refusing
+#: them would crash a legitimate, type-legal caller; the honest fix is to widen
+#: the crate (or the FFI) until each arm is unreachable, then delete the entry.
+#:
+#: * ``min_sharpe_inexact``     — the CPCV threshold is a NaN / an int outside
+#:   exact f64 range (2^53+k, >4300-digit); an f64 round-trip would change the
+#:   fold verdict.
+#: * ``min_sharpe_foreign_type``— the threshold is a float SUBCLASS / Decimal /
+#:   Fraction / numpy scalar whose own ``__gt__`` owns the compare.
+#: * ``arg_inexact``            — a scalar argument is not exactly f64-representable.
+#: * ``arg_foreign_type``       — an argument (scalar or a moments-matrix entry)
+#:   is an exact-type mismatch (int subclass, float subclass, …).
+#: * ``arg_unsupported``        — an integer argument is below the law's minimum
+#:   or past ``i64`` — outside the kernel's declared domain.
+#: * ``custom_evaluator``       — the PBO caller supplied its OWN evaluator, so
+#:   there is no kernel to call: Python is the only implementation.
+#: * ``combination_cap``        — the CSCV combination count exceeds the kernel's
+#:   documented allocation cap; the oracle streams it instead.
+#:
+#: **The one non-input exemption** —
+#: * ``flag_engine_unavailable`` — this is NOT a Python-serving fall-back at
+#:   all: the flag resolver failed to import ``brutex.engine``'s tristate helper
+#:   and returns :data:`STATS_RUST_DEFAULT` (``True``), i.e. it stays ON and the
+#:   Rust arm still serves. Refusing here would turn a WORKING Rust path into a
+#:   crash, the exact inverse of this DEC's intent.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "min_sharpe_inexact",
+        "min_sharpe_foreign_type",
+        "arg_inexact",
+        "arg_foreign_type",
+        "arg_unsupported",
+        "custom_evaluator",
+        "combination_cap",
+        "flag_engine_unavailable",
+    }
+)
+
+
 def disable_kernel(fn: str, reason: str, **context: object) -> None:
     """Latch *fn*'s kernel OFF for the remainder of the process (autorevert).
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``. The
+    only reason routed here is the burn-in ``mismatch`` — CLASS B, the kernel
+    disagreed with the oracle — so it is never exempt. The refusal fires BEFORE
+    the latch is written, so under strict mode the latch is never set and every
+    ``kernel_disabled`` fall-back below is structurally unreachable. Strict-OFF
+    is byte-identical to the prior behaviour.
 
     Called on a burn-in compare MISMATCH — a kernel numerical bug the domain
     validation cannot see. The first call per function logs
@@ -321,6 +379,7 @@ def disable_kernel(fn: str, reason: str, **context: object) -> None:
     any value the seam does not control goes through :func:`_safe_context`
     at the call site (enforced in-module by the unit suite's AST pin).
     """
+    refuse_if_strict("brutex.metrics.rust_stats", reason, fn=fn, **context)
     if fn not in _KERNEL_DISABLED_REASON:
         _KERNEL_DISABLED_REASON[fn] = reason
         _LOG.error("rust_stats.kernel_autoreverted", fn=fn, reason=reason, **context)
@@ -342,7 +401,18 @@ def warn_fallback_once(fn: str, reason: str, **context: object) -> None:
     values must be pre-stringified TOTAL text — any value the seam does not
     control goes through :func:`_safe_context` at the call site (enforced
     in-module by the unit suite's AST structural pin).
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``
+    unless *reason* is in :data:`_STRICT_EXEMPT_REASONS` (the input-envelope
+    family + ``flag_engine_unavailable`` — see that constant's comment for the
+    per-reason justification). The refused set is CLASS A
+    (``flag_unrecognised``, ``wheel_missing``, ``wheel_stale``,
+    ``kernel_error``) and CLASS B (``kernel_disabled`` — a prior burn-in
+    mismatch latched this ``fn``). Strict-OFF is byte-identical to the prior
+    behaviour.
     """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        refuse_if_strict("brutex.metrics.rust_stats", reason, fn=fn, **context)
     key = f"{fn}:{reason}"
     if key in _OBSERVABILITY_MEMO:
         return
@@ -751,6 +821,15 @@ def cpcv_pass_count_via_kernel(
         # adversarial shapes) — both contexts ride ``_safe_context``
         # (round 4: a >4300-digit refused result previously detonated the
         # refusal's own ``repr`` ON-only).
+        # DEC-RUST-STRICT-NO-FALLBACK-001: this arm logs its own ERROR rather
+        # than routing through ``warn_fallback_once``, so it needs the strict
+        # gate explicitly. CLASS B (a kernel BUG) — refused, never exempt.
+        refuse_if_strict(
+            "brutex.metrics.rust_stats",
+            "kernel_result_refused",
+            fn=fn,
+            result=_safe_context(result),
+        )
         key = f"{fn}:kernel_result_refused"
         if key not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add(key)
@@ -910,7 +989,16 @@ def _refuse_result_once(fn: str, result: object) -> None:
     cpcv binding carries its own inline copy — append-only discipline).
     The refused object is KERNEL-controlled — its context rides the total,
     bounded :func:`_safe_context`.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT`` —
+    CLASS B (a kernel BUG), never exempt. Strict-OFF is byte-identical.
     """
+    refuse_if_strict(
+        "brutex.metrics.rust_stats",
+        "kernel_result_refused",
+        fn=fn,
+        result=_safe_context(result),
+    )
     key = f"{fn}:kernel_result_refused"
     if key not in _OBSERVABILITY_MEMO:
         _OBSERVABILITY_MEMO.add(key)

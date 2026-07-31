@@ -394,13 +394,43 @@ def reset_optcost_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Strict-mode gate for the two announcement choke points.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Imported FUNCTION-LOCALLY (only while a
+    degrade is already being announced) so this leaf keeps ZERO brutex imports
+    at module scope — the leaf-discipline law in the module docstring, the same
+    convention :func:`_degrade_errors` / :func:`_panic_belt_errors` follow.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.optcost_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``optcost_rust.fallback`` WARN once per process per memo key.
+    """Refuse under strict mode; else log ``optcost_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Every reason funnelled here is CLASS A
+    (``flag_unrecognised`` — the junk-flag arm; ``kernel_error`` — the crate
+    raised) or CLASS B (``result_refused`` — refuse-poison rejected the
+    crate's ``(code, value)`` return), so all of them refuse and NO exemption
+    set is needed.
+
+    That is worth stating precisely, because this facade DOES have genuine
+    class-C arms — they simply never reach this function. The ORACLE-ONLY
+    inputs documented in the module docstring (``resolve_delta_target_strike``,
+    paisa-inexact ``Decimal`` values via :func:`_exact_scaled_int` returning
+    ``None``, and mixed-exponent strike ladders via
+    :func:`_uniform_exponent_units` returning ``None``) return ``python()``
+    SILENTLY, BEFORE :func:`_route` is ever entered — they announce nothing,
+    so strict mode cannot see them and they still serve Python exactly as
+    today. Strict-OFF is byte-identical to the prior behaviour.
 
     Degrade reasons that can differ per seam fold the seam name into the
     memo key (``context["seam"]``) so one seam's first fault does not
     silence a different seam's — the oracle serves regardless.
     """
+    _refuse_if_strict(reason, **context)
     key = f"{reason}|{context.get('seam', '')}"
     if key in _OBSERVABILITY_MEMO:
         return
@@ -409,12 +439,22 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``kernel_unavailable`` / ``kernel_stale`` / ``kernel_panic``) or CLASS B
+    (``burn_in_mismatch`` — the kernel disagreed with the oracle); none is
+    class C (see :func:`_warn_once` — this facade's class-C arms never enter
+    :func:`_route` at all), so none is exempt. The refusal fires BEFORE the
+    latch is written, so under strict mode the latch is never set and the
+    ``optcost_rust_disabled()`` early-return in :func:`_route` is structurally
+    unreachable. Strict-OFF is byte-identical to the prior behaviour.
 
     ``error=True`` logs ``optcost_rust.autoreverted`` at ERROR (the burn-in
     mismatch — a genuine wrongness signal); guard latches log
     ``optcost_rust.rust_path_disabled`` at WARN. Repeat calls are no-ops.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
