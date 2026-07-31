@@ -43,6 +43,20 @@ facade signature — a ``<NAME>_ENV`` string constant AND a matching
 is written, and one that DROPS the signature is reported as a shape
 change rather than silently vanishing.
 
+...WITH A CANDIDATE PRE-FILTER, stated here because leaving it unstated is
+how this module under-reported for as long as it did. "Structural" once
+described only the signature check while a NAME test quietly ran first and
+narrowed the field to modules with ``rust`` or ``seam`` in their path. Two
+real facades — ``ranking/cvar_gate`` and ``data/greeks_enrich`` — own
+genuine flags under names carrying neither word, so the census reported 37
+where the truth was 39, and reported it with no gap of any kind visible in
+the output. A filter that silently shrinks a census is the same failure
+class as the degrade latch above: **the narrowed answer and the complete
+answer are indistinguishable from the outside.** The filter now admits a
+module on the name test OR on a source-read ``*RUST*_ENV`` declaration
+(:func:`_declares_rust_env`), and :func:`discover_facades` documents both
+halves as contract. DEC-RUST-MANDATORY-POSTURE-001 §D9.1.
+
 WHAT THIS DOES NOT DO (stated so the guarantee is not oversold).
 
 * It reports what the facade WOULD do on its next call, from the flag and
@@ -116,6 +130,35 @@ _REQUIRED_SEAM_MARKERS: Final[tuple[str, ...]] = (
     "require_materialize_flags",
 )
 
+#: Positive marker for a facade whose MODULE NAME carries no ``rust``/``seam``
+#: hint (DEC-RUST-MANDATORY-POSTURE-001 §D9.1). Matches a module-level
+#: constant whose OWN NAME contains ``RUST`` and ends in ``_ENV`` — e.g.
+#: ``CVAR_RUST_ENV`` in ``ranking/cvar_gate.py`` and ``GREEKS_RUST_BATCH_ENV``
+#: in ``data/greeks_enrich.py``, the two facades the name pre-filter alone
+#: could never see.
+#:
+#: The discriminator was CHOSEN BY MEASUREMENT, not by taste. Deleting the
+#: name pre-filter outright was the obvious fix and is the wrong one: it
+#: admits every module owning some ``*_ENV`` and some ``*_enabled()``
+#: (``market_hours``, ``sweep_apriori``, ``loop_watchdog`` …) and pays ~600
+#: imports to reject them. Requiring ``RUST`` inside the constant's own name
+#: admits **exactly** the two above across all 599 modules and nothing else.
+#:
+#: Anchored at column 0 so a mention inside a docstring, a comment or a
+#: function body cannot enrol a module that merely *references* a
+#: neighbour's flag — the same both-halves discipline as :data:`_ENV_SUFFIX`.
+#:
+#: ``RUST`` must be a whole underscore-delimited TOKEN, not a substring.
+#: A first cut used ``[A-Z0-9_]*RUST[A-Z0-9_]*`` and matched
+#: ``MY_RUSTY_ENV`` — RUST inside another word — while simultaneously
+#: REJECTING a bare ``RUST_ENV`` because it demanded a character before the
+#: token. Both were caught by the unit matrix rather than by review, which
+#: is why the matrix enumerates the near-misses explicitly.
+_RUST_ENV_MARKER_RE: Final[re.Pattern[str]] = re.compile(
+    r"^_?(?:[A-Z0-9]+_)*RUST(?:_[A-Z0-9]+)*_ENV\s*[:=]",
+    re.MULTILINE,
+)
+
 #: Package root scanned for facades.
 _PACKAGE: Final[str] = "brutex"
 
@@ -132,6 +175,44 @@ def _source_of(module: ModuleType) -> str:
         return inspect.getsource(module)
     except (OSError, TypeError):
         return ""
+
+
+def _declares_rust_env(name: str) -> bool:
+    """Report whether a module DECLARES a ``*RUST*_ENV`` constant.
+
+    Reads the module's source file **without importing it**. That is the
+    whole point: this runs on the ~550 modules the name pre-filter rejects,
+    and importing them to find out would pull polars, duckdb and the rest
+    of the transitive graph to answer a question a file read answers. A
+    read is a stat plus a few KB; an import runs arbitrary module-level
+    code.
+
+    MEASURED COST, so the trade is a number rather than a hunch: the sweep
+    is 552 modules in ~120 ms (~218 us each, dominated by ``find_spec``'s
+    finder lookup) against a ~1.2 s total discovery — the other ~1.1 s is
+    importing the 46 name-matched modules, which pull polars and duckdb.
+    So the honest reading is that this bought two invisible facades for
+    ~10% of a diagnostic that runs in ``brutex doctor`` and in tests, never
+    on a sweep hot path.
+
+    Every failure mode returns ``False`` rather than raising — a module
+    with no locatable source, a namespace package, an unreadable file. A
+    census that cannot read one file must still audit the other 598.
+    """
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, ValueError):
+        # ``find_spec`` imports PARENT packages, which ``walk_packages`` has
+        # already imported, so this is cheap. It still raises for a broken
+        # parent — which must not blind the census.
+        return False
+    if spec is None or spec.origin is None or not spec.origin.endswith(".py"):
+        return False
+    try:
+        source = Path(spec.origin).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _RUST_ENV_MARKER_RE.search(source) is not None
 
 
 def _is_required_seam(source: str) -> bool:
@@ -395,15 +476,34 @@ def discover_facades() -> list[str]:
     than raised so one broken optional module cannot blind the whole
     census (the skip is visible as an absent row, and the count pins in
     the tests catch a collapse).
+
+    A CANDIDATE PRE-FILTER RUNS FIRST, and it is part of the contract
+    rather than an implementation detail — stated here because omitting it
+    is how the census under-reported for as long as it did. Importing all
+    599 modules to test the signature is the honest-but-slow reading; the
+    filter buys that back by admitting a module on EITHER of two signals:
+
+    * its name carries ``rust`` or ``seam`` (46 modules), or
+    * its SOURCE declares a ``*RUST*_ENV`` constant, read without importing
+      (:func:`_declares_rust_env`).
+
+    The union is load-bearing in **both directions**, and both were
+    measured (DEC-RUST-MANDATORY-POSTURE-001 §D9.1). The name test alone
+    misses ``ranking/cvar_gate`` and ``data/greeks_enrich``, which own real
+    flags under names that mention neither word. The marker alone would
+    lose 11 modules that hold their flag elsewhere — ``config/seam_core``,
+    ``engine/rust_trade_sim``, ``exec_rust`` … So neither test may replace
+    the other; a facade satisfying either is a candidate, and the signature
+    check below is what actually decides.
     """
     package = importlib.import_module(_PACKAGE)
     found: list[str] = []
     for info in pkgutil.walk_packages(package.__path__, prefix=f"{_PACKAGE}."):
         name = info.name
-        # Cheap pre-filter on the module NAME before paying an import:
-        # every facade in this repo carries "rust" or "seam" in its path.
+        # Cheap pre-filter before paying an import. Name first because it is
+        # free; the source read only runs for the ~550 modules it rejects.
         tail = name.rsplit(".", 1)[-1]
-        if "rust" not in tail and "seam" not in tail:
+        if "rust" not in tail and "seam" not in tail and not _declares_rust_env(name):
             continue
         # The census is not a facade. It matches its own name pre-filter and
         # carries the required-seam MARKER STRINGS as data, so without this

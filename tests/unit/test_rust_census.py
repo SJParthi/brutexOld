@@ -8,10 +8,12 @@ specific failure mode — a census that reports a clean bill of health
 because it discovered nothing, or because every verdict defaults to the
 happy one. Two disciplines guard that here:
 
-* **Anti-vacuity.** :class:`TestDiscovery` pins a floor on the number of
-  facades found and asserts named ones are present. A discovery filter
-  that silently stops matching would otherwise turn the whole suite
-  green while the census reported an empty, perfect table.
+* **Anti-vacuity.** :class:`TestDiscovery` pins the EXACT SET of facades
+  found. A discovery filter that silently stops matching would otherwise
+  turn the whole suite green while the census reported an empty, perfect
+  table. This was a floor until DEC-RUST-MANDATORY-POSTURE-001 §D9.4
+  measured the floor green while discovery was short by two — a floor
+  can only see a collapse, never a narrowing and never a swap.
 * **Classification is driven, not asserted.** :class:`TestClassify`
   exercises the verdict matrix through synthetic inputs rather than
   reading the live table, so a change in the machine's wheel state
@@ -21,6 +23,7 @@ happy one. Two disciplines guard that here:
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import textwrap
 from pathlib import Path
 from types import ModuleType
@@ -28,6 +31,7 @@ from typing import Final
 
 import pytest
 from brutex.observability.rust_census import (
+    _RUST_ENV_MARKER_RE,
     CONFIGURED,
     DEGRADED,
     ENGAGED,
@@ -40,6 +44,7 @@ from brutex.observability.rust_census import (
     _classify,
     _crate_for_source,
     _crate_names,
+    _declares_rust_env,
     _delegated_crate,
     _is_required_seam,
     _source_of,
@@ -53,10 +58,63 @@ from brutex.observability.rust_census import (
     summarize,
 )
 
-#: A floor, not an exact count — the repo adds facades routinely and an
-#: equality pin would fail on unrelated work. The point is to catch a
-#: COLLAPSE (a broken filter finding nothing), not to freeze the number.
-_MIN_FACADES: Final[int] = 25
+#: THE EXACT SET, not a floor (DEC-RUST-MANDATORY-POSTURE-001 §D9.4).
+#:
+#: This was a ``_MIN_FACADES = 25`` floor, defended in its own comment as
+#: "the point is to catch a COLLAPSE, not to freeze the number". That
+#: defence was measured wrong: the census discovered 37 while the true
+#: count was 39, and the floor was green throughout — a floor cannot see
+#: two facades it never enumerated, and cannot see one DROPPING OUT while
+#: another is added. Both are the regression that actually happened.
+#:
+#: An exact set is stronger than an exact count for the same reason a
+#: checksum beats a length: it names WHICH facade appeared or vanished, so
+#: a failure is a diagnosis rather than a puzzle. The cost is real and
+#: accepted — every PR adding a facade edits this tuple. That is a feature
+#: under ADR-0026, where enrolling a facade means CLASSIFYING it (posture
+#: B REQUIRED, posture C MUST-STAY, or promotable), which is a decision
+#: that deserves a diff and a reviewer rather than silent absorption.
+_EXPECTED_FACADES: Final[tuple[str, ...]] = (
+    "brutex.backup.backup_rust",
+    "brutex.calendars.calendar_rust",
+    "brutex.config.backup_env_rust",
+    "brutex.config.dotenv_rust",
+    "brutex.config.hardware_envelope_rust",
+    "brutex.config.paths_rust",
+    "brutex.crossverify.rust_seam",
+    "brutex.data.detectors_rust",
+    "brutex.data.fno_symbol_rust",
+    "brutex.data.greeks_enrich",
+    "brutex.data.lake_rust_locks",
+    "brutex.data.lake_rust_merge",
+    "brutex.data.lake_rust_render",
+    "brutex.data.lake_rust_resample",
+    "brutex.data.lake_rust_resample_daily",
+    "brutex.data.lake_rust_stats",
+    "brutex.data.lake_rust_waved",
+    "brutex.data.window_ledger_rust",
+    "brutex.engine.refine_rust",
+    "brutex.engine.rust_enum",
+    "brutex.engine.rust_metrics",
+    "brutex.engine.rust_rank_select",
+    "brutex.engine.rust_stage1a",
+    "brutex.engine.rust_trade_sim",
+    "brutex.engine.sweep_ops_rust",
+    "brutex.feed_rust",
+    "brutex.meta.meta_rust",
+    "brutex.metrics.compute_rust",
+    "brutex.metrics.rust_stats",
+    "brutex.models_rust",
+    "brutex.money_rust",
+    "brutex.nightly.nightly_rust",
+    "brutex.notifications.notify_rust",
+    "brutex.observability.observability_rust",
+    "brutex.optcost_rust",
+    "brutex.pull_state_rust",
+    "brutex.ranking.cvar_gate",
+    "brutex.ranking.rust_ranking",
+    "brutex.strategies.combo_rust",
+)
 
 #: Facades that must always be discovered. Each is load-bearing for a
 #: different reason: one hard-imported by the engine chain, one
@@ -72,13 +130,40 @@ _MUST_FIND: Final[tuple[str, ...]] = (
 class TestDiscovery:
     """Discovery must be structural, complete, and never self-referential."""
 
-    def test_finds_a_plausible_number_of_facades(self) -> None:
-        found = discover_facades()
-        assert len(found) >= _MIN_FACADES, (
-            f"discovery collapsed to {len(found)} facades (floor {_MIN_FACADES}). "
-            "A census that finds nothing reports a perfect table -- which is "
-            "exactly the failure this floor exists to catch."
+    def test_discovers_exactly_the_expected_facades(self) -> None:
+        """The set, not the count -- a floor cannot see a swap.
+
+        Reports the two directions SEPARATELY because they mean opposite
+        things: a missing facade is a discovery REGRESSION (something the
+        census used to audit and now cannot see), while an extra one is an
+        UNCLASSIFIED facade (real work that has not yet been given an
+        ADR-0026 posture). Collapsing both into "sets differ" would make
+        the common case -- adding a facade -- read like a breakage.
+        """
+        found = set(discover_facades())
+        expected = set(_EXPECTED_FACADES)
+        assert not (expected - found), (
+            f"discovery LOST {sorted(expected - found)}. A facade the census "
+            "cannot see is a facade whose DEGRADED state cannot be reported -- "
+            "and a narrowed census is indistinguishable from a clean one."
         )
+        assert not (found - expected), (
+            f"discovery found UNCLASSIFIED facades {sorted(found - expected)}. "
+            "Add them to _EXPECTED_FACADES and give each an ADR-0026 posture "
+            "(B REQUIRED / C MUST-STAY / promotable) in the same change."
+        )
+
+    def test_finds_facades_whose_name_carries_no_rust_hint(self) -> None:
+        """The §D9.1 regression: real flags under names the filter missed.
+
+        Both own a genuine ``*RUST*_ENV`` flag while carrying neither
+        ``rust`` nor ``seam`` in the module name, so the name-only
+        pre-filter reported 37 where the truth is 39 -- silently, with no
+        gap visible in the census output.
+        """
+        found = discover_facades()
+        assert "brutex.ranking.cvar_gate" in found
+        assert "brutex.data.greeks_enrich" in found
 
     @pytest.mark.parametrize("module", _MUST_FIND)
     def test_finds_named_facades(self, module: str) -> None:
@@ -139,6 +224,102 @@ class TestCrateResolution:
     def test_delegated_crate_skips_unimportable_modules(self) -> None:
         source = "from brutex.does_not_exist_anywhere import Thing\n"
         assert _delegated_crate(source, _crate_names()) is None
+
+
+class TestRustEnvMarker:
+    """The §D9.1 discriminator: does the CONSTANT'S OWN NAME say RUST?
+
+    Precision is the whole argument for choosing this over deleting the
+    name pre-filter. A looser rule ("owns some ``*_ENV``") admits ~28
+    non-facades and pays ~600 imports to reject them; this one admitted
+    exactly two modules across all 599. These tests pin that precision at
+    the shape level so it survives a future edit to the pattern.
+    """
+
+    @pytest.mark.parametrize(
+        "declaration",
+        [
+            'CVAR_RUST_ENV: Final[str] = "BRUTEX_RANK_CVAR_RUST"',
+            'GREEKS_RUST_BATCH_ENV: Final[str] = "BRUTEX_GREEKS_RUST_BATCH"',
+            'RUST_ENV = "X"',  # the token alone, no prefix
+            'LAKE_RUST_RENDER_ENV = "X"',  # a token in the middle
+            '_RUST_ENV = "X"',  # module-private
+        ],
+    )
+    def test_matches_a_module_level_rust_env_constant(self, declaration: str) -> None:
+        assert _RUST_ENV_MARKER_RE.search(f"{declaration}\n") is not None
+
+    @pytest.mark.parametrize(
+        ("source", "why"),
+        [
+            ('GREEKS_WORKERS_ENV: Final[str] = "BRUTEX_GREEKS_WORKERS"', "no RUST in the name"),
+            ('    CVAR_RUST_ENV = "X"', "indented -- a local, not a module constant"),
+            ('# CVAR_RUST_ENV = "X"', "a comment"),
+            ('"""mentions CVAR_RUST_ENV in prose"""', "a docstring mention"),
+            ('os.environ[CVAR_RUST_ENV] = "1"', "a REFERENCE to a neighbour's flag"),
+            ('rust_env = "x"', "lowercase -- not a constant"),
+            ('MY_RUSTY_ENV = "X"', "RUST only as a substring of another word"),
+        ],
+    )
+    def test_rejects_a_non_declaration(self, source: str, why: str) -> None:
+        assert _RUST_ENV_MARKER_RE.search(f"{source}\n") is None, why
+
+    def test_reads_source_without_importing_the_module(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cost argument only holds if no import happens.
+
+        Bomb ``import_module`` outright: the probe runs on ~550 modules the
+        name filter rejects, so an import here would drag polars and duckdb
+        in to answer a question a file read answers.
+        """
+
+        def bomb(*_args: object, **_kwargs: object) -> ModuleType:
+            raise AssertionError("_declares_rust_env must not import the module")
+
+        monkeypatch.setattr("brutex.observability.rust_census.importlib.import_module", bomb)
+        assert _declares_rust_env("brutex.ranking.cvar_gate") is True
+        assert _declares_rust_env("brutex.calendars.market_hours") is False
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "brutex.does_not_exist_anywhere",
+            "brutex.does_not_exist.nested.deeper",
+            "",
+        ],
+    )
+    def test_unresolvable_module_is_false_not_a_raise(self, name: str) -> None:
+        """One unreadable module must not blind the other 598."""
+        assert _declares_rust_env(name) is False
+
+    def test_missing_origin_is_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A namespace package has a spec but no source file."""
+        spec = importlib.util.spec_from_loader("phantom", loader=None)
+        monkeypatch.setattr(
+            "brutex.observability.rust_census.importlib.util.find_spec",
+            lambda _name: spec,
+        )
+        assert _declares_rust_env("phantom") is False
+
+    def test_unreadable_source_is_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def unreadable(*_args: object, **_kwargs: object) -> str:
+            raise OSError("synthetic unreadable file")
+
+        monkeypatch.setattr("brutex.observability.rust_census.Path.read_text", unreadable)
+        assert _declares_rust_env("brutex.ranking.cvar_gate") is False
+
+    def test_find_spec_failure_is_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``find_spec`` raises when a PARENT package is broken."""
+
+        def broken(*_args: object, **_kwargs: object) -> None:
+            raise ImportError("synthetic broken parent")
+
+        monkeypatch.setattr(
+            "brutex.observability.rust_census.importlib.util.find_spec",
+            broken,
+        )
+        assert _declares_rust_env("brutex.ranking.cvar_gate") is False
 
 
 class TestRequiredSeam:
@@ -540,7 +721,7 @@ class TestDegradedPaths:
         monkeypatch.setattr("brutex.observability.rust_census.importlib.import_module", selective)
         found = discover_facades()
         assert "brutex.engine.rust_stage1a" not in found
-        assert len(found) >= _MIN_FACADES - 1
+        assert set(found) == set(_EXPECTED_FACADES) - {"brutex.engine.rust_stage1a"}
 
     def test_delegated_crate_skips_a_helper_without_a_crate(self) -> None:
         """A helper import that names no crate must not stop the search."""
