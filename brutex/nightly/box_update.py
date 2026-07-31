@@ -312,6 +312,26 @@ WHEEL_SET: Final[tuple[WheelSpec, ...]] = (
     WheelSpec("brutex_feed", "rust/brutex-feed", required=False),
     WheelSpec("brutex_refine", "rust/brutex-refine", required=True),
     WheelSpec("brutex_pull_state", "rust/brutex-pull-state", required=True),
+    # The nine DEFAULT-ON facade crates (DEC-RUST-DEFAULT-ON-WAVE-001,
+    # MIGRATION.md #2215) that no turnkey path built until now: their seams
+    # resolve ON with the env unset, so on a box WITHOUT these wheels every
+    # one of them silently degraded to its retained Python oracle — the flag
+    # said Rust, the code ran Python.  Building them here (and in the
+    # Makefile / up.sh mirrors this set is drift-pinned against) is what
+    # makes the default-ON wave real on an operator box.  ``required=False``
+    # by construction: each facade RETAINS its verbatim Python oracle and
+    # degrades warn-once, so a crate that fails to build must never hard-fail
+    # the box update (the brutex_feed precedent) — unlike brutex_lake, whose
+    # Python cores were DELETED (W-6a) and which therefore stays required.
+    WheelSpec("brutex_core", "rust/brutex-core", required=False),
+    WheelSpec("brutex_data", "rust/brutex-data", required=False),
+    WheelSpec("brutex_calendar", "rust/brutex-calendar", required=False),
+    WheelSpec("brutex_strategies", "rust/brutex-strategies", required=False),
+    WheelSpec("brutex_notify", "rust/brutex-notify", required=False),
+    WheelSpec("brutex_meta", "rust/brutex-meta", required=False),
+    WheelSpec("brutex_observability", "rust/brutex-observability", required=False),
+    WheelSpec("brutex_ops", "rust/brutex-ops", required=False),
+    WheelSpec("brutex_sweep_ops", "rust/brutex-sweep-ops", required=False),
 )
 
 

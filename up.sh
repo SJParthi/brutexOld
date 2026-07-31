@@ -370,7 +370,16 @@ brutex_lake rust/brutex-lake required
 brutex_identity rust/brutex-identity required
 brutex_feed rust/brutex-feed optional
 brutex_refine rust/brutex-refine required
-brutex_pull_state rust/brutex-pull-state required'
+brutex_pull_state rust/brutex-pull-state required
+brutex_core rust/brutex-core optional
+brutex_data rust/brutex-data optional
+brutex_calendar rust/brutex-calendar optional
+brutex_strategies rust/brutex-strategies optional
+brutex_notify rust/brutex-notify optional
+brutex_meta rust/brutex-meta optional
+brutex_observability rust/brutex-observability optional
+brutex_ops rust/brutex-ops optional
+brutex_sweep_ops rust/brutex-sweep-ops optional'
 missing_required=""
 missing_optional=""
 required_modules=""
