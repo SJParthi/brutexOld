@@ -265,8 +265,11 @@ def _declares_rust_env(name: str) -> bool:
     finder lookup) against a ~1.2 s total discovery — the other ~1.1 s is
     importing the 46 name-matched modules, which pull polars and duckdb.
     So the honest reading is that this bought two invisible facades for
-    ~10% of a diagnostic that runs in ``brutex doctor`` and in tests, never
-    on a sweep hot path.
+    ~10% of a diagnostic whose only callers today are its own tests and
+    :mod:`tests.unit.test_rust_sentinel` — it is NOT wired into ``brutex
+    doctor`` or any CLI command, and it never runs on a sweep hot path.
+    (Wiring it into a preflight is deliberate future work; until then this
+    docstring must not claim an operator surface that does not exist.)
 
     Every failure mode returns ``False`` rather than raising — a module
     with no locatable source, a namespace package, an unreadable file. A

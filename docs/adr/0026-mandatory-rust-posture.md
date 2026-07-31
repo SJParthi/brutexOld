@@ -418,6 +418,20 @@ ADR-0027 carries the corrected numbers.
    remediation string, so REQUIRED seam #6 becomes visible to the census and
    its refusal names the DEC that deleted its oracle.
 4. **Replace `_MIN_FACADES = 25`** with the exact-count pin of §D7 Tier 3.
+5. **Disclose the one seam that no wheel-based signal can reach.**
+   `brutex/dashboard/rust_front.py` engages Rust by **spawning the `brutexd`
+   binary**, not by importing a wheel. Every discovery signal the census has —
+   `importlib.util.find_spec` on a crate name, a `*_enabled()` callable, a
+   degrade announcement — asks a question that has no answer for a subprocess
+   seam: there is no module to locate. Covering it needs a *different*
+   mechanism (a binary-presence probe on `PATH` / the configured
+   `brutexd` location), which is real work and not a one-line filter change.
+   Until that lands it is listed here as a **known, named exclusion** rather
+   than silently absent, and the `discover_facades` docstring carries the same
+   disclosure at the code. It is off the sweep path (a dashboard static/health
+   sidecar, default-OFF `BRUTEX_RUST_FRONT`), so it does not weaken the
+   sweep-path guarantee — but it does mean "42 rows" is not "every Rust seam
+   in the repo", and this ADR must not imply that it is.
 
 ---
 
@@ -478,6 +492,23 @@ post-delete residual is the measured cost of reading it the other way.
    discovered, 32 ENGAGED, 5 REQUIRED, plus 2 missed by discovery and 1
    invisible seam. They are not stable across future facade work; that is
    exactly what the §D9 count pin is for.
+
+   **Re-measured 2026-07-31 after the §D9 discovery fixes landed:
+   42 discovered — 38 ENGAGED, 4 REQUIRED, 0 DEGRADED, 0 OFF, 0 UNKNOWN.**
+   Two deltas are worth stating plainly rather than leaving as arithmetic:
+   - 37 → 42 is the §D9.1 marker fix (`cvar_gate`, `greeks_enrich`) plus
+     three further seams the widened signals reached (`exec_rust`,
+     `data.lake_keys_rust`, `engine.rust_parity_core`).
+   - **REQUIRED went 5 → 4, and that is a correction, not a regression.**
+     `engine.rust_trade_sim` was being promoted by a *text* match on the word
+     "required" appearing in its docstring. The required-seam test is now an
+     `ast.Raise` walk, so a module is REQUIRED only when it actually raises a
+     refusal. `rust_trade_sim` still appears — it is now discovered by its
+     inline `rust_trade_sim.fallback` announcement and classified honestly as
+     ENGAGED, which is what it is.
+
+   The count remains a snapshot, and it excludes the subprocess seam named in
+   §D9.5.
 3. **"Zero production callers" for census and sentinel is a grep result**, not
    an inference: `grep -rn 'sentinel_scope\|RustSentinel' brutex/` returns
    nothing outside the module itself, and no workflow mentions either module.

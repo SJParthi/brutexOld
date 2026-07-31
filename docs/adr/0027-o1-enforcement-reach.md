@@ -154,9 +154,25 @@ drift this repo already pins elsewhere (`WHEEL_SET` ↔ Makefile,
    resulting source path is covered by the job's `paths:` filter (directly or
    by a `**` prefix).
 2. **Both directions.** The same test asserts every *executed* bench file
-   appears in `paths:` — the four-file gap above fails it today.
-3. **Fails loudly, names the miss.** The failure message lists the uncovered
+   appears in `paths:` — the file gap above fails it today.
+3. **A third direction, added when the test was built.** Directions 1 and 2
+   only prove the workflow *fires*. They cannot see a bench that fires, runs,
+   and then **skips its own absolute assertion** because `BRUTEX_M4PRO_ABS` is
+   unset in the job that ran it. Read that precisely: the file still executes
+   — `ci.yml` runs the whole `tests/bench` directory at the robust ratio tier —
+   so its *ratio* assertions are live. What never executes anywhere is the
+   absolute-throughput line. A skip is not a failure, so nothing goes red and
+   the dormancy is invisible. That is the exact shape which let this ADR's own
+   Honest Envelope credit a canary that never ran (see §3 there). The test
+   therefore also asserts: every bench referencing `BRUTEX_M4PRO_ABS` is
+   invoked by some job that *sets* it, with a named, shrink-only dormant set
+   for the ones that are not.
+4. **Fails loudly, names the miss.** The failure message lists the uncovered
    sources so the fix is one line per row, never a scavenger hunt.
+
+The shipped pins live in `tests/unit/test_m4pro_trigger_derivation.py`; where
+its docstring and this section ever disagree, **the test wins** — it is the
+thing that executes.
 
 This is layer 0 of the chain: *gate → trigger*. It sits below
 `test_o1_claim_backing.py`'s layer 1 and closes the hole that layer cannot
@@ -292,11 +308,42 @@ stop unblessed cells. Dormant-and-honest beats active-and-invented.
    148 bench files importing `_o1_tiers`, 13 bench files in the strict job's
    execution list, 4 of them absent from its `paths:`, 13 of 15 sources
    uncovered, 57 audit data rows, zero `.json` in `baselines/`.
-3. **ADR-0026 §D8's first draft was wrong about the canary** — it claimed no
-   assert exists; `test_throughput_absolute.py:167` and
-   `test_trade_sim_throughput.py:187` both assert the ≥50 M/s floor. The
-   correction is recorded in that ADR rather than silently edited, and it is
-   the concrete reason D2 derives the numbers in a test.
+
+   **Superseded on this same branch by the §D2 fix.** Those trigger figures
+   describe the state *before* `tests/unit/test_m4pro_trigger_derivation.py`
+   and the `paths:` correction landed. At HEAD the derived filter is **57
+   `paths:` rows** (28 before), the derivation gate runs **8 passed**, and the
+   execution-⊆-paths and sources-⊆-paths gaps are **zero** — which is the
+   whole point of deriving rather than curating. The dormant-assertion figure
+   from direction 3 is **12 skipped tests across 14 gated files** (§3 below).
+3. **ADR-0026 §D8's first draft was wrong about the canary — and this ADR's
+   own first correction was itself incomplete.** The asserts do exist:
+   `test_throughput_absolute.py:167` and `test_trade_sim_throughput.py:187`
+   both assert the ≥50 M/s floor. What the correction omitted is the clause
+   that decides whether the gate is a gate at all: **both are wrapped in
+   `skipif(not BRUTEX_M4PRO_ABS)`**, an env var set only by the self-hosted
+   `bench-m4pro.yml` workflow. Executed on the shared runner at this commit:
+
+   ```
+   $ .venv/bin/pytest tests/bench/test_throughput_absolute.py \
+                      tests/bench/test_trade_sim_throughput.py -q
+   14 passed, 2 skipped
+   ```
+
+   Both canary asserts are among the 2 skipped. Widening to every
+   `BRUTEX_M4PRO_ABS`-gated bench file (14 of them, `_o1_tiers.py` excluded as
+   the shared helper) measures **12 skipped, 65 passed** — so the dormant
+   surface is 12 tests, not the 1 the phrase "the canary" implies.
+
+   The consequence, stated plainly: `bench-m4pro` is a **non-required** check
+   (MIGRATION.md #382, #1534, and #2254, which exempts it from both merge
+   gates precisely so a red bench runner cannot block merges). Therefore
+   Golden Rule #12's ≥50 M/s canary — and the other 11 absolute gates beside
+   it — **is not enforced on any merge-blocking path**. It is a post-merge
+   observation on hardware that must be online to observe anything. Calling it
+   "asserted" without that qualifier reads as a merge guarantee it does not
+   provide. `test_throughput_canary.py` mentions "50 M/s" twice, but only in
+   prose explaining the figure — it carries no floor assert and is not gated.
 4. **"13 of 15 sources uncovered" is a static import map**, not a taint
    analysis. A bench that reaches a module through a runtime import or a
    fixture would not appear; the derivation test in D2 has the same limit and
