@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import structlog.testing
 from brutex.calendars.nse import TradingSession, get_session_checked
+from brutex.config import rust_strict
 from brutex.crossverify import canonical, csv_render, rust_seam
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 from brutex.crossverify.csv_render import CSV_HEADER, ExportContractError, ExportRow, render_day_csv
@@ -155,8 +156,16 @@ def _faithful_crate(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_seam() -> Iterator[None]:
-    """Reset the seam latch/burn-in/memo around every test (isolation)."""
+def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Reset the seam latch/burn-in/memo around every test (isolation).
+
+    Also opts OUT of strict mode (DEC-RUST-STRICT-NO-FALLBACK-001, which
+    ships ON): this module exists to exercise the DEGRADE lattice, so the
+    honest move is an explicit opt-out here rather than a weakened
+    assertion. ``TestStrictRefusal`` opts back IN per test on THIS SAME
+    shared ``monkeypatch`` object.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     rust_seam.reset_crossverify_rust_for_tests()
     yield
     rust_seam.reset_crossverify_rust_for_tests()

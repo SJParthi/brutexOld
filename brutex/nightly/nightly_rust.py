@@ -182,8 +182,62 @@ def reset_nightly_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+#: DEC-RUST-STRICT-NO-FALLBACK-001 — the ``{kernel}_error`` tokens whose
+#: class is genuinely AMBIGUOUS and is therefore NOT refused pending a
+#: ruling. ``_DEGRADE_ERRORS`` folds TWO distinct crate outcomes into one
+#: reason token per kernel: a real fault (stale wheel, FFI arity/type
+#: mismatch) — CLASS A — and the crate's own documented *refuse-to-guess*
+#: arm, where a legitimate INPUT sits outside the faithful-mirror domain and
+#: the crate deliberately hands the call back so the Python oracle decides —
+#: CLASS C. The facade cannot tell them apart (both arrive as the same
+#: ``ValueError`` from pyo3's ``Err(String)`` mapping), so refusing here
+#: would crash a legitimate input, and exempting would swallow a real fault.
+#:
+#: Held UNRESOLVED with crate evidence (``rust/brutex-ops/src/nightly.rs``):
+#:
+#: * ``summary_lines_error`` — L222-224 ``"duration {duration} outside the
+#:   faithful mirror domain — python oracle decides"`` (non-finite or
+#:   >= ``MAX_EXACT_DURATION`` elapsed seconds).
+#: * ``parse_at_error`` — L403 ``"non-ASCII --at input — python oracle
+#:   decides"`` (CPython's un-flagged ``\\d`` matches Unicode decimal digits;
+#:   the hand-rolled ASCII matcher refuses to re-derive that).
+#: * ``pmset_wake_command_error`` — L449 ``"pmset arithmetic overflow —
+#:   python oracle decides"`` (``checked_mul``/``add``/``sub`` overflow).
+#: * ``seconds_since_scheduled_fire_error`` — L488-490 ``"component {value}
+#:   outside {low}..={high} — python oracle decides"``.
+#:
+#: The honest fix is to SPLIT the token crate-side (a distinct
+#: ``{kernel}_input_beyond_crate`` reason for the refuse-to-guess arm), then
+#: refuse the fault half and exempt the input half. That is a
+#: ``rust/brutex-ops`` change owned by another lane — reported, not guessed.
+#: The remaining four kernels REFUSE: ``first_breaker`` (impl returns
+#: ``Option``, no ``Err`` — L54) and ``render_launchd_plist`` (impl returns
+#: ``String``, no ``Err`` — L327) can only fault; ``exit_code_for`` (L68)
+#: and ``audit_reconcile_tripwire`` (L110) ``Err`` only on a length mismatch
+#: their own doc-comments call *"a facade bug — refuse loudly"*.
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "summary_lines_error",
+        "parse_at_error",
+        "pmset_wake_command_error",
+        "seconds_since_scheduled_fire_error",
+    }
+)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``nightly_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``nightly_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. CLASS A (``flag_unrecognised``, the
+    four fault-only ``{kernel}_error`` tokens) and CLASS B (every
+    ``{kernel}_result_refused`` — the crate ran and its shape gate rejected
+    the output) refuse. The four tokens in
+    :data:`_STRICT_UNRESOLVED_REASONS` do NOT refuse: their class is
+    genuinely ambiguous and is reported rather than guessed (see that
+    constant for the per-token crate evidence).
+    """
+    if reason not in _STRICT_UNRESOLVED_REASONS:
+        refuse_if_strict("brutex.nightly.nightly_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -191,12 +245,21 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
 
     ``error=True`` logs ``nightly_rust.kernel_autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``nightly_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: reasons here are CLASS A
+    (``crate_unavailable``, ``crate_panic``) or CLASS B (``burn_in_mismatch``
+    — the crate DISAGREED with the oracle), so the refusal is UNCONDITIONAL.
+    It fires BEFORE the latch write, so under strict mode the latch can never
+    be set and :func:`nightly_rust_disabled`'s early-return in
+    :func:`route_kernel` is structurally unreachable — wiring these two
+    functions therefore covers every announced fall-back this facade takes.
     """
+    refuse_if_strict("brutex.nightly.nightly_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

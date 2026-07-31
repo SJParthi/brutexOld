@@ -396,3 +396,64 @@ class TestMutationWorkflowWiring:
         assert '"brutex/data/lake_rust_stats.py:tests/unit/test_lake_rust_stats.py:"' in text, (
             "lake_rust_stats.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+# ---------------------------------------------------------------------------
+# DEC-RUST-STRICT-NO-FALLBACK-001 — strict-ON refusal pins
+# ---------------------------------------------------------------------------
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice).  These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+
+    This facade has NO class-C reason (an input the crate was never meant
+    to handle) at either choke point, so it carries no exemption set —
+    every reason it emits is class A (crate absent / stale / errored) or
+    class B (the crate ran and returned a structurally refused result).
+
+    ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
+    fixture used, so both live on one LIFO undo stack and the value cannot
+    leak past this module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_absent_crate_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setitem(sys.modules, "brutex_lake", None)
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            _seam_call()
+
+    def test_same_path_serves_the_oracle_under_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The autouse fixture already pinned BRUTEX_RUST_STRICT=0.
+        monkeypatch.setitem(sys.modules, "brutex_lake", None)
+        assert _seam_call() == "PY"
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(lake_rust_stats.LAKE_RUST_STATS_ENV, "onn")
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lake_rust_stats.lake_rust_stats_enabled()
+
+    def test_class_b_burn_in_byte_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lake_rust_stats._disable("burn_in_byte_mismatch")

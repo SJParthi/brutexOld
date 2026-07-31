@@ -22,6 +22,7 @@ from structlog.testing import capture_logs
 
 pytest.importorskip("trading_core", reason="greeks enrichment needs the trading_core wheel")
 
+from brutex.config import rust_strict
 from brutex.data import greeks_enrich
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
@@ -68,7 +69,14 @@ _STYLE = STYLE_EUROPEAN_EXACT
 
 @pytest.fixture(autouse=True)
 def _clean_batch_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Every test starts flag-unset with pristine process state."""
+    """Every test starts flag-unset with pristine process state.
+
+    Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ships ON; this module
+    exercises the batch seam's DEGRADE lattice, so it opts OUT explicitly
+    here rather than weakening an assertion. ``TestStrictRefusal`` opts back
+    IN per test on THIS SAME shared ``monkeypatch`` object.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     monkeypatch.delenv(GREEKS_RUST_BATCH_ENV, raising=False)
     reset_rust_batch_for_tests()
     yield

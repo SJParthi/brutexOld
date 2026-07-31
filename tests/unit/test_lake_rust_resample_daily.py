@@ -742,3 +742,61 @@ class TestMutationWorkflowWiring:
         assert pair in text, (
             "lake_rust_resample_daily.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+# ---------------------------------------------------------------------------
+# DEC-RUST-STRICT-NO-FALLBACK-001 — strict-ON refusal pins
+# ---------------------------------------------------------------------------
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice).  These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+
+    This facade has NO class-C reason (an input the crate was never meant
+    to handle) at either choke point, so it carries no exemption set —
+    every reason it emits is class A (crate absent / stale / errored) or
+    class B (the crate ran and returned a structurally refused result).
+
+    ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
+    fixture used, so both live on one LIFO undo stack and the value cannot
+    leak past this module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_absent_crate_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            _run(monkeypatch, None)  # None in sys.modules -> ImportError
+
+    def test_same_path_serves_the_oracle_under_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The autouse fixture already pinned BRUTEX_RUST_STRICT=0.
+        assert _run(monkeypatch, None).equals(_ORACLE_DF)
+
+    def test_class_a_warn_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lrd._warn_once("polars_version_mismatch")
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lrd._disable("resample_result_refused")

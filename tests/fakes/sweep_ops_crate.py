@@ -20,11 +20,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from types import SimpleNamespace
-from typing import TypeVar
 
 import blake3
-
-_T = TypeVar("_T")
 
 
 def _join_path_segments(base: str, segments: list[str]) -> str:
@@ -549,7 +546,7 @@ def _grid_tuple_count(axes: Sequence[int]) -> int:
     return product
 
 
-def routed_fallback_reasons(call: Callable[[], _T]) -> tuple[_T, list[str], int]:
+def routed_fallback_reasons[T](call: Callable[[], T]) -> tuple[T, list[str], int]:
     """Run *call* with the FAKE crate ARMED; return ``(result, reasons, engaged)``.
 
     The ONE §11-COMMON probe every "the CLASS-C fall-back is unreachable"
@@ -576,9 +573,8 @@ def routed_fallback_reasons(call: Callable[[], _T]) -> tuple[_T, list[str], int]
     """
     import pytest
     import structlog
-    from structlog.testing import LogCapture
-
     from brutex.engine import sweep_ops_rust
+    from structlog.testing import LogCapture
 
     crate = build_fake_sweep_ops_crate(version="fake")
     capture = LogCapture()

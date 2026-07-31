@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import structlog.testing
+from brutex.config import rust_strict
 from brutex.meta.abstain import abstain_masks_python
 from brutex.meta.logistic import score_logistic as oracle_score
 from brutex.meta.meta_rust import (
@@ -47,7 +48,15 @@ ABSTAIN_ARGS = (
 
 
 @pytest.fixture(autouse=True)
-def _reset() -> None:
+def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fresh process view + strict mode OFF for the degrade-lattice suite.
+
+    Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ships ON; this module
+    exercises every degrade arm, so it opts OUT explicitly rather than
+    weakening an assertion. ``TestStrictRefusal`` opts back IN per test on
+    THIS SAME shared ``monkeypatch`` object.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     reset_meta_rust_for_tests()
 
 

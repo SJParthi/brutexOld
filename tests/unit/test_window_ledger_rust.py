@@ -611,3 +611,96 @@ class TestRealWheelDifferential:
         assert result == "SUCCESS"
         warns = [e for e in logs if e["event"] == "window_ledger_rust.fallback"]
         assert warns[0]["reason"] == "classify_error"
+
+
+# ---------------------------------------------------------------------------
+# DEC-RUST-STRICT-NO-FALLBACK-001 — strict-ON refusal pins
+# ---------------------------------------------------------------------------
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice).  These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+
+    ONE class-C exemption is held in ``_STRICT_EXEMPT_REASONS``:
+    ``merge_key_nondate_refused`` — the exact-type input gate that routes a
+    ``datetime`` (a ``date`` SUBCLASS whose ``isoformat`` differs) to the
+    oracle.  The crate was never meant to see it, so refusing there would
+    crash a legitimate input; the real fix would be widening the crate.
+
+    ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
+    fixture used, so both live on one LIFO undo stack and the value cannot
+    leak past this module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_absent_crate_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _flag_on(monkeypatch)
+
+        def _import(name: str) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(wlr.importlib, "import_module", _import)
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            wlr.routed_classify_window_status(
+                3, None, degraded=False, python_law=_classify_window_status_python
+            )
+
+    def test_same_path_serves_the_oracle_under_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The autouse fixture already pinned BRUTEX_RUST_STRICT=0.
+        _flag_on(monkeypatch)
+
+        def _import(name: str) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(wlr.importlib, "import_module", _import)
+        assert (
+            wlr.routed_classify_window_status(
+                3, None, degraded=False, python_law=_classify_window_status_python
+            )
+            == "SUCCESS"
+        )
+
+    def test_class_b_burn_in_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            wlr._disable("classify_result_refused")
+
+    def test_class_c_nondate_merge_key_is_exempt_under_strict_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact-type input gate is class C: the oracle serves it, no raise."""
+        assert frozenset({"merge_key_nondate_refused"}) == wlr._STRICT_EXEMPT_REASONS
+        _flag_on(monkeypatch)
+
+        def _bomb(name: str) -> object:
+            raise AssertionError("nondate key reached the crate import")
+
+        monkeypatch.setattr(wlr.importlib, "import_module", _bomb)
+        key = WindowKey(
+            market="groww",
+            security_id="NSE-NIFTY",
+            interval="1minute",
+            start=datetime(2024, 1, 2, 9, 15, tzinfo=UTC),
+            end=date(2024, 1, 3),
+        )
+        self._strict_on(monkeypatch)
+        result = wlr.routed_window_merge_key(key, python_law=window_key_python)
+        assert result[3] == "2024-01-02T09:15:00+00:00"

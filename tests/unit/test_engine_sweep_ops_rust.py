@@ -733,6 +733,18 @@ class TestRoutedGateFragment:
             (None, (1, 2)),  # stage3 leg wrong arity
             (None, (1, 2, True)),  # stage3 leg bool member
             (None, [1, 2, 3]),  # stage3 leg non-tuple
+            # ── the FOUR-leg shapes (DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001).
+            # These unpack cleanly, so unlike the 2-tuples above they reach
+            # ``_valid_fragment_legs`` itself and exercise its per-leg refusals
+            # → the ``gate_fragment_result_refused`` arm.
+            ((0.95, 0.05, 0.0), None, None, None),  # overfit leg wrong arity, 4-leg
+            (None, 1, None, None),  # max_sl leg non-float (an exact int)
+            (None, "0.5", None, None),  # max_sl leg a str
+            (None, None, (1,), None),  # cvar leg wrong arity
+            (None, None, (1, 2.0), None),  # cvar leg non-int member
+            (None, None, [1, 2], None),  # cvar leg non-tuple
+            (None, None, (1, True), None),  # cvar leg bool member
+            (None, None, None, (1, 2)),  # stage3 leg wrong arity, 4-leg shape
         ],
     )
     def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, legs: Any) -> None:
@@ -2340,22 +2352,20 @@ class TestRoutedCheckpointRecordDecision:
 
     def test_out_of_i64_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The REAL wheel's pyo3 i64 conversion raises OverflowError on an
-        # out-of-band index (parity-suite-proven); the fake mirrors it here
-        # via a raising stand-in (the slice-2 overflow-test idiom).
+        # out-of-band index — which is INDISTINGUISHABLE from a crate fault.
+        # Since the band gates (DEC-SWEEP-OPS-INT-BAND-GATES-001) the facade
+        # decides it FIRST, so the crate is never reached and the reason is
+        # the honest class-C ``*_input_refused``. The oracle-serve half of
+        # this pin is unchanged; only the token moved off ``*_error``.
         _enable(monkeypatch)
-        crate = _good_crate()
-
-        def raising(*args: Any) -> str:
-            raise OverflowError("out of i64")
-
-        crate.checkpoint_record_decision = raising
-        _install_crate(monkeypatch, crate)
+        calls = _install_import_bomb(monkeypatch)
         with capture_logs() as logs:
             assert (
                 routed_checkpoint_record_decision(2**64, -1, 2**65, python_law=lambda: "advance")
                 == "advance"
             )
-        warns = [e for e in logs if e.get("reason") == "checkpoint_record_error"]
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "checkpoint_record_input_refused"]
         assert len(warns) == 1
 
     @pytest.mark.parametrize("result", [7, "banana", None])
@@ -2834,19 +2844,19 @@ class TestRoutedResumeDecision:
         assert len(warns) == 1
 
     def test_out_of_i64_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Since the band gates (DEC-SWEEP-OPS-INT-BAND-GATES-001) an
+        # out-of-i64 index is decided at the facade's OWN gate, so the crate
+        # is never reached and the reason is the honest class-C
+        # ``*_input_refused``. The oracle-serve half of this pin is unchanged;
+        # only the token moved off the overloaded ``*_error``.
         _enable(monkeypatch)
-        crate = _good_crate()
-
-        def raising(*args: Any) -> tuple[str, int]:
-            raise OverflowError("out of i64")
-
-        crate.resume_decision = raising
-        _install_crate(monkeypatch, crate)
+        calls = _install_import_bomb(monkeypatch)
         with capture_logs() as logs:
             assert routed_resume_decision(
                 True, True, 2**64, 2**65, python_law=lambda: ("resume", 2**64)
             ) == ("resume", 2**64)
-        warns = [e for e in logs if e.get("reason") == "resume_decision_error"]
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "resume_decision_input_refused"]
         assert len(warns) == 1
 
     @pytest.mark.parametrize(

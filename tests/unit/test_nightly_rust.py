@@ -17,6 +17,7 @@ import types
 from typing import TYPE_CHECKING
 
 import pytest
+from brutex.config import rust_strict
 from brutex.data import lake_rust_render
 from brutex.nightly import nightly_rust
 from structlog.testing import capture_logs
@@ -44,7 +45,14 @@ def _route(
 
 @pytest.fixture(autouse=True)
 def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Test isolation: env unset + latch/burn-in/memo reset both sides."""
+    """Test isolation: env unset + latch/burn-in/memo reset both sides.
+
+    Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ships ON; this module
+    exercises the DEGRADE lattice, so it opts OUT explicitly here rather
+    than weakening an assertion. ``TestStrictRefusal`` opts back IN per test
+    on THIS SAME shared ``monkeypatch`` object.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     monkeypatch.delenv(nightly_rust.NIGHTLY_RUST_ENV, raising=False)
     monkeypatch.setitem(sys.modules, "brutex_ops", build_fake_crate())
     nightly_rust.reset_nightly_rust_for_tests()

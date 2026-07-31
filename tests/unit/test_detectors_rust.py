@@ -838,3 +838,82 @@ class TestMutationWorkflowWiring:
         assert '"brutex/data/detectors_rust.py:tests/unit/test_detectors_rust.py:"' in text, (
             "detectors_rust.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+# ---------------------------------------------------------------------------
+# DEC-RUST-STRICT-NO-FALLBACK-001 — strict-ON refusal pins
+# ---------------------------------------------------------------------------
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice).  These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+
+    ONE class-C exemption is held in ``_STRICT_EXEMPT_REASONS``:
+    ``partial_window_abstain`` — the crate's DECLARED off-grid abstain
+    (``classify_partial_window_verdict`` returns ``None``), i.e. an input
+    outside its envelope.  Crate FAULTS surface separately as
+    ``partial_window_error`` / ``partial_window_result_refused``, so the
+    token is not overloaded and the exemption cannot mask a real fault.
+
+    ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
+    fixture used, so both live on one LIFO undo stack and the value cannot
+    leak past this module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_absent_crate_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        def _import(name: str) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(dr.importlib, "import_module", _import)
+        canonical = b"[]"
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            dr.routed_hash_payload_hex(canonical, python_law=_hash_oracle_for(canonical))
+
+    def test_same_path_serves_the_oracle_under_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The autouse fixture already pinned BRUTEX_RUST_STRICT=0.
+        def _import(name: str) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(dr.importlib, "import_module", _import)
+        canonical = b"[]"
+        assert (
+            dr.routed_hash_payload_hex(canonical, python_law=_hash_oracle_for(canonical))
+            == hashlib.blake2b(canonical, digest_size=32).hexdigest()
+        )
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            dr._disable("hash_result_refused")
+
+    def test_class_c_partial_window_abstain_is_exempt_under_strict_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The crate's declared off-grid abstain is class C: no raise."""
+        assert frozenset({"partial_window_abstain"}) == dr._STRICT_EXEMPT_REASONS
+        _install_crate(monkeypatch, fake_detectors_crate(classify_partial=lambda *a: None))
+        self._strict_on(monkeypatch)
+        assert dr.routed_classify_partial_window(
+            payload_factory=_partial_payload(),
+            python_law=lambda: ("oracle", None, None, 0),
+            materialize=_identity_materialize,
+        ) == ("oracle", None, None, 0)

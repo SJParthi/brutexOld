@@ -1454,3 +1454,76 @@ class TestLatchAndReset:
         lrr.reset_lake_rust_render_for_tests(remaining=0)
         assert lrr._BURN_IN_SHAPE_GATE[0] is False  # steady state — crate bytes, no oracle
         assert lrr._BURN_IN_DEFAULT[0] == 0  # every profile lazily seeds spent
+
+
+# ---------------------------------------------------------------------------
+# DEC-RUST-STRICT-NO-FALLBACK-001 — strict-ON refusal pins
+# ---------------------------------------------------------------------------
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice).  These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+
+    This facade has NO class-C reason (an input the crate was never meant
+    to handle) at either choke point, so it carries no exemption set —
+    every reason it emits is class A (crate absent / stale / errored) or
+    class B (the crate ran and returned a structurally refused result).
+
+    ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
+    fixture used, so both live on one LIFO undo stack and the value cannot
+    leak past this module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_absent_crate_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _install_crate(monkeypatch, None)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+
+    def test_same_path_serves_the_oracle_under_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The autouse fixture already pinned BRUTEX_RUST_STRICT=0.
+        _install_crate(monkeypatch, None)
+        monkeypatch.setenv(lrr.LAKE_RUST_RENDER_ENV, "1")
+        assert (
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+            )
+            == PY_BYTES
+        )
+
+    def test_class_a_warn_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lrr._warn_once("polars_version_mismatch")
+
+    def test_class_b_render_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lrr._disable("render_result_refused")
