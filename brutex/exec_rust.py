@@ -116,7 +116,6 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.config.rust_strict import refuse_if_strict
 from brutex.costs.types import ChargeStack
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
@@ -219,6 +218,21 @@ def _strict_exempt(reason: str) -> bool:
     return reason in _STRICT_EXEMPT_REASONS or reason.startswith(_STRICT_EXEMPT_REASON_PREFIXES)
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a CLASS-A/CLASS-B fall-back under strict mode.
+
+    The :mod:`brutex.config.rust_strict` import is FUNCTION-LOCAL by design:
+    this module is a costs-free leaf (the ``py/cyclic-import`` fix homed
+    :class:`~brutex.costs.types.ChargeStack` here for exactly that reason), and
+    the gate's own root (``brutex.models`` for ``BruteXError``) has no business
+    in this leaf's import-time weight. Pinned by
+    ``test_seam_is_a_costs_free_leaf_ast_pin``.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict(_STRICT_FACADE, reason, **context)
+
+
 def reset_warn_memo_for_tests() -> None:
     """Restore a fresh warn-once view (test isolation only)."""
     _warned.clear()
@@ -235,7 +249,7 @@ def _warn_once(event: str, *, reason: str, **kw: object) -> None:
     an already-warned repeat cannot slip through the early return.
     """
     if not _strict_exempt(reason):
-        refuse_if_strict(_STRICT_FACADE, reason, event=event, **kw)
+        _refuse_if_strict(reason, event=event, **kw)
     key = (event, reason)
     if key in _warned:
         return

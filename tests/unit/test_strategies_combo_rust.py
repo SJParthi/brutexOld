@@ -98,13 +98,25 @@ def _fake_crate(
 
 
 def _install_crate(monkeypatch: pytest.MonkeyPatch, crate: object) -> None:
-    """Route the facade's ``importlib.import_module`` at the fake crate."""
+    """Route the facade's ``importlib.import_module`` at the fake crate.
+
+    ``crate=None`` routes at an ABSENT crate — the importer raises
+    ``ImportError``, i.e. the facade's ``crate_unavailable`` arm. Use
+    :func:`_absent_crate` for that spelling.
+    """
 
     def _import(name: str) -> object:
         assert name == "brutex_strategies"
+        if crate is None:
+            raise ImportError(name)
         return crate
 
     monkeypatch.setattr(cr.importlib, "import_module", _import)
+
+
+def _absent_crate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the facade's importer at a crate that is NOT installed."""
+    _install_crate(monkeypatch, None)
 
 
 def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -811,11 +823,7 @@ class TestStrictMode:
     ) -> None:
         # Strict is ON by default — the fixture never sets the env at all.
         _flag_on(monkeypatch)
-
-        def _import(name: str) -> object:
-            raise ImportError(name)
-
-        monkeypatch.setattr(cr.importlib, "import_module", _import)
+        _absent_crate(monkeypatch)
         with pytest.raises(RustFallbackRefused) as excinfo:
             cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json)
         message = str(excinfo.value)
@@ -898,9 +906,7 @@ class TestStrictMode:
 
             _install_crate(mp, _fake_crate(scan=_scan_refuse))
             assert (
-                cr.routed_first_offending_field(
-                    OFFENDING_FIELDS, python_law=_first_offending_field
-                )
+                cr.routed_first_offending_field(OFFENDING_FIELDS, python_law=_first_offending_field)
                 == "b"
             )
 
@@ -941,9 +947,7 @@ class TestStrictMode:
 
             _install_crate(mp, _fake_crate(scan=_scan_boom))
             with pytest.raises(RustFallbackRefused, match="scan_error"):
-                cr.routed_first_offending_field(
-                    OFFENDING_FIELDS, python_law=_first_offending_field
-                )
+                cr.routed_first_offending_field(OFFENDING_FIELDS, python_law=_first_offending_field)
             assert cr.rust_combo_disabled() is False
 
     def test_marked_refusals_warn_and_degrade_with_strict_off(self) -> None:
@@ -971,11 +975,7 @@ class TestStrictMode:
     def test_kill_switch_restores_the_degrade_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(RUST_STRICT_ENV, "0")
         _flag_on(monkeypatch)
-
-        def _import(name: str) -> object:
-            raise ImportError(name)
-
-        monkeypatch.setattr(cr.importlib, "import_module", _import)
+        _absent_crate(monkeypatch)
         assert cr.routed_canonical_json(LOWERED, python_law=_stdlib_canonical_json) == CANON
         assert cr.rust_combo_disabled() is True
 

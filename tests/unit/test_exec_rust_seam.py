@@ -21,6 +21,7 @@ UNMODIFIED frozen golden suites passing on a ``"0"``-armed run, that is the
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,6 +77,32 @@ _FUTURES_ARGS: dict[str, Any] = {
     "stamp_rate": 200,
     "gst_rate": 1_800_000,
 }
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    CLASS-A (``wheel_missing``, ``flag_unrecognised``) and CLASS-B
+    (``kernel:<site>`` — the kernel raised, or returned a malformed wire)
+    reason now RAISES ``RustFallbackRefused`` instead of quietly serving the
+    verbatim Python oracle. This module exists to exercise that oracle arm —
+    the still-supported ``BRUTEX_RUST_STRICT=0`` mode — so the mode is
+    DECLARED once, here, rather than by weakening any assertion. Strict-ON
+    refusal is pinned separately in ``TestStrictRefusal`` at the end of this
+    module.
+
+    The patch runs in its OWN :class:`pytest.MonkeyPatch` context, not the
+    shared ``monkeypatch`` fixture, so ``TestStrictRefusal``'s nested
+    ``delenv`` can never record ``"0"`` as a value to restore across fixture
+    teardown (the shipped ``test_rust_stats`` shape).
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -1163,6 +1190,16 @@ def test_seam_is_a_costs_free_leaf_ast_pin() -> None:
     AND function-local ``import``/``from`` statements), so a lazily
     re-introduced calculator import fails too; the exact-set law also
     catches a silently GROWN import surface.
+
+    GROWTH RECORD (DEC-RUST-STRICT-NO-FALLBACK-001): ``brutex.config.rust_strict``
+    joins the set as the strict-mode gate the ONE ``_warn_once`` choke point
+    consults. It is a CONSCIOUS, reviewed addition — the exact-set law did its
+    job by forcing this review rather than letting the surface drift. It is
+    cycle-free (``rust_strict`` → ``brutex.config.env_flags`` + ``brutex.models``
+    → ``brutex.models_rust``, none of which imports the seam back) and is
+    imported FUNCTION-LOCALLY inside ``exec_rust._refuse_if_strict`` so this
+    leaf's import-time weight is unchanged. The calculator ban — the defect
+    this pin exists for — is untouched.
     """
     import ast
 
@@ -1177,9 +1214,13 @@ def test_seam_is_a_costs_free_leaf_ast_pin() -> None:
             modules.update(alias.name for alias in node.names)
     brutex_imports = {m for m in modules if m == "brutex" or m.startswith("brutex.")}
     assert brutex_imports == {
+        "brutex.config.rust_strict",
         "brutex.costs.types",
         "brutex.engine.sweep_lookahead",
     }
+    # The defect this pin was minted for: the calculator half of the mutual
+    # pair must NEVER re-appear, at any scope.
+    assert "brutex.costs.calculator" not in brutex_imports
 
 
 class TestMutationWorkflowWiring:
@@ -1196,3 +1237,95 @@ class TestMutationWorkflowWiring:
         assert '"brutex/exec_rust.py:tests/unit/test_exec_rust_seam.py:"' in text, (
             "exec_rust.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+# ────── strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ──────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the single ``_warn_once`` choke
+    point REFUSES instead of quietly handing the call to the Python arm.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Iterator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
+        shared ``monkeypatch`` fixture: ``_strict_off_degrade_lattice`` sets
+        ``BRUTEX_RUST_STRICT=0`` in a *separate* context, and pytest tears
+        fixtures down LIFO across fixture objects — a shared-``monkeypatch``
+        ``delenv`` here would record ``"0"`` as the value to restore and leak
+        the kill switch into every later test file in the process.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    def test_class_a_wheel_missing_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — **an ABSENT wheel is not a legitimate input shape**.
+
+        The pre-strict seam refused only a STALE wheel (``StaleExecWheelError``)
+        while an ABSENT one degraded silently; strict mode closes that half.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        monkeypatch.setattr(exec_rust, "_rust", None)
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="wheel_missing"):
+            exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True)
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — a typo'd kill switch must be fatal, never a quiet OFF."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "yes-please")
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="flag_unrecognised"):
+            exec_rust.exec_rust_enabled()
+
+    def test_class_b_kernel_fault_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS B — the kernel RAN and raised; a quiet Python re-run hides it."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        def _boom(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("kernel says no")
+
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        monkeypatch.setattr(exec_rust, "_rust", SimpleNamespace(exec_apply_slippage=_boom))
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="kernel:fill_slippage"):
+            exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True)
+
+    @pytest.mark.parametrize("site", sorted(_envelope_calls()))
+    def test_class_c_envelope_prefix_does_not_refuse(
+        self, monkeypatch: pytest.MonkeyPatch, site: str
+    ) -> None:
+        """CLASS C — the ``envelope:`` prefix family.
+
+        The ``_fits_i64`` PRE-gate refused a value the kernel's i64 wire
+        cannot carry, so the kernel is NEVER called (bomb kernel proves it)
+        and the exact Python arm serves a legal-but-wide input. Refusing would
+        crash a legal charge; the real fix is a wider kernel wire.
+        """
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        bomb = _BombKernel()
+        monkeypatch.setattr(exec_rust, "_rust", bomb)
+        with self._strict_on():
+            assert _envelope_calls()[site]() is None
+        assert bomb.touched == []
+
+    def test_strict_off_still_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        monkeypatch.setattr(exec_rust, "_rust", None)
+        assert exec_rust.fill_slippage(9_995, 9_995, 12_005, 12_005, is_long=True) is None

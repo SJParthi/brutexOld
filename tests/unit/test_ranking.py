@@ -1282,9 +1282,7 @@ class TestOverfitGateConfigNormalisation:
         from tests.unit.test_engine_sweep_orchestrator import _grid
 
         grid = _grid(overfit=OverfitGateConfig(dsr_min=1, weight=0))
-        fragment, reasons, engaged = routed_fallback_reasons(
-            lambda: _gate_config_fragment(grid)
-        )
+        fragment, reasons, engaged = routed_fallback_reasons(lambda: _gate_config_fragment(grid))
         assert reasons == []
         assert engaged == 1  # anti-vacuity: the crate genuinely ran
         assert fragment == {"overfit": [1.0, 0.0, 0.0, 0.0]}

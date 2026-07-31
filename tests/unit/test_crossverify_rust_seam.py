@@ -977,3 +977,144 @@ class TestResetSeam:
             "s3_key": rust_seam.BURN_IN_SAMPLES,
         }
         assert set() == rust_seam._OBSERVABILITY_MEMO
+
+
+class TestStrictRefusal:
+    """DEC-RUST-STRICT-NO-FALLBACK-001 — the two announcement choke points refuse.
+
+    This facade funnels EVERY Python fall-back through exactly two
+    functions — ``_warn_once`` (the warn-once memo) and ``_disable`` (the
+    process latch) — and both call ``_refuse_if_strict`` BEFORE their
+    memo/latch write, so a latched early-return is structurally
+    unreachable under strict mode.
+
+    CLASS C is EMPTY here: every reason token this seam can emit is
+    either a crate fault (CLASS A) or a structurally-refused Rust RESULT
+    (CLASS B). There is no reason whose trigger is a legitimate input the
+    crate was never meant to handle — the one input-shaped token,
+    ``csv_refusal_or_poison``, fires only for row shapes the production
+    call site (``csv_render._validated_cell_rows``) has already rejected,
+    so reaching it means the crate disagreed with a validated input.
+    Hence both choke points call ``refuse_if_strict`` UNCONDITIONALLY
+    (no ``_STRICT_EXEMPT_REASONS`` frozenset — an empty one would leave
+    an unreachable branch under the 100% branch gate).
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Arm strict mode on the SHARED monkeypatch the autouse fixture used.
+
+        Never a nested ``MonkeyPatch.context()`` layered on top of the
+        fixture's own object: two objects tear down LIFO and would leak
+        ``BRUTEX_RUST_STRICT`` past this module.
+        """
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    @staticmethod
+    def _bomb_import(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the ``brutex_ops`` import raise — the CLASS-A wheel-absent path."""
+        monkeypatch.delitem(sys.modules, "brutex_ops", raising=False)
+        real_import = rust_seam.importlib.import_module
+
+        def fake_import(name: str, *args: str | None) -> types.ModuleType:
+            if name == "brutex_ops":
+                raise ImportError("no wheel")
+            return real_import(name, *args)  # pragma: no cover — no other import fires
+
+        monkeypatch.setattr(rust_seam.importlib, "import_module", fake_import)
+
+    # ---- CLASS A ----------------------------------------------------
+
+    def test_class_a_crate_unavailable_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        """Wheel absent ⇒ ``RustFallbackRefused``, and the latch stays CLEAR.
+
+        The clear latch is the proof the refusal fires BEFORE the latch
+        write, which is what makes the wiring complete rather than a
+        sample: no later call can take a silent latched early-return.
+        """
+        self._strict_on(monkeypatch)
+        self._bomb_import(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused) as excinfo:
+            render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session())
+        message = str(excinfo.value)
+        assert "brutex.crossverify.rust_seam" in message
+        assert "crate_unavailable" in message
+        assert rust_seam.rust_seam_disabled() is False
+
+    def test_class_a_crate_unavailable_serves_oracle_when_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        """The SAME path with strict OFF degrades to the oracle bytes."""
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        self._bomb_import(monkeypatch)
+        assert render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session()) == (
+            _oracle_bytes()
+        )
+        assert rust_seam.rust_seam_disabled() is True
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A junk flag value is a crate-selection fault, not an input shape."""
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "banana")
+        with pytest.raises(rust_strict.RustFallbackRefused, match="flag_unrecognised"):
+            rust_seam.crossverify_rust_enabled()
+
+    def test_class_a_crate_stale_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        """A pre-lane wheel (missing API members) refuses instead of latching."""
+        self._strict_on(monkeypatch)
+        module = _FakeOpsModule("brutex_ops")
+        module.crossverify_render_csv = lambda header, rows: (b"", None)
+        monkeypatch.setitem(sys.modules, "brutex_ops", module)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="crate_stale"):
+            rust_seam.routed_s3_key(
+                prefix="p",
+                day_iso="2026-07-10",
+                segment_token="NSE_EQ",
+                canonical_symbol="M&M",
+                python_oracle=lambda: "oracle-key",
+            )
+        assert rust_seam.rust_seam_disabled() is False
+
+    # ---- CLASS B ----------------------------------------------------
+
+    def test_class_b_result_refused_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        """A structurally-refused Rust RESULT is a crate answer, not an input."""
+        self._strict_on(monkeypatch)
+        _plant_crate(monkeypatch, crossverify_s3_key=lambda *args: 7)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="s3_key_result_refused"):
+            rust_seam.routed_s3_key(
+                prefix="p",
+                day_iso="2026-07-10",
+                segment_token="NSE_EQ",
+                canonical_symbol="M&M",
+                python_oracle=lambda: "oracle-key",
+            )
+
+    def test_class_b_burn_in_mismatch_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        """A burn-in bit-compare mismatch refuses BEFORE the autorevert latch."""
+        self._strict_on(monkeypatch)
+        _plant_crate(monkeypatch, crossverify_render_csv=lambda header, rows: (b"WRONG", None))
+        with pytest.raises(rust_strict.RustFallbackRefused, match="burn_in_mismatch_csv"):
+            rust_seam.routed_render_csv(CSV_HEADER, [["a"] * 8], python_render=lambda: b"oracle")
+        assert rust_seam.rust_seam_disabled() is False
+
+    # ---- CLASS C (structurally empty) -------------------------------
+
+    def test_no_class_c_exemption_frozenset_exists(self) -> None:
+        """Pin the structural absence of a CLASS-C carve-out on this facade.
+
+        If a future reason token genuinely needs an exemption it must be
+        introduced deliberately (with a per-token comment naming the input
+        shape) — this pin makes the silent growth of a loophole fail.
+        """
+        assert not hasattr(rust_seam, "_STRICT_EXEMPT_REASONS")
+        assert not hasattr(rust_seam, "_STRICT_UNRESOLVED_REASONS")

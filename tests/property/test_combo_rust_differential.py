@@ -28,6 +28,7 @@ compared byte-for-byte against the verbatim Python oracle:
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any, ClassVar
 
 import brutex.strategies.combo_rust as cr
@@ -43,12 +44,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
-pytest.importorskip(
+#: The real crate module, bound ONCE by the module-level skip guard (the wheel
+#: ships no ``py.typed`` marker, so the binding is deliberately ``Any``).
+_CRATE: Any = pytest.importorskip(
     "brutex_strategies",
     reason="brutex_strategies wheel not installed — the dual-arm differential needs the kernel",
 )
-
-from decimal import Decimal
 
 
 def _rust_on(mp: pytest.MonkeyPatch) -> None:
@@ -525,10 +526,8 @@ class TestInputRefusalMarkerContract:
         ids=[name for name, _case in _CANONICAL_REFUSALS],
     )
     def test_canonical_refusals_carry_the_marker(self, tree: Any) -> None:
-        import brutex_strategies
-
         with pytest.raises(cr._DEGRADE_ERRORS) as excinfo:  # the class varies by site
-            brutex_strategies.canonical_json(tree)
+            _CRATE.canonical_json(tree)
         assert cr._INPUT_REFUSED_MARKER in str(excinfo.value)
         # ... and lands in the facade's degrade set, so it routes at all.
         assert isinstance(excinfo.value, cr._DEGRADE_ERRORS)
@@ -551,13 +550,11 @@ class TestInputRefusalMarkerContract:
         assert cr.rust_combo_disabled() is False
 
     def test_str_subclass_key_keeps_its_own_marker(self) -> None:
-        import brutex_strategies
-
         class K(str):
             __slots__ = ()
 
         with pytest.raises(TypeError) as excinfo:
-            brutex_strategies.canonical_json({K("a"): 1})
+            _CRATE.canonical_json({K("a"): 1})
         # Its OWN older marker — deliberately NOT the generic one, so it
         # keeps the distinct ``nonexact_key_refused`` reason.
         assert cr._NONEXACT_KEY_MARKER in str(excinfo.value)
@@ -569,10 +566,8 @@ class TestInputRefusalMarkerContract:
         ids=["non_str_element", "lone_surrogate_element", "non_sequence"],
     )
     def test_scan_refusals_carry_the_marker(self, values: Any) -> None:
-        import brutex_strategies
-
         with pytest.raises(cr._DEGRADE_ERRORS) as excinfo:  # the class varies by site
-            brutex_strategies.first_unit_separator(values)
+            _CRATE.first_unit_separator(values)
         assert cr._INPUT_REFUSED_MARKER in str(excinfo.value)
         assert isinstance(excinfo.value, cr._DEGRADE_ERRORS)
 
@@ -593,10 +588,8 @@ class TestInputRefusalMarkerContract:
         assert cr.rust_combo_disabled() is False
 
     def test_happy_paths_are_untouched_by_the_marking(self) -> None:
-        import brutex_strategies
-
         tree = {"b": 2, "a": [1, "x", None, True], "z": {"n": -5}}
-        assert brutex_strategies.canonical_json(tree) == _dumps(tree)
-        assert brutex_strategies.first_unit_separator(["a", "x\x1fy", "\x1f"]) == 1
-        assert brutex_strategies.first_unit_separator(["a", "b"]) is None
-        assert brutex_strategies.first_unit_separator([]) is None
+        assert _CRATE.canonical_json(tree) == _dumps(tree)
+        assert _CRATE.first_unit_separator(["a", "x\x1fy", "\x1f"]) == 1
+        assert _CRATE.first_unit_separator(["a", "b"]) is None
+        assert _CRATE.first_unit_separator([]) is None
