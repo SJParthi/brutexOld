@@ -382,25 +382,25 @@ not oversold:
 
 ### D8 — Binding P3 (O(1)) to the merge gate
 
-Measured state of the enforcement pyramid:
+**P3 has its own architecture, and it is designed in ADR-0027**
+(DEC-O1-ENFORCEMENT-REACH-001). This section states only the interface
+between the two: P1/P2 are proved by posture and by the sentinel; P3 is
+proved by a ratio gate at a named tier, and the two proofs never substitute
+for each other. #2261 is the standing counterexample — a fully engaged Rust
+hot path measuring 94.46× growth with every correctness test green.
 
-| Tier | Ceiling | Reach | Blocking? |
-|---|---|---|---|
-| shared-CI robust | 3–10× (modal **5.0×**, 104/150 call sites) | every push | **yes** |
-| M4-Pro strict | **1.1×** | 15/145 bench files | **no** — post-merge, and the workflow's path filter misses `results_store.py`, `bloom.py`, `lmdb_membership.py` — the very sources its strict benches gate |
-| absolute floor | per-hardware JSON | `tests/bench/baselines/` holds **zero** `.json` | dormant by design (bootstrap) |
-| ≥50 M/s canary | — | computes ops/sec at three sites and **never compares** | **no assert at all** |
-
-Design, in the same shape as D7 (bind what exists before building more):
-
-1. **Add the strict tier to the required context** for the paths it already
-   gates, and fix the path filter so it covers the sources its benches read.
-2. **Commit one measured baseline** so the absolute tier leaves bootstrap; the
-   governance gate (a blessed-cell change needs a new ledgered DEC quoting the
-   literal key and value) is already written and dormant.
-3. **Give the throughput canary an assert** at the decreed ≥50 M/s floor.
-4. **Extend `test_o1_claim_backing.py`** to re-derive the census counts and
-   fail on drift, so P1/P2/P3 are all pinned by tests rather than by prose.
+**Correction to this section's first draft, recorded rather than quietly
+edited (Golden Rule #10).** The draft asserted that the ≥50 M/s throughput
+canary *"computes ops/sec at three sites and never compares — no assert at
+all."* That is **wrong**, and re-measuring caught it:
+`tests/bench/test_throughput_absolute.py:167` asserts
+`ops_per_sec >= 50_000_000` and `tests/bench/test_trade_sim_throughput.py:187`
+asserts the mask·bar rate against the same floor. The three no-assert sites
+are in `test_throughput_canary.py`, which is a *ratio* test that prints the
+absolute figure alongside — and says so in its own comment: *"Informational
+… even though we don't gate on it."* The draft also under-stated the
+path-filter gap (it named three sources; the measured figure is 13 of 15).
+ADR-0027 carries the corrected numbers.
 
 ### D9 — Census fixes (the discovery holes)
 
