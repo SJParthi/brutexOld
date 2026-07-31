@@ -42,21 +42,32 @@ reasons are not one kind of thing:
   to crash on a legitimate input. Facades that can emit this class are wired
   to strict mode only after their envelope is widened or the class is proven
   unreachable on the production path.
-* **The class cannot be resolved from the crate source** — the reason is
-  reported, NOT guessed. Three facades hold a ``_STRICT_UNRESOLVED_REASONS``
-  frozenset naming exactly the tokens whose crate arm can fault *or* refuse a
-  wide input through the same ``Err``, so classifying them here would be a
-  guess in a module whose whole point is that refusals are provable. Those
-  tokens keep warn-and-degrade and each set carries its per-token crate
-  evidence: ``rust_stage1a.py`` ``{kernel_refused}``
-  (DEC-RUST-STAGE1A-KERNEL-001), ``cvar_gate.py`` ``{kernel_error}``
-  (DEC-RANK-CVAR-TAIL-GATE-001), and ``nightly_rust.py``'s four
-  ``{summary_lines,parse_at,pmset_wake_command,seconds_since_scheduled_fire}
-  _error`` tokens (DEC-NIGHTLY-RUST-CORE-001) — six tokens total. The honest
-  close is a crate change splitting each ``Err`` into a fault token and an
-  ``*_input_beyond_crate`` token; until that lands in the owning lane, these
-  six are the named residual, not a silent one. ``combo_rust.py`` holds the
-  same constant deliberately EMPTY — its lane already did that split.
+* **The class cannot be resolved from the crate source** — RESOLVED; the
+  residual is closed. This bullet used to name six tokens whose crate arm
+  could fault *or* refuse a wide input through the same ``Err``, so a
+  facade could not tell class A/B from class C and kept warn-and-degrade
+  rather than guess. All six are now split crate-side, so
+  ``_STRICT_UNRESOLVED_REASONS`` is an EMPTY frozenset in all four facades
+  that carry it (``rust_stage1a.py``, ``cvar_gate.py``, ``nightly_rust.py``,
+  ``combo_rust.py``) and every reason token classifies.
+
+  The split is one shared mechanism, not four ad-hoc ones. Each crate
+  defines ``INPUT_REFUSED_MARKER = "input outside the crate envelope"`` and
+  STAMPS it on every input-VALUE-envelope refusal it raises, leaving faults
+  and marshalling bugs deliberately UNMARKED. The facade then classifies on
+  evidence the crate itself supplied — ``_INPUT_REFUSED_MARKER in detail``
+  is class C (degrade; Python was always the intended handler), anything
+  else is class A/B (refuse). No facade parses natural language, and a
+  crate that forgets to stamp fails CLOSED into a refusal rather than open
+  into a silent Python re-run.
+
+  The literal is part of the facade contract and is identical byte-for-byte
+  in all four crates and all four facades:
+  ``rust/trading-core/src/python.rs`` (DEC-RUST-STAGE1A-KERNEL-001),
+  ``rust/fno-math/src/input_refused.rs`` (DEC-RANK-CVAR-TAIL-GATE-001),
+  ``rust/brutex-ops/src/nightly.rs`` (DEC-NIGHTLY-RUST-CORE-001) and
+  ``rust/brutex-strategies/src/python.rs``, whose lane did the split first
+  and is the template the other three follow.
 
 Honest limits — broad-except ABSORPTION (Golden Rule #10)
 ---------------------------------------------------------
@@ -69,23 +80,28 @@ the refusal is real and the fall-back did not happen — but the operator sees
 that caller's degrade line, not a crash, and the enclosing operation reports
 success.
 
-Sites VERIFIED reachable + absorbing (2026-07-31, by forcing a real crate fault
-so the facade hits its own choke point under ``BRUTEX_RUST_STRICT=1``):
+Three sites were VERIFIED reachable + absorbing (2026-07-31, by forcing a real
+crate fault so the facade hits its own choke point under
+``BRUTEX_RUST_STRICT=1``). All three are now CLOSED: each grew an
+``except RustFallbackRefused: raise`` escape placed BEFORE its broad guard,
+mirroring the ``except LakeWriteHalt: raise`` precedent that already sat at
+``lake_heal.py:1147``. ``LakeWriteHalt`` keeps its own escape and
+``KeyboardInterrupt``/``SystemExit`` are untouched (``RustFallbackRefused`` is
+an ``Exception``, disjoint from the ``BaseException``-only classes).
 
-* ``brutex/data/lake_heal.py:1306`` (``_bump_stats``) — the refusal from
-  ``lake_rust_locks`` (via ``partition_write_lock`` / ``atomic_write_simple``)
-  is logged as ``lake_heal.stats_write_failed`` and the heal-stats sidecar is
-  silently NOT written.
-* ``brutex/data/lake_heal.py:1157`` (``_rebuild_tf_months``, catching
-  ``_SWEEP_GUARD_ERRORS`` defined at :489) — logged as
-  ``lake_heal.tf_rebuild_failed``; the TF months stay quarantine-DELETED and
-  lazily rebuildable, and the batch continues.
-* ``brutex/data/spot_daily_resample.py:814`` (the per-target recall guard, NOT
-  in lake_heal) — logged as ``spot_daily_resample.target_errored``; the daily
-  recall derives ZERO bars while ``lake_heal.sweep_complete`` still reports
-  ``healed=1`` and STAMPS the swept-sentinel token. This is the sharpest edge
-  of the class: a boot sweep can report success over a recall that silently
-  produced nothing.
+* ``brutex/data/lake_heal.py:1325`` (``_bump_stats``) — WAS logged as
+  ``lake_heal.stats_write_failed`` with the heal-stats sidecar silently NOT
+  written. Trade-off accepted: the sidecar is best-effort about its own I/O,
+  not about the Rust arm being unable to serve at all.
+* ``brutex/data/lake_heal.py:1158`` (``_rebuild_tf_months``, escaping ahead of
+  ``_SWEEP_GUARD_ERRORS`` at :1160) — WAS logged as
+  ``lake_heal.tf_rebuild_failed`` while the batch continued over TF months
+  left quarantine-DELETED.
+* ``brutex/data/spot_daily_resample.py:826`` (the per-target recall guard, NOT
+  in lake_heal) — the sharpest edge of the class, and the reason this section
+  exists: absorbed, the daily recall derived ZERO bars while
+  ``lake_heal.sweep_complete`` still reported ``healed=N`` and STAMPED the
+  swept-sentinel, so the next boot skipped the re-scan forever.
 
 Sites VERIFIED **not** reachable (same method; the guarded callee reaches no
 strict-wired facade, positive control passing): ``lake_heal.py:531``
@@ -93,19 +109,23 @@ strict-wired facade, positive control passing): ``lake_heal.py:531``
 (``open_lake_catalog``) — ``brutex/orchestrator/audit.py`` and
 ``brutex/data/catalog.py`` are stdlib/duckdb-only on those paths.
 
-``lake_heal.py:2360`` (``StartupSweeper.run_sync``, the "boot never crashes"
-blanket) is reachable in principle but was observed SHADOWED: for the fault
-class exercised, the inner guards above absorb the refusal first, so the
-blanket never saw it. Whether any path reaches it un-shadowed is UNVERIFIED.
-
-Remediation (deliberately NOT done here): a guard that must not absorb a
-refusal has to re-raise it — e.g. adding ``RustFallbackRefused`` beside the
-existing ``except LakeWriteHalt: raise`` escape at ``lake_heal.py:1147``.
-Every such guard is a lake_heal-lane (or spot_daily_resample-lane) behaviour
-change: absorbing is CURRENTLY BY DESIGN at each site (a stats-sidecar write
-must never masquerade as a lake halt; per-symbol recall isolation; "boot never
-crashes"), so flipping one trades a silent degrade for a crash on a boot path
-and needs its own DEC. Named residual, not a silent one.
+The ONE remaining absorbing site — deliberately left
+--------------------------------------------------
+``lake_heal.py`` ``StartupSweeper.run_sync`` (the "boot never crashes"
+blanket) is now PROVEN reachable un-shadowed, two independent ways: the
+sentinel ``atomic_write_simple`` in ``run_startup_sweep`` sits inside zero
+``try`` blocks, and all three escapes above now re-raise from call sites that
+have no enclosing guard. It is kept absorbing ON PURPOSE, and the reason is
+the distinction this whole section is about: unlike the three sites above it
+absorbs into an honest FAILURE, not a success claim — nothing is stamped, no
+``sweep_complete`` is emitted, ``None`` is returned, and the refusal's full
+message (facade, reason, kill switch) rides a structured
+``lake_heal.sweep_failed`` WARNING. Flipping it would convert that into an
+unhandled traceback in a daemon thread, losing the event name monitors key on
+for zero correctness gain. A dedicated test pins the terminal so it can never
+silently become a success. This is a judgement call, and it is the honest
+partial: one of the four documented sites still absorbs, by design and with
+teeth, rather than none.
 
 Everything here is O(1) per call: one ``os.environ`` probe, no memo, no global
 state (a cached verdict would leak across tests that set the env per case).
