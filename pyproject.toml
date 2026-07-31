@@ -289,6 +289,11 @@ ignore = [
 # Doctor CLI (DEC-DOCTOR-001) — same pattern as cli.py; print is the
 # health-check report's intended output sink.
 "brutex/doctor.py" = ["T201"]
+# Rust engagement census (DEC-RUST-ENGAGEMENT-CENSUS-001) — the same
+# pattern as doctor.py: the printed verdict table IS the product, and it
+# must reach stdout even when structlog is unconfigured (the census is
+# run as a preflight, before a sweep configures logging).
+"brutex/observability/rust_census.py" = ["T201"]
 # Proof / smoke scripts — intentionally print to stdout and touch
 # private ._conn on the stores to show the underlying DuckDB guarantees.
 "scripts/**" = ["T201", "SLF001", "PLR2004", "S101", "PLR0915"]
