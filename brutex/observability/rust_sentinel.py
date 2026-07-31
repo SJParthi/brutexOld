@@ -133,6 +133,41 @@ DEGRADE_STEMS: Final[tuple[str, ...]] = (
     "degrad",
 )
 
+#: Events that carry a degrade STEM inside a Rust namespace and are still
+#: NOT a Rust fall-back. Keyed on the FULL event, never the suffix, so an
+#: exemption can never leak to another facade.
+#:
+#: The namespace test is normally enough to keep the stems honest — the
+#: :func:`classify` docstring's own example is ``auto_resume.disabled``,
+#: excluded because ``auto_resume`` is not a facade. That reasoning assumes
+#: a namespace belongs to ONE facade, which held while every facade lived
+#: in a module named for it.
+#:
+#: DEC-RUST-CENSUS-DISCOVERY-MARKER-001 broke the assumption in the good
+#: direction. Repairing the census's discovery hole enrolled two EMBEDDED
+#: facades — a facade living inside a domain module rather than owning its
+#: own — and with them five genuine Rust degrades the sentinel had never
+#: been able to see (``cvar_gate.fallback``,
+#: ``cvar_gate.kernel_autoreverted``, ``cvar_gate.kernel_result_refused``,
+#: ``greeks_enrich.rust_batch_autoreverted``,
+#: ``greeks_enrich.rust_batch_flag_unrecognised``). An embedded facade
+#: SHARES its namespace with the module's ordinary domain logging, so the
+#: namespace alone can no longer separate the two.
+#:
+#: This set is the cost, and it is deliberately one entry rather than a
+#: general rule: exempting by prefix would be speculative generality for a
+#: single case, and every entry here is a decision that should be read.
+NOT_A_RUST_DEGRADE: Final[frozenset[str]] = frozenset(
+    {
+        # The Greeks PROCESS POOL fell back to the sequential path because
+        # the worker context would not pickle. Concurrency, not language:
+        # the Rust batch facade runs identically in either mode, so calling
+        # it a Rust degrade would abort a strict sweep for a reason that has
+        # nothing to do with Rust. brutex/data/greeks_enrich.py.
+        "greeks_enrich.parallel_disabled",
+    }
+)
+
 #: The first-answer event suffix. Its presence in a module's source is the
 #: house marker for "this is a Rust facade", and :func:`rust_namespaces`
 #: uses exactly that to tell a facade namespace from an ordinary one.
@@ -251,9 +286,17 @@ def classify(event: str, namespaces: frozenset[str]) -> str | None:
     .fallback`` fires (Rust namespace, degrade stem); ``auto_resume
     .disabled`` does not (degrade stem, ordinary namespace);
     ``lake_rust_render.engaged`` does not (Rust namespace, no stem).
+
+    A third check sits between them for the EMBEDDED facades — a facade
+    living inside a domain module, whose namespace therefore carries the
+    module's ordinary logging too. :data:`NOT_A_RUST_DEGRADE` names the
+    full events that pass both halves and are still not a Rust fall-back;
+    it is a frozenset lookup, so the O(1) shape is unchanged.
     """
     namespace, separator, suffix = event.rpartition(".")
     if not separator or namespace not in namespaces:
+        return None
+    if event in NOT_A_RUST_DEGRADE:
         return None
     return suffix if any(stem in suffix for stem in DEGRADE_STEMS) else None
 

@@ -21,6 +21,7 @@ from brutex.observability.rust_sentinel import (
     CLEAN,
     DEGRADE_STEMS,
     DEGRADED,
+    NOT_A_RUST_DEGRADE,
     Degrade,
     RustDegradedError,
     RustSentinel,
@@ -62,15 +63,56 @@ def _clear_namespace_cache() -> None:
 #: * ``enum_shadow_floor_unmet`` — the shadow-verification budget ran out
 #:   of ranges before masks. Its own docstring is explicit: "the kernel
 #:   STAYS engaged: every shadowed range was verified."
+#: * ``rust_batch_engaged`` — the ``greeks_enrich`` batch facade's
+#:   first-answer marker. Exactly the ``recency_engaged`` shape: a prefixed
+#:   ``engaged``, and the opposite of a degrade.
 BENIGN_FACADE_EVENTS: frozenset[str] = frozenset(
     {
         "engaged",
         "recency_engaged",
+        "rust_batch_engaged",
         "burn_in_complete",
         "wide_kernel_promoted",
         "enum_cells_invalid",
         "work_cap_clamped",
         "enum_shadow_floor_unmet",
+    }
+)
+
+#: Events on an EMBEDDED facade's namespace that belong to the module's
+#: DOMAIN logic rather than to the facade at all.
+#:
+#: Keyed on the FULL event, deliberately unlike :data:`BENIGN_FACADE_EVENTS`
+#: above, which is keyed on the suffix. The distinction is the point. A
+#: suffix entry blesses that wording on EVERY facade namespace forever — fine
+#: for ``engaged``, which means the same thing everywhere, and wrong for
+#: ``target_errored``, which here means "one option contract failed to
+#: enrich" and elsewhere could mean a Rust kernel refused. Suffix-keying
+#: these would silently pre-approve a future ``lake_rust_render
+#: .target_errored``.
+#:
+#: They are here because DEC-RUST-CENSUS-DISCOVERY-MARKER-001 enrolled
+#: ``brutex/data/greeks_enrich.py`` — a facade EMBEDDED in a domain module,
+#: so its namespace carries both. That enrolment is what made five real Rust
+#: degrades visible to the sentinel for the first time; these ten events are
+#: the accounting cost of the win, not a weakening of the pin.
+EMBEDDED_DOMAIN_EVENTS: frozenset[str] = frozenset(
+    {
+        # Per-bar input screens — a bar was skipped, or a spot price failed
+        # validation. Data quality, not language.
+        "greeks_enrich.bar_skipped_nonfinite",
+        "greeks_enrich.spot_invalid",
+        "greeks_enrich.spot_key_recovered",
+        # Per-target enrichment outcomes over the option chain.
+        "greeks_enrich.target_enriched",
+        "greeks_enrich.target_undecodable",
+        "greeks_enrich.target_errored",
+        # Worker-pool lifecycle. ``workers_invalid`` clamps a junk worker
+        # count; ``pool_broken`` is a crashed process pool. Concurrency
+        # events — the Rust batch facade is unaffected by either.
+        "greeks_enrich.workers_invalid",
+        "greeks_enrich.parallel_start",
+        "greeks_enrich.pool_broken",
     }
 )
 
@@ -109,10 +151,14 @@ class TestExhaustiveClassificationPin:
             for event, source in _facade_events().items()
             if classify(event, namespaces) is None
             and event.rpartition(".")[2] not in BENIGN_FACADE_EVENTS
+            and event not in EMBEDDED_DOMAIN_EVENTS
+            and event not in NOT_A_RUST_DEGRADE
         }
         assert not unclassified, (
-            "unclassified facade events — add a DEGRADE_STEMS entry or list "
-            f"the suffix in BENIGN_FACADE_EVENTS: {unclassified}"
+            "unclassified facade events — add a DEGRADE_STEMS entry, list the "
+            "suffix in BENIGN_FACADE_EVENTS, or (embedded facades only) name "
+            "the full event in EMBEDDED_DOMAIN_EVENTS / NOT_A_RUST_DEGRADE: "
+            f"{unclassified}"
         )
 
     def test_the_pin_actually_sees_the_whole_estate(self) -> None:
@@ -149,6 +195,77 @@ class TestExhaustiveClassificationPin:
         """Every benign suffix listed is one a facade actually emits."""
         emitted = {event.rpartition(".")[2] for event in _facade_events()}
         assert emitted >= BENIGN_FACADE_EVENTS, BENIGN_FACADE_EVENTS - emitted
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            # cvar_gate — the whole facade lives in brutex/ranking/cvar_gate.py,
+            # a module the census's name pre-filter never looked at.
+            "cvar_gate.fallback",
+            "cvar_gate.kernel_autoreverted",
+            "cvar_gate.kernel_result_refused",
+            # greeks_enrich — the batch facade embedded in the domain module.
+            "greeks_enrich.rust_batch_autoreverted",
+            "greeks_enrich.rust_batch_flag_unrecognised",
+        ],
+    )
+    def test_the_embedded_facades_degrades_are_visible(self, event: str) -> None:
+        """The win: five real fall-backs the sentinel could not see before.
+
+        Every one of these is a genuine "Rust stopped answering" event on a
+        facade the census could not discover until
+        DEC-RUST-CENSUS-DISCOVERY-MARKER-001. Before that fix the namespace
+        was not in :func:`rust_namespaces`, so :func:`classify` returned
+        ``None`` for all five and a strict sweep would have run to completion
+        on the Python oracle reporting CLEAN.
+
+        This test fails if a future change re-hides either facade.
+        """
+        assert classify(event, rust_namespaces()) is not None, event
+
+    def test_the_one_exclusion_is_not_a_rust_degrade(self) -> None:
+        """``parallel_disabled`` carries a stem and must still not fire.
+
+        The Greeks process pool falls back to sequential when the worker
+        context will not pickle. That is a CONCURRENCY degrade — the Rust
+        batch facade runs identically either way — so classifying it would
+        abort a strict sweep for a reason with nothing to do with Rust.
+
+        Asserted against a namespace set that DOES contain ``greeks_enrich``,
+        so this proves the exclusion is doing the work and not the (now
+        absent) discovery hole.
+        """
+        namespaces = rust_namespaces()
+        assert "greeks_enrich" in namespaces
+        assert any(stem in "parallel_disabled" for stem in DEGRADE_STEMS)
+        assert classify("greeks_enrich.parallel_disabled", namespaces) is None
+
+    def test_every_exclusion_would_otherwise_have_fired(self) -> None:
+        """Anti-rot: an exclusion that changes nothing is dead weight.
+
+        Each :data:`NOT_A_RUST_DEGRADE` entry must be a real suppression —
+        its namespace known and its suffix stem-matched — so the set can
+        never quietly accumulate entries that were never needed.
+        """
+        namespaces = rust_namespaces()
+        for event in NOT_A_RUST_DEGRADE:
+            namespace, _, suffix = event.rpartition(".")
+            assert namespace in namespaces, event
+            assert any(stem in suffix for stem in DEGRADE_STEMS), event
+
+    def test_embedded_domain_events_are_real_and_stem_free(self) -> None:
+        """Anti-rot for the other list: it may not smuggle a degrade past.
+
+        An entry that carries a degrade stem belongs in
+        :data:`NOT_A_RUST_DEGRADE`, where the decision is visible, not here
+        where it would read as ordinary domain noise.
+        """
+        emitted = set(_facade_events())
+        for event in EMBEDDED_DOMAIN_EVENTS:
+            assert event in emitted, f"{event} is listed but never emitted"
+            suffix = event.rpartition(".")[2]
+            offending = [stem for stem in DEGRADE_STEMS if stem in suffix]
+            assert not offending, (event, offending)
 
     def test_benign_and_degrade_do_not_overlap(self) -> None:
         """A suffix cannot be both; that would make the classification a coin toss."""
