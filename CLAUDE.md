@@ -14797,6 +14797,23 @@ hostile-review pass._
    (earlier :760/:743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
    :770→:785 with the DEC-FILL-WORST-CASE-ONLY-001 fill-rules rewrite) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
+
+   **DIGEST LITERALS ARE ERA-SPECIFIC — READ THIS BEFORE QUOTING ONE**
+   (DEC-CLAUDEMD-DIGEST-POINTER-001, 2026-07-31). The LIVE default
+   per-tuple store digest is whatever
+   `tests/unit/test_engine_sweep_orchestrator.py::_DEFAULT_DIGEST`
+   carries — CI re-derives it every run via
+   `test_default_digest_byte_stable`, so that constant is the ONLY
+   source of truth. Every digest literal appearing in a §1/§3 DEC blurb
+   below was the live default WHEN THAT BLURB WAS WRITTEN and is kept
+   verbatim under the supersession convention; several are now RETIRED
+   negative pins the same test file freezes by name
+   (`_WORST_CASE_PRE_GRID_DIGEST`, `_PRECISE_ERA_DIGEST`). MEASURED
+   2026-07-31 by MINTING the digest (not grepping a literal) with the
+   Rust arm engaged: live = `3e0dd7d080da66b7`; `7a0120c1123b44c6` and
+   `5b020e892247deac` are RETIRED. Two independent agents took a
+   retired value as live from the blurbs below — hence this pointer.
+   Never quote a blurb's digest as the current one; read the constant.
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
    append must all be O(1). The decree TARGET is
