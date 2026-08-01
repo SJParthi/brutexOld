@@ -15,24 +15,42 @@ r1 wording correction in MIGRATION #1943) AND crate-untouched
 Honesty banner (ADR-0020, mandatory verbatim): expected payoff ≈ 0 —
 conversion is for uniformity, not speed. Every one of these laws is a
 sub-microsecond ``Decimal`` op; flag-ON ADDS an env read, an eligibility
-gate and an FFI hop per call — a small slowdown, shipped INERT (a default
-flip needs its own DEC). ``round_money`` additionally snaps EVERY stored
-OHLC value at the lake-write boundary (run-identity / stored-bytes
-critical — the audit-session addendum), which is exactly why the seam is
-burn-in-checked, refuse-poison-gated and default-ON
+gate and an FFI hop per call. ``round_money`` additionally snaps EVERY
+stored OHLC value at the lake-write boundary (run-identity /
+stored-bytes critical — the audit-session addendum), which is exactly
+why the seam is burn-in-checked, refuse-poison-gated and default-ON
 (DEC-RUST-DEFAULT-ON-WAVE-001).
 
-Flag-OFF cost disclosure (review r1, measured 2026-07-17): the DEFAULT
-(flag-OFF) path pays a per-call env probe — ``os.environ.get`` on a miss
-is ~700 ns/call on the build box (an exception-mediated ``_Environ``
-lookup), putting the OFF-path ``round_money`` at ~1.1 µs/call vs the
-~225 ns pre-seam body; the unset-fast-path in :func:`money_rust_enabled`
-shaves the strip/lower/set-lookup tail (~65 ns) but the probe itself is
-DELIBERATE — spawn workers must read their own inherited environment
-(the PR-1 posture; caching the resolve would break that contract). The
-lake-write HOT path is unaffected: the vectorized ``_snap_price_expr``
-never calls scalar ``round_money`` — the scalar surfaces run O(bars) at
-ingest / O(finalists) at run-end, aggregate ~seconds.
+MEASURED COST (2026-08-01, DEC-MONEY-RUST-WRAPPER-COST-001 — this
+supersedes the pre-measurement "a small slowdown" / "lake-write HOT path
+is unaffected … aggregate ~seconds" wording, both of which were
+falsified on the build box):
+
+* per call, ``round_money(Decimal("14020.7999"))`` steady state:
+  flag-ON 6,638 ns vs flag-OFF 1,019 ns — **6.5× slower**, NOT "small";
+* the Rust kernel itself is NOT the cost. ``brutex_core.round_money_str``
+  measures **265 ns**, against the **406 ns** CPython ``quantize`` oracle
+  it replaces — the crate is 1.5× FASTER at the actual arithmetic. The
+  slowdown is entirely this facade's PYTHON guard rails, which measured
+  ~5.9 µs (≈22× the kernel): eligibility gate 1,322 ns (of which
+  ``as_tuple()`` alone is 541), shape validation 1,508 ns, crate resolve
+  911 ns, flag probe 542 ns, marshalling 328 ns, reconstruct 243 ns;
+* the SWEEP path DOES pay it. ``Stage1AMatrixBuilder.collect_batch_inputs``
+  calls ``_price_to_paisa`` (→ ``round_money``) per OHLC field per bar, so
+  over the 1,440-bar fixture the prepass measures **24.1 ms flag-OFF →
+  78.7 ms flag-ON (3.26×, +54.5 ms per tuple)**. The earlier "hot path is
+  unaffected" claim was scoped to the LAKE write — where the vectorized
+  ``_snap_price_expr`` genuinely never calls scalar ``round_money`` — and
+  wrongly generalised from there.
+
+Two wrapper costs are cut by this DEC (both behaviour-preserving, both
+re-measured below): the per-call crate resolve is MEMOIZED (success only)
+and the shape-check digit scan uses the C-level ``str`` predicates. The
+remainder is irreducible without moving the eligibility gate itself into
+Rust — a separate, larger DEC. Flag-OFF cost is unchanged: the DEFAULT
+path still pays a per-call env probe (~700 ns ``os.environ.get`` miss),
+DELIBERATELY — spawn workers must read their own inherited environment
+(the PR-1 posture; caching the flag resolve would break that contract).
 
 The :mod:`brutex.data.lake_rust_stats` facade pattern, with TWO deliberate
 structural differences, both documented:
@@ -212,6 +230,30 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
 #: per-value frequency; a sticky reason would flood the logs).
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
+#: Resolved-crate memo (``[None]`` = not yet resolved this process) —
+#: DEC-MONEY-RUST-WRAPPER-COST-001. :func:`_resolve_crate` measured 911
+#: ns/call, 13.7% of an engaged ``round_money``, because
+#: ``importlib.import_module`` costs ~574 ns even on a ``sys.modules``
+#: HIT and the 4-symbol handshake another ~337.
+#:
+#: THE MODULE is memoized, never a bound callable: ``_adopt_crate_string``
+#: still does ``getattr(crate, crate_name)`` per call, so a test that
+#: monkeypatches a crate ATTRIBUTE (``test_money_rust.py``'s real-wheel
+#: spy) is still seen — a callable memo would silently miss it.
+#:
+#: SUCCESS ONLY. A FAILED resolve is never cached, because both failure
+#: arms go through :func:`_disable`, which under strict mode REFUSES
+#: *before* it latches — the module docstring's "every call re-attempts
+#: and re-refuses, loudly; there is no silently-latched steady state"
+#: contract. Caching a failure would manufacture exactly the latched
+#: state strict mode exists to forbid.
+#:
+#: Cleared by :func:`reset_money_rust_for_tests`, which
+#: ``test_money_rust.py`` runs from an ``autouse`` fixture BEFORE AND
+#: AFTER every test — so the ``sys.modules`` crate swaps in that file
+#: (``_arm``) are never served a stale memo.
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
 #: The engaged-INFO memo key (never a warn reason).
 _ENGAGED_KEY: Final[str] = "__engaged__"
 
@@ -325,11 +367,16 @@ def reset_money_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     parity legs depend on that — an armed burn-in would cushion a
     divergence by shipping oracle values). Never called from production
     paths (the PR-1 reset-seam convention).
+
+    Clears :data:`_CRATE_MEMO` too (DEC-MONEY-RUST-WRAPPER-COST-001) — a
+    test that swaps ``sys.modules["brutex_core"]`` must never be served a
+    crate resolved before its swap.
     """
     _DISABLED_REASON[0] = None
     for law in _BURN_IN_REMAINING:
         _BURN_IN_REMAINING[law] = remaining
     _OBSERVABILITY_MEMO.clear()
+    _CRATE_MEMO[0] = None
 
 
 def _refuse_if_strict(reason: str, **context: object) -> None:
@@ -399,7 +446,15 @@ def _resolve_crate() -> ModuleType | None:
     (the ``window_ledger_rust`` stale-wheel handshake; no version guard —
     module docstring). Fail-closed: never an ``AttributeError`` out of
     this seam.
+
+    A SUCCESSFUL resolve is memoized in :data:`_CRATE_MEMO` (module
+    constant — the reasoning, and why failures are deliberately NOT
+    cached, is on that constant). Cleared by
+    :func:`reset_money_rust_for_tests`.
     """
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return memo
     try:
         crate = importlib.import_module("brutex_core")
     except ImportError as exc:
@@ -418,6 +473,7 @@ def _resolve_crate() -> ModuleType | None:
                 remedy="rebuild + reinstall rust/brutex-core (see rust/brutex-core/README.md)",
             )
             return None
+    _CRATE_MEMO[0] = crate
     return crate
 
 
@@ -495,8 +551,34 @@ def _eligible_paisa(paisa: object) -> bool:
 
 
 def _is_digits(chunk: str) -> bool:
-    """``True`` iff *chunk* is non-empty and ASCII-0-9 only (shape checks)."""
-    return bool(chunk) and all(ch in _ASCII_DIGITS for ch in chunk)
+    """``True`` iff *chunk* is non-empty and ASCII-0-9 only (shape checks).
+
+    Uses the C-level ``str`` predicates rather than a Python-level scan
+    over :data:`_ASCII_DIGITS` (DEC-MONEY-RUST-WRAPPER-COST-001): measured
+    615 → 105 ns on a 5-char chunk (5.9×), and :func:`_valid_fixed2_str`
+    calls this TWICE per validated crate return.
+
+    EXACT-EQUIVALENCE PROOF (executed 2026-08-01, not asserted) — the swap
+    is byte-for-byte the same predicate:
+
+    * ``str.isdigit()`` is ``True`` iff the string is NON-EMPTY and every
+      character is a Unicode digit, so it already carries the
+      ``bool(chunk)`` conjunct;
+    * ``str.isascii()`` is ``True`` iff every character is < U+0080 (and
+      vacuously ``True`` for ``""`` — irrelevant, ``isdigit()`` has
+      already rejected it);
+    * their conjunction is therefore "non-empty AND every char is an
+      ASCII Unicode-digit". The ASCII Unicode-digits are EXACTLY U+0030–
+      U+0039 = :data:`_ASCII_DIGITS` — verified EXHAUSTIVELY over all
+      0x110000 code points: zero divergences. The classic traps are
+      covered by that sweep — ``"²"`` (U+00B2) is ``isdigit()`` but not
+      ``isascii()``; ``"١٢٣"``/``"１２３"`` are ``isdigit()`` but not
+      ``isascii()``; ``"1_0"``/``"+12"``/``"12 "`` fail ``isdigit()``.
+
+    :data:`_ASCII_DIGITS` is retained as the DECLARATIVE statement of the
+    law (and is what the proof above is stated against).
+    """
+    return chunk.isdigit() and chunk.isascii()
 
 
 def _valid_fixed2_str(value: str) -> bool:

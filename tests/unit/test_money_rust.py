@@ -10,6 +10,7 @@ run for real in the ``core-rust-parity.yml`` lane.
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 from collections.abc import Iterator
@@ -353,6 +354,123 @@ class TestImportGuard:
         _arm(monkeypatch, _bomb_crate())
         money_rust._disable("prior_reason")  # pyright: ignore[reportPrivateUsage]
         assert money.format_inr(5) == "₹0.05"  # bomb untouched — latch short-circuits
+
+
+# ── Crate memo (DEC-MONEY-RUST-WRAPPER-COST-001) ────────────────────────────
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every ``sys.modules`` swap in this file visible.
+
+    Measured motivation: ``_resolve_crate`` cost 911 ns/call — 13.7% of an
+    engaged ``round_money`` — because ``importlib.import_module`` is ~574 ns
+    even on a ``sys.modules`` HIT.
+    """
+
+    @pytest.mark.usefixtures("_strict_off")
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate()
+        _arm(monkeypatch, crate)
+        calls: list[str] = []
+        real_import = importlib.import_module
+
+        def _counting(name: str, *a: object, **kw: object) -> types.ModuleType:
+            if name == "brutex_core":
+                calls.append(name)
+            return real_import(name, *a, **kw)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(money_rust.importlib, "import_module", _counting)
+        money_rust.reset_money_rust_for_tests(remaining=0)
+        for _ in range(5):
+            money.round_money(Decimal("1.005"))
+        assert calls == ["brutex_core"], "the crate must be imported exactly ONCE"
+        assert money_rust._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.usefixtures("_strict_off")
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _arm(monkeypatch, types.ModuleType("brutex_core"))  # no API -> crate_stale
+        assert money.rupees_to_paisa(Decimal("1.00")) == 100
+        assert money_rust._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.usefixtures("_strict_off")
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_arm` swaps sys.modules WITHOUT resetting, so
+        # this file's isolation rests entirely on the autouse `_fresh_seam`
+        # fixture clearing the memo. Drop that clear and this test fails —
+        # which is exactly the regression it exists to catch.
+        _arm(monkeypatch, _fake_crate())
+        money_rust.reset_money_rust_for_tests(remaining=0)
+        assert money.round_money(Decimal("1.005")) == Decimal("1.01")
+        _arm(monkeypatch, _bomb_crate())  # swap AFTER the first resolve
+        money_rust.reset_money_rust_for_tests(remaining=0)  # the autouse fixture's job
+        money.round_money(Decimal("1.005"))  # bomb degrades -> oracle
+        assert money_rust.money_rust_disabled() is True
+
+    @pytest.mark.usefixtures("_strict_off")
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized module must still be seen —
+        # `_adopt_crate_string` resolves `getattr(crate, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _fake_crate()
+        _arm(monkeypatch, crate)
+        money_rust.reset_money_rust_for_tests(remaining=0)
+        assert money.round_money(Decimal("1.005")) == Decimal("1.01")
+        monkeypatch.setattr(crate, "round_money_str", lambda _s: "9.99")
+        assert money.round_money(Decimal("1.005")) == Decimal("9.99")
+
+
+# ── Digit-scan shape helper ─────────────────────────────────────────────────
+
+
+class TestIsDigits:
+    """``_is_digits`` swapped to the C-level ``str`` predicates
+    (DEC-MONEY-RUST-WRAPPER-COST-001) — these pin the EQUIVALENCE the swap
+    rests on, so a future "simplification" to a bare ``.isdigit()`` fails.
+    """
+
+    @pytest.mark.parametrize(
+        ("chunk", "expected"),
+        [
+            ("0", True),
+            ("123", True),
+            ("0123456789", True),
+            ("", False),  # empty -> False (isdigit already rejects it)
+            ("12a", False),
+            ("1_0", False),  # int() would accept this; the shape law must not
+            ("+12", False),
+            ("-1", False),
+            ("12 ", False),
+            (" 12", False),
+            ("١٢٣", False),  # Arabic-Indic: isdigit() True, isascii() False
+            ("１２３", False),  # fullwidth: isdigit() True, isascii() False
+            ("²", False),  # superscript: isdigit() True, isascii() False
+            ("1²", False),  # MIXED ascii + non-ascii digit
+            ("Ⅻ", False),  # Roman numeral: isnumeric but not isdigit
+        ],
+    )
+    def test_truth_table(self, chunk: str, expected: bool) -> None:
+        assert money_rust._is_digits(chunk) is expected  # pyright: ignore[reportPrivateUsage]
+
+    def test_equivalent_to_the_declarative_ascii_digit_law(self) -> None:
+        # The swap's proof, mechanised over EVERY code point: the new
+        # predicate must agree with the `_ASCII_DIGITS` membership law it
+        # replaced. A CPython change to `isdigit`/`isascii` fails here.
+        digits = money_rust._ASCII_DIGITS  # pyright: ignore[reportPrivateUsage]
+        for cp in range(0x110000):
+            ch = chr(cp)
+            assert money_rust._is_digits(ch) is (ch in digits), (  # pyright: ignore[reportPrivateUsage]
+                f"divergence at U+{cp:04X}"
+            )
 
 
 # ── Eligibility gate (layer 2 — crate never touched, spy-pinned) ────────────
