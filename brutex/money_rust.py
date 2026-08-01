@@ -398,6 +398,25 @@ def _refuse_if_strict(reason: str, **context: object) -> None:
     refuse_if_strict("brutex.money_rust", reason, **context)
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Raise :class:`~brutex.config.rust_strict.RustFallbackRefused` if strict.
+
+    The ONE strict-mode adapter for this facade, shared by both choke points
+    (:func:`_warn_once`, :func:`_disable`) — DEC-RUST-STRICT-NO-FALLBACK-001.
+    Every reason reaching either choke point means Rust is absent / latched /
+    broke / answered wrongly, so there is no exemption allowlist here; the
+    Class-C eligibility gate never reaches this function (module docstring).
+
+    The import is function-scope BY NECESSITY, not style: at module scope it
+    closes an executed-and-confirmed ``brutex.money`` ⇄ ``brutex.data``
+    circular import (module docstring). A ``sys.modules`` hit on an already
+    degraded path is a non-cost.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.money_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
     """Refuse under strict mode; else log ``money_rust.fallback`` warn-once.
 
