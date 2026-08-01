@@ -77,10 +77,35 @@ OFF path of a costs/moneyness read must never require it (the
 4. **Degrade + panic belts** — kernel raises in the COMMON degrade set
    (:func:`brutex.data.lake_rust_render.degrade_errors`) → one
    ``kernel_error`` WARN + the oracle; anything the COMMON panic belt
-   catches (incl. a ``pyo3_runtime.PanicException`` leaking a pyo3
-   boundary) → latch ``kernel_panic`` + the oracle.
+   catches (a ``pyo3_runtime.PanicException`` surfacing at a pyo3
+   boundary) → latch ``kernel_panic`` + the oracle. That belt is a
+   DEV-BUILD + defence-in-depth path, NOT a shipped-wheel rail — see
+   "Panic-belt honesty" below.
    ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` re-raise RAW
    (the ``errors.py`` escape-set doctrine — OOM is never a fallback).
+
+## Panic-belt honesty (``panic = "abort"``; CLAUDE.md Golden Rule #10)
+
+The ``fno_math`` release wheel is built with ``panic = "abort"``
+(``rust/fno-math/Cargo.toml`` — a deliberate finance-safety choice made in
+DEC-RUST-CRATES-HARDEN-001 #965 so a paisa overflow is a LOUD abort, never a
+silent wrap), so a Rust panic in the SHIPPED wheel ABORTS the host process
+(SIGABRT) before any Python handler can run: layer 4's ``_panic_belt_errors()``
+/ ``kernel_panic`` arm is therefore a DEV-BUILD (``cargo test`` / any
+default-``unwind`` build, where pyo3's ``catch_unwind`` surfaces a
+``pyo3_runtime.PanicException``) + defence-in-depth path, NOT a shipped-wheel
+rail. ``rust/fno-math`` carries NO ``catch_unwind`` FFI wrapper of its own
+(grep-verified) — distinct from ``brutex-lake``, which builds WITHOUT
+``panic = "abort"`` and maps panics to ``RuntimeError`` at its own boundary.
+It is retained, not removed, because the ``optcost`` kernels are TOTAL by
+construction — ``overflow-checks = true``, a ``(code, value)`` ints-only
+return on every arm, and the exactness / band / type gates in this facade
+running BEFORE the crossing — so the practical panic risk is ≈ nil and the
+belt guards only a doubly-broken future contract (a non-abort build, or a
+panic surfacing through an out-of-band pyo3 runtime). The panic profile is
+NOT flipped here: doing so would change the crate's release semantics for
+every other ``fno_math`` consumer, so honesty about the belt's reach is the
+correct fix, not a profile change.
 
 ## Refusal law (VERIFIED-RATES-ONLY — hard rule 3)
 
@@ -140,6 +165,7 @@ isolation only, never called from production paths.
 from __future__ import annotations
 
 import importlib
+import math
 import os
 from dataclasses import dataclass
 from datetime import date
@@ -211,6 +237,58 @@ _MAX_ORDINAL: Final[int] = 3_652_059
 
 #: i64 bound for every value that crosses the FFI as a Rust ``i64``.
 _I64_MAX: Final[int] = 2**63 - 1
+
+#: Lower i64 bound — the ``round_to_atm`` quotient is the one SIGNED value
+#: this facade range-gates (a negative spot floor-divides negative).
+_I64_MIN: Final[int] = -(2**63)
+
+#: The CLASS-C reasons — an input the crate never claimed, where the CPython
+#: oracle was ALWAYS the intended handler — held out of the
+#: DEC-RUST-STRICT-NO-FALLBACK-001 refusal.
+#:
+#: This facade's OTHER class-C arms (``resolve_delta_target_strike``,
+#: paisa-inexact ``Decimal`` values, mixed-exponent strike ladders) return
+#: ``python()`` SILENTLY before :func:`_route` is entered, so they announce
+#: nothing and need no entry here. The ones that DO announce are the four
+#: gated PRE-FFI below, each of which would otherwise arrive at
+#: :func:`_route`'s broad degrade clause and mint the fault-only CLASS-A
+#: ``kernel_error``:
+#:
+#: * ``round_to_atm`` — a non-finite spot, or one whose ``spot // step``
+#:   quotient leaves i64 (:func:`_round_atm_beyond_crate`);
+#: * ``offset_strike`` / ``grid_offset`` / ``grid_around`` — an ARGUMENT past
+#:   the ``i64`` FFI wire type, which pyo3 rejects at extraction
+#:   (:func:`_int_arg_beyond_crate`). CPython's unbounded ``int`` was always
+#:   the intended handler here and the crate says so verbatim ("Python's
+#:   arbitrary-precision int handles those inputs — the seam degrades to the
+#:   oracle", ``rust/fno-math/src/optcost/strike.rs``).
+#:
+#: Classifying PRE-FFI keeps ``kernel_error`` honest — "the crate ran and
+#: broke" — instead of conflating it with "the caller handed the crate a
+#: value it never claimed".
+#:
+#: NAMED RESIDUAL (honest, not silently absorbed): the int seams' gate covers
+#: the ARGUMENT domain only, because that is a pure structural wire-width
+#: check. The crate ALSO raises when an in-i64 argument set produces an
+#: out-of-i64 RESULT (``atm + step_count * step``) or a ``half_width`` past
+#: its ``MAX_HALF_WIDTH`` ceiling; gating those PRE-FFI would mean a second
+#: Python copy of the crate's checked arithmetic — the drift hazard Golden
+#: Rule #11 forbids — so they still refuse under strict. Both need strikes
+#: near ``9.2e18`` or a width past 1,000,000 (production default: 10), i.e.
+#: values no real market produces. The honest fix is crate-side: return a
+#: ``(code, value)`` pair instead of raising, so the facade can classify the
+#: refusal as CLASS C without re-implementing the law.
+#:
+#: The honest fix for every entry is to widen the kernel's accepted domain
+#: until the arm is unreachable, then delete it — never to relax the refusal.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "round_to_atm_input_beyond_crate",
+        "offset_strike_input_beyond_crate",
+        "grid_offset_input_beyond_crate",
+        "grid_around_input_beyond_crate",
+    }
+)
 
 #: Decimal digits certainly past i64 (``2**63 - 1`` has 19 digits) — the
 #: early-out in :func:`_exact_scaled_int` before a huge ``10**shift``.
@@ -369,13 +447,47 @@ def reset_optcost_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Strict-mode gate for the two announcement choke points.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Imported FUNCTION-LOCALLY (only while a
+    degrade is already being announced) so this leaf keeps ZERO brutex imports
+    at module scope — the leaf-discipline law in the module docstring, the same
+    convention :func:`_degrade_errors` / :func:`_panic_belt_errors` follow.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.optcost_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``optcost_rust.fallback`` WARN once per process per memo key.
+    """Refuse under strict mode; else log ``optcost_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Almost every reason funnelled here is
+    CLASS A (``flag_unrecognised`` — the junk-flag arm; ``kernel_error`` — the
+    crate raised) or CLASS B (``result_refused`` — refuse-poison rejected the
+    crate's ``(code, value)`` return), and all of those refuse. The exceptions
+    are the class-C members of :data:`_STRICT_EXEMPT_REASONS`, each decided
+    BEFORE the FFI — ``round_to_atm_input_beyond_crate`` by
+    :func:`_round_atm_beyond_crate`, and the three ``*_input_beyond_crate``
+    int-seam reasons by :func:`_int_arg_beyond_crate`.
+
+    The rest of this facade's class-C arms never reach this function at all.
+    The ORACLE-ONLY inputs documented in the module docstring
+    (``resolve_delta_target_strike``, paisa-inexact ``Decimal`` values via
+    :func:`_exact_scaled_int` returning ``None``, and mixed-exponent strike
+    ladders via :func:`_uniform_exponent_units` returning ``None``) return
+    ``python()`` SILENTLY, BEFORE :func:`_route` is ever entered — they
+    announce nothing, so strict mode cannot see them and they still serve
+    Python exactly as today. Strict-OFF is byte-identical to the prior
+    behaviour.
 
     Degrade reasons that can differ per seam fold the seam name into the
     memo key (``context["seam"]``) so one seam's first fault does not
     silence a different seam's — the oracle serves regardless.
     """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        _refuse_if_strict(reason, **context)
     key = f"{reason}|{context.get('seam', '')}"
     if key in _OBSERVABILITY_MEMO:
         return
@@ -384,12 +496,23 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``kernel_unavailable`` / ``kernel_stale`` / ``kernel_panic``) or CLASS B
+    (``burn_in_mismatch`` — the kernel disagreed with the oracle); none is
+    class C (the facade's ONE announcing class-C arm is gated pre-FFI and
+    announces through :func:`_warn_once`, never a latch — see
+    :data:`_STRICT_EXEMPT_REASONS`), so none is exempt. The refusal fires BEFORE the
+    latch is written, so under strict mode the latch is never set and the
+    ``optcost_rust_disabled()`` early-return in :func:`_route` is structurally
+    unreachable. Strict-OFF is byte-identical to the prior behaviour.
 
     ``error=True`` logs ``optcost_rust.autoreverted`` at ERROR (the burn-in
     mismatch — a genuine wrongness signal); guard latches log
     ``optcost_rust.rust_path_disabled`` at WARN. Repeat calls are no-ops.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
@@ -486,6 +609,12 @@ def _route(
         # The COMMON belt over pyo3's own boundary: a PanicException is a
         # BaseException no `except Exception` sees — latch + oracle, never
         # a new crash class into a costs/read path (fail-closed).
+        #
+        # HONEST REACH (module docstring, "Panic-belt honesty"): the SHIPPED
+        # `fno_math` wheel is built `panic = "abort"`, so a real Rust panic
+        # aborts the process before this clause can run. This is a DEV-BUILD
+        # (unwind `cargo test`) + defence-in-depth arm, not a shipped-wheel
+        # rail; fno-math carries no `catch_unwind` wrapper of its own.
         _disable("kernel_panic", seam=seam, error_detail=repr(exc))
         return oracle()
     if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
@@ -973,6 +1102,38 @@ def strike_step(
     )
 
 
+def _int_arg_beyond_crate(**args: int) -> str | None:
+    """Name the first argument the ``i64`` FFI wire cannot carry, or ``None``.
+
+    CLASS C, decided PRE-FFI — the shared gate for the three integer strike
+    seams (``offset_strike`` / ``grid_offset`` / ``grid_around``). Python
+    ``int`` is unbounded; the kernel's parameters are Rust ``i64``, so pyo3
+    raises ``OverflowError`` at EXTRACTION for a value past the wire width —
+    before the kernel body runs at all. That is a domain signal, not a fault,
+    but it arrives at :func:`_route`'s broad degrade clause, which mints the
+    fault-only CLASS-A ``kernel_error`` and therefore REFUSES under strict
+    mode — stranding a caller over a value the CPython oracle was always
+    meant to handle (the crate's own docstring: "Python's arbitrary-precision
+    int handles those inputs — the seam degrades to the oracle").
+
+    This is a pure STRUCTURAL wire-width check, never a second copy of the
+    crate's arithmetic: it asks only "does this value fit the parameter
+    type", exactly as :func:`_round_atm_beyond_crate` asks of the
+    ``round_to_atm`` quotient. The crate's own overflow refusals on a RESULT
+    (or on ``half_width`` past its ceiling) stay kernel-side and still refuse
+    — the NAMED RESIDUAL recorded on :data:`_STRICT_EXEMPT_REASONS`.
+
+    ``**args`` keeps CPython's insertion order, so "first" is the declared
+    parameter order and the reported field is deterministic. Returns the
+    offending field name for the WARN context, so the log says WHICH value
+    was out of range rather than a bare "something was wrong".
+    """
+    for name, value in args.items():
+        if not _I64_MIN <= value <= _I64_MAX:
+            return name
+    return None
+
+
 def offset_strike(
     atm_strike: int,
     step_count: int,
@@ -983,8 +1144,9 @@ def offset_strike(
 ) -> int:
     """Routed :func:`brutex.options.strike_rules.resolve_offset_strike`
     arithmetic (seam ``offset_strike``) — the non-OFFSET-rule ``ValueError``
-    is decided at the call site pre-FFI. Kernel i64 overflow degrades to
-    the oracle (Python ints are unbounded — same answer, no refusal)."""
+    is decided at the call site pre-FFI. An argument past the ``i64`` wire
+    width is gated PRE-FFI as CLASS C (:func:`_int_arg_beyond_crate`) so the
+    oracle's unbounded-int answer serves under strict mode too."""
 
     def _kernel(kernel: ModuleType) -> Outcome:
         return Outcome(
@@ -997,6 +1159,16 @@ def offset_strike(
     def _oracle() -> Outcome:
         return Outcome(value=python())
 
+    beyond = _int_arg_beyond_crate(
+        atm_strike=atm_strike, step_count=step_count, strike_step_value=strike_step_value
+    )
+    if beyond is not None:
+        # CLASS C, gated PRE-FFI (see _int_arg_beyond_crate). Announced only
+        # when the seam is actually routed, so a flag-OFF call stays byte- AND
+        # log-identical.
+        if optcost_rust_enabled():
+            _warn_once("offset_strike_input_beyond_crate", seam="offset_strike", field=beyond)
+        return cast("int", _materialize(_oracle()))
     return cast("int", _materialize(_route("offset_strike", kernel_call=_kernel, oracle=_oracle)))
 
 
@@ -1008,7 +1180,8 @@ def strike_offset(
     python: Callable[[], int],
 ) -> int:
     """Routed :func:`brutex.options.strike_grid.strike_offset_from_atm`
-    (seam ``grid_offset``)."""
+    (seam ``grid_offset``) — an argument past the ``i64`` wire width is gated
+    PRE-FFI as CLASS C (:func:`_int_arg_beyond_crate`)."""
 
     def _kernel(kernel: ModuleType) -> Outcome:
         return Outcome(
@@ -1021,6 +1194,12 @@ def strike_offset(
     def _oracle() -> Outcome:
         return Outcome(value=python())
 
+    beyond = _int_arg_beyond_crate(atm_strike=atm_strike, offset_steps=offset_steps, step=step)
+    if beyond is not None:
+        # CLASS C, gated PRE-FFI (see _int_arg_beyond_crate).
+        if optcost_rust_enabled():
+            _warn_once("grid_offset_input_beyond_crate", seam="grid_offset", field=beyond)
+        return cast("int", _materialize(_oracle()))
     return cast("int", _materialize(_route("grid_offset", kernel_call=_kernel, oracle=_oracle)))
 
 
@@ -1033,7 +1212,9 @@ def grid_around(
 ) -> list[int]:
     """Routed :func:`brutex.options.strike_grid.grid_around_atm`
     (seam ``grid_around``) — the kernel list is length- and
-    element-validated (refuse-poison) before it can serve."""
+    element-validated (refuse-poison) before it can serve; an argument past
+    the ``i64`` wire width is gated PRE-FFI as CLASS C
+    (:func:`_int_arg_beyond_crate`)."""
 
     def _kernel(kernel: ModuleType) -> Outcome:
         chain = kernel.optcost_grid_around_atm(atm_strike, step, half_width)
@@ -1049,9 +1230,56 @@ def grid_around(
     def _oracle() -> Outcome:
         return Outcome(value=python())
 
+    beyond = _int_arg_beyond_crate(atm_strike=atm_strike, step=step, half_width=half_width)
+    if beyond is not None:
+        # CLASS C, gated PRE-FFI (see _int_arg_beyond_crate).
+        if optcost_rust_enabled():
+            _warn_once("grid_around_input_beyond_crate", seam="grid_around", field=beyond)
+        return cast("list[int]", _materialize(_oracle()))
     return cast(
         "list[int]", _materialize(_route("grid_around", kernel_call=_kernel, oracle=_oracle))
     )
+
+
+def _round_atm_beyond_crate(spot_price: float, step: int) -> str | None:
+    """Name the ``round_to_atm`` input shape the kernel never claimed, or ``None``.
+
+    CLASS C, decided PRE-FFI. The kernel's accepted domain for this seam is a
+    FINITE ``spot_price`` whose ``spot // step`` quotient fits ``i64``; outside
+    it the kernel REFUSES BY RAISING (its own message says so verbatim: "the
+    Python oracle serves this call"). That refusal is a domain signal, not a
+    fault — but it arrives at :func:`_route`'s broad degrade clause, which
+    mints the fault-only CLASS-A ``kernel_error`` and therefore REFUSES under
+    strict mode, stranding a legitimate caller over a value the CPython
+    oracle was always meant to handle (it raises the exact
+    ``ValueError("cannot convert float NaN to integer")`` the caller expects).
+
+    Classifying here keeps ``kernel_error`` honest and lets the oracle serve.
+    Both shapes the seam's own docstring names are gated, not just the one a
+    test happens to drive:
+
+    * ``spot_price`` non-finite — NaN or ±inf (``inf // step`` is NaN in
+      CPython float floor division: VERIFIED, not assumed);
+    * the quotient outside ``i64`` — a finite but enormous spot whose
+      ``spot // step`` the kernel cannot represent.
+
+    ``step`` is positive by construction (``derive_strike_step`` /
+    ``STRIKE_STEP``), but a ``0`` would make the probe itself raise, so the
+    division is guarded: an unprobeable step is NOT claimed as out-of-envelope
+    and falls through to today's behaviour.
+
+    Returns the offending field name for the WARN context, so the log says
+    WHICH value was out of range rather than a bare "something was wrong".
+    """
+    if not math.isfinite(spot_price):
+        return "spot_price"
+    try:
+        quotient = spot_price // step
+    except (ZeroDivisionError, OverflowError, ValueError):
+        return None  # not a claim about the crate's envelope — leave as-is
+    if not math.isfinite(quotient) or not _I64_MIN <= quotient <= _I64_MAX:
+        return "quotient"
+    return None
 
 
 def round_atm(
@@ -1082,6 +1310,16 @@ def round_atm(
         except (ValueError, OverflowError) as exc:
             return Outcome(error=exc)
 
+    beyond = _round_atm_beyond_crate(spot_price, step)
+    if beyond is not None:
+        # CLASS C, gated PRE-FFI: the kernel never claimed this input, so the
+        # oracle is the intended handler and this reason is exempt from the
+        # strict refusal (see _round_atm_beyond_crate + _STRICT_EXEMPT_REASONS).
+        # Announced only when the seam is actually routed, so a flag-OFF call
+        # stays byte- AND log-identical.
+        if optcost_rust_enabled():
+            _warn_once("round_to_atm_input_beyond_crate", seam="round_to_atm", field=beyond)
+        return cast("int", _materialize(_oracle()))
     return cast("int", _materialize(_route("round_to_atm", kernel_call=_kernel, oracle=_oracle)))
 
 

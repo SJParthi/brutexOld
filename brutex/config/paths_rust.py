@@ -100,6 +100,14 @@ _SEAM: Final[ConfigRustSeam] = ConfigRustSeam(
     # DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): the
     # seam default is ON; explicit falsy stays the kill switch.
     default_on=True,
+    # DEC-RUST-STRICT-NO-FALLBACK-001: opt this facade into strict mode. Every
+    # fall-back the seam ANNOUNCES (class A: crate absent/stale/panicked/raised
+    # + the junk-flag arm; class B: refuse-poison + burn-in mismatch) raises
+    # instead of degrading when BRUTEX_RUST_STRICT is on. The eligibility gates
+    # below (`_eligible_lake_root` / `_eligible_volume_parent`) are CLASS C —
+    # the crate never claimed those inputs — and they return the Python law
+    # without announcing, so they are unaffected.
+    strict_facade="brutex.config.paths_rust",
 )
 
 

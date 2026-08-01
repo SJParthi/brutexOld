@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from brutex.config import dotenv, dotenv_rust, seam_core
+from brutex.config import dotenv, dotenv_rust, rust_strict, seam_core
 
 # ── Harness ─────────────────────────────────────────────────────────────────
 
@@ -54,6 +54,20 @@ def _bomb_crate() -> types.ModuleType:
 def _arm(monkeypatch: pytest.MonkeyPatch, crate: types.ModuleType | None) -> None:
     monkeypatch.setenv(dotenv_rust.DOTENV_RUST_ENV, "1")
     monkeypatch.setitem(sys.modules, "brutex_core", crate)
+
+
+def _strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-enable the Python oracle fall-back for a *degrade-behaviour* test.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` ON by
+    default, so a class-A (crate absent/stale/errored) or class-B
+    (structurally refused crate result) reason now RAISES
+    :class:`~brutex.config.rust_strict.RustFallbackRefused` instead of
+    silently serving the oracle.  The tests below exercise the still-supported
+    ``BRUTEX_RUST_STRICT=0`` mode — the degrade path itself is unchanged, only
+    its default reachability moved.  The assertions are untouched.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
 
 
 _SAMPLE = "# c\nA=1\nexport B = 'two' \nC=a=b\n"
@@ -164,11 +178,13 @@ class TestRefusePoison:
     def test_poison_pairs_refused_serves_oracle(
         self, monkeypatch: pytest.MonkeyPatch, poison: object
     ) -> None:
+        _strict_off(monkeypatch)
         _arm(monkeypatch, _fake_crate(dotenv_parse_pairs=lambda _t: poison))
         assert dotenv.parse_dotenv(_SAMPLE) == _SAMPLE_PARSED
         assert dotenv_rust.dotenv_rust_disabled() is False
 
     def test_poison_warn_is_value_redacted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _strict_off(monkeypatch)
         records: list[dict[str, object]] = []
         monkeypatch.setattr(
             seam_core._LOG,  # pyright: ignore[reportPrivateUsage]
@@ -193,6 +209,7 @@ class TestRefusePoison:
 
 class TestBurnInAndDegrade:
     def test_burn_in_mismatch_autoreverts_redacted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _strict_off(monkeypatch)
         records: list[dict[str, object]] = []
         monkeypatch.setattr(
             seam_core._LOG,  # pyright: ignore[reportPrivateUsage]
@@ -213,6 +230,7 @@ class TestBurnInAndDegrade:
     def test_order_divergence_is_a_burn_in_mismatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # dict == ignores order; the facade compares list(items()) —
         # order-STRICT (the first-insertion-position law has teeth).
+        _strict_off(monkeypatch)
         _arm(
             monkeypatch,
             _fake_crate(dotenv_parse_pairs=lambda t: list(reversed(_oracle_pairs(t)))),
@@ -224,6 +242,7 @@ class TestBurnInAndDegrade:
         def _boom(_t: str) -> list[tuple[str, str]]:
             raise ValueError("crate refusal")
 
+        _strict_off(monkeypatch)
         _arm(monkeypatch, _fake_crate(dotenv_parse_pairs=_boom))
         assert dotenv.parse_dotenv(_SAMPLE) == _SAMPLE_PARSED
         assert dotenv_rust.dotenv_rust_disabled() is False
@@ -353,3 +372,44 @@ class TestWorkflowWiring:
         assert "tests/unit/test_config_dotenv_rust.py" in text, (
             "core-rust-parity.yml no longer runs the dotenv facade suite"
         )
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins for the shared :class:`ConfigRustSeam` choke points.
+
+    The degrade tests above declare ``BRUTEX_RUST_STRICT=0`` via
+    :func:`_strict_off`; these delete the kill switch so strict mode takes
+    its shipped default (ON) and pin the refusal. This facade carries no class-C reason at the announced choke points: ``_eligible_text`` (non-ASCII / oversize input) returns the Python law SILENTLY, never through ``_warn_once``.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_seam_warn_once_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused):
+            dotenv_rust._SEAM._warn_once("crate_stale")  # pyright: ignore[reportPrivateUsage]
+
+    def test_seam_disable_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused):
+            dotenv_rust._SEAM._disable("crate_unavailable")  # pyright: ignore[reportPrivateUsage]
+
+    def test_unclassified_seam_is_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ``strict_facade`` is OPT-IN on the shared core: a seam built without
+        # it (e.g. backup_env_rust, whose reasons are not yet classified)
+        # stays byte-identical and still degrades silently under strict mode.
+        self._strict_on(monkeypatch)
+        seam = seam_core.ConfigRustSeam(
+            seam="test.unclassified",
+            env_var="BRUTEX_TEST_UNCLASSIFIED",
+            crate_api=(),
+            laws=("x",),
+        )
+        seam._disable("crate_unavailable")  # pyright: ignore[reportPrivateUsage]
+        assert seam.disabled() is True

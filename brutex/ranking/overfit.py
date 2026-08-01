@@ -138,6 +138,9 @@ class OverfitGateConfig:
         ``kurtosis`` is ``None``. Default ``0.0`` (Gaussian excess kurtosis;
         ``GAUSSIAN_KURTOSIS`` is added internally to recover the non-excess form).
 
+    Every field is NORMALISED to an exact ``float`` after validation — see
+    :meth:`__post_init__`.
+
     Raises
     ------
     ValueError
@@ -151,6 +154,39 @@ class OverfitGateConfig:
     default_excess_kurtosis: float = 0.0
 
     def __post_init__(self) -> None:
+        """Validate the four knobs, then NORMALISE each to an exact ``float``.
+
+        Validation first, normalisation second, so every message still quotes
+        the value the caller actually passed.
+
+        WHY NORMALISE (DEC-RUST-STRICT-NO-FALLBACK-001). These four values are
+        the ``overfit`` leg of the RUN-IDENTITY gate fragment
+        (:func:`brutex.engine.sweep_identity._gate_config_fragment`), which
+        routes through ``sweep_ops_rust.routed_gate_fragment``. That facade
+        gates its FFI on ``type(value) is float`` — exactly, not
+        ``isinstance`` — because an ``int``/``Decimal``/``numpy.float64`` does
+        not round-trip through f64 the way the Python law renders it. A
+        numeric-but-not-``float`` knob therefore announced
+        ``gate_fragment_input_refused`` and served the Python oracle: a
+        CLASS-C "input outside the crate's envelope" degrade on the
+        run-identity path, held out of the strict refusal by
+        ``_STRICT_HELD_OUT_REASONS`` precisely because crashing a legitimate
+        input would be worse. Normalising HERE removes the input from the
+        out-of-envelope class instead, which is the honest fix: the crate
+        becomes reachable and the held-out reason becomes unreachable.
+
+        DIGEST-NEUTRAL BY CONSTRUCTION, and measured, because this feeds a
+        results-store ADDRESS (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001):
+        ``_gate_config_fragment_python`` has ALWAYS emitted this leg through
+        an explicit ``float()`` (the DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001
+        review-fix NIT), so the fragment — and therefore the digest — is
+        identical whether the coercion happens there or here.
+        ``OverfitGateConfig(dsr_min=1, weight=0)`` and its ``1.0``/``0.0``
+        twin already minted the SAME digest before this change; they still do.
+        The recount-recovery reader
+        (``sweep_verify.recorded_overfit_from_audit``) reconstructs from JSON
+        floats, so normalisation is a no-op on that path too.
+        """
         if not 0.0 <= self.dsr_min <= 1.0:
             raise ValueError(
                 f"OverfitGateConfig.dsr_min must be a probability in [0, 1], got {self.dsr_min}"
@@ -161,6 +197,12 @@ class OverfitGateConfig:
             value: float = getattr(self, name)
             if not math.isfinite(value):
                 raise ValueError(f"OverfitGateConfig.{name} must be finite, got {value!r}")
+        # Frozen dataclass — ``object.__setattr__`` is the sanctioned in-place
+        # normalisation seam (the house frozen-dataclass idiom). A value that
+        # is ALREADY an exact float is rewritten with itself, so the common
+        # path costs four stores and changes nothing observable.
+        for name in ("dsr_min", "weight", "default_skew", "default_excess_kurtosis"):
+            object.__setattr__(self, name, float(getattr(self, name)))
 
 
 @dataclass(frozen=True, slots=True)

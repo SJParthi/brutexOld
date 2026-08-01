@@ -224,21 +224,25 @@ class TestOverflowContainmentEntry:
     def test_u64_max_episodes_degrades_to_oracle_through_public_check_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The panic-containment fix at the PUBLIC surface: a warn edge at
-        # episodes == u64::MAX takes the crate's checked_add ValueError
-        # refusal ("episodes counter overflow") → the degrade set → the
-        # ORACLE serves the unbounded-int truth — pre-fix this exact call
-        # propagated the wheel's per-extension PanicException (a
-        # BaseException NEITHER name-based belt home could resolve) out of
-        # the monitor tick. The oracle is deliberately NOT bombed here —
-        # the degrade arm legitimately consults it.
+        # The overflow-containment law at the PUBLIC surface: episodes ==
+        # u64::MAX is outside the crate's counter range (its checked
+        # ``episodes + 1`` on a warn edge cannot represent the result), so
+        # the facade's PRE-FFI range gate routes it to the ORACLE, which
+        # serves the unbounded-int truth. The crate is never called at all —
+        # strictly stronger than the earlier shape, where the call crossed
+        # the FFI and came back as a ``loop_error`` degrade (and, before
+        # THAT, as the wheel's per-extension PanicException, a BaseException
+        # NEITHER name-based belt home could resolve). The oracle is
+        # deliberately NOT bombed here — the CLASS-C arm legitimately
+        # consults it, and does so even under BRUTEX_RUST_STRICT (this file
+        # runs at the strict default, so a green run IS that proof).
         with capture_logs() as logs:
             verdict = loop_watchdog.check_once(10.0, 0.0, WatchdogState(episodes=2**64 - 1))
         assert verdict.warn_edge is True
         assert verdict.state.episodes == 2**64  # Python ints are unbounded
         warns = [e for e in logs if e["event"] == "observability_rust.fallback"]
-        assert warns[0]["reason"] == "loop_error"
-        assert "episodes counter overflow" in warns[0]["error_detail"]
+        assert warns[0]["reason"] == "loop_input_beyond_crate"
+        assert warns[0]["episodes"] == 2**64 - 1
         assert observability_rust.rust_observability_disabled() is False
         # NOT latched: the very next in-domain call is crate-served again.
         monkeypatch.setattr(loop_watchdog, "_check_once_python", _oracle_bomb)

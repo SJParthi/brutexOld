@@ -112,17 +112,34 @@ class SlaDecision(StrEnum):
     ACKNOWLEDGED = "acknowledged"
 
 
-def _require_positive_finite(value: float, *, name: str, raw: object) -> None:
-    """Raise :class:`ValueError` unless *value* is a FINITE float ``> 0``.
+def _require_positive_finite(value: float, *, name: str, raw: object) -> float:
+    """Return *value* as an EXACT float, raising unless it is FINITE and ``> 0``.
 
     The ONE validation both the env override and the explicit parameter ride
     (§11 COMMON). ``nan`` fails every comparison, so a bare ``<= 0`` check
     would ACCEPT it and poison the projection into ``nan`` days (hostile-review
     MINOR-1); ``inf`` would fabricate an always-refuse. Both must be a clean
     user-config error instead.
+
+    It also NORMALISES (DEC-RUST-STRICT-NO-FALLBACK-001), which is why it now
+    returns rather than only raising. :func:`check_sweep_sla`'s flat arm routes
+    through ``sweep_ops_rust.routed_sla_decision``, whose FFI gate is exact
+    ``type(v) is float``; a caller passing an ``int`` envelope (``345_600``) or
+    an ``int`` per-tuple estimate announced ``sla_decision_input_refused`` and
+    ran the Python oracle — a CLASS-C "outside the crate's envelope" degrade.
+    Coercing at the ONE validation both paths already ride makes the crate
+    reachable without adding a second normalisation site.
+
+    Value-neutral: the decision is a comparison and the projection a
+    multiplication, both identical over the exact-int band; the rendered
+    message uses ``{:g}`` / a division, so ``30`` and ``30.0`` format the same.
+    The one observable narrowing is that ``SlaProjection.projected_seconds``
+    now always holds the ``float`` its annotation declares (an all-``int``
+    caller previously stored an ``int``); nothing hashes or stores it.
     """
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be a positive, finite number of seconds; got {raw!r}")
+    return float(value)
 
 
 def resolve_per_tuple_seconds(env: Mapping[str, str] | None = None) -> float:
@@ -151,8 +168,7 @@ def resolve_per_tuple_seconds(env: Mapping[str, str] | None = None) -> float:
         raise ValueError(
             f"{ENV_PER_TUPLE_SECONDS} must be a positive, finite number of seconds; got {raw!r}"
         ) from exc
-    _require_positive_finite(value, name=ENV_PER_TUPLE_SECONDS, raw=raw)
-    return value
+    return _require_positive_finite(value, name=ENV_PER_TUPLE_SECONDS, raw=raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,11 +466,19 @@ def check_sweep_sla(
     """
     if tuple_count < 0:
         raise ValueError(f"tuple_count must be >= 0; got {tuple_count!r}")
-    _require_positive_finite(envelope_seconds, name="envelope_seconds", raw=envelope_seconds)
+    # Validate AND normalise to exact floats — see `_require_positive_finite`:
+    # the routed flat-model decision gates on `type(v) is float`, so an int
+    # envelope / estimate used to announce `sla_decision_input_refused` and
+    # serve the oracle.
+    envelope_seconds = _require_positive_finite(
+        envelope_seconds, name="envelope_seconds", raw=envelope_seconds
+    )
     if per_tuple_seconds is None:
         per_tuple_seconds = resolve_per_tuple_seconds(env)
     else:
-        _require_positive_finite(per_tuple_seconds, name="per_tuple_seconds", raw=per_tuple_seconds)
+        per_tuple_seconds = _require_positive_finite(
+            per_tuple_seconds, name="per_tuple_seconds", raw=per_tuple_seconds
+        )
 
     dominant_tuples: tuple[str, ...] = ()
     if cells is None:

@@ -56,6 +56,25 @@ re-raises BARE (OOM is a GLOBAL stop — DEC-LAKE-WRITE-HALT-001). The first
 successful kernel-served build logs ``rust_stage1a.engaged`` (INFO) once per
 process — the anti-vacuous-gate signal the golden suite asserts.
 
+## Strict mode — the CLASS split (DEC-RUST-STRICT-NO-FALLBACK-001)
+
+The batch boundary raises ONE ``ValueError`` class for two very different
+populations, so :func:`_kernel_degrade_reason` classifies it from a marker the
+CRATE stamps at its own raise site (:data:`_INPUT_REFUSED_MARKER`), never from
+the exception type:
+
+* ``kernel_input_refused`` (**CLASS C**, exempt) — a per-bar price/level/VWAP
+  operand or bps knob outside the crate's overflow-safe envelope. Provably
+  safe to degrade: the flag-OFF arm hits the SAME guards per bar, so the
+  oracle re-raises the IDENTICAL error.
+* ``kernel_refused`` (**CLASS A/B**, refused) — the UNMARKED remainder: a
+  column-shape violation from ``stage1a_batch::validate_structure``, an
+  ``Err`` from the batch compute core, or a PyO3 conversion failure. Rust ran
+  and said no about our own marshalling; a quiet Python re-run would paper
+  that over.
+
+Nothing is HELD any more — :data:`_STRICT_UNRESOLVED_REASONS` is EMPTY.
+
 ## Honest envelope (Golden Rule #10)
 
 * Constant-factor win only — the build stays ``O(N_bars)``; NO O-class change
@@ -82,6 +101,7 @@ import structlog
 # ``brutex.config.env_flags`` leaf (the vocabulary home since
 # DEC-PREBUILD-FRAME-WRITE-001) and are consumed through the sweep-flag
 # module's PUBLIC re-exported classifier — never copied (CLAUDE.md §11).
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -251,14 +271,104 @@ def disable_kernel(reason: str, **context: object) -> None:
         _LOG.error("rust_stage1a.kernel_autoreverted", reason=reason, **context)
 
 
-def warn_fallback_once(reason: str, **context: object) -> None:
-    """Log ``rust_stage1a.fallback`` (WARNING) once per process per *reason*.
+#: The crate's input-VALUE-envelope refusal marker — the stable fragment
+#: ``rust/trading-core/src/python.rs::INPUT_REFUSED_MARKER`` stamps on every
+#: refusal raised by its three VALUE-envelope guards (``check_evaluate_inputs``
+#: / ``vwap_update_guard`` / the day-table level-magnitude loop in
+#: ``check_stage1a_batch_values``). Its presence is what separates CLASS C
+#: (keep degrading, even under strict mode) from CLASS A/B (refuse) inside the
+#: single ``ValueError`` class the batch boundary raises for both. The SAME
+#: literal is used by ``rust/brutex-strategies`` /
+#: :data:`brutex.strategies.combo_rust._INPUT_REFUSED_MARKER`, so the two
+#: facades classify on ONE shared fragment; cross-language drift is pinned by
+#: the unit suite against the real wheel.
+_INPUT_REFUSED_MARKER: Final[str] = "input outside the crate envelope"
 
-    The seam runs once per kernel BUILD (up to thousands per grid sweep), so a
-    sticky reason (a stale wheel, a latched kernel) would otherwise flood the
-    logs. The fallback itself is bit-exact regardless — the Python oracle
-    serves the build.
+#: Fall-back reasons strict mode must NOT refuse — the CLASS-C exemption
+#: (DEC-RUST-STRICT-NO-FALLBACK-001).
+#:
+#: * ``kernel_input_refused`` — a per-bar price/level/VWAP operand or a bps
+#:   knob outside the crate's private overflow-safe envelope
+#:   (``MAX_BAR_PAISA = i64::MAX / 65536`` / ``MAX_BPS``,
+#:   ``rust/trading-core/src/python.rs``). The Python oracle was always the
+#:   intended handler here, and the class is *provable* rather than guessed:
+#:   the flag-OFF arm reaches the SAME three guards per bar (through
+#:   ``evaluate_with_levels`` / ``VwapState.update``), so degrading re-raises
+#:   the IDENTICAL ``ValueError`` — pinned by
+#:   ``test_out_of_envelope_price_raises_identical_error_both_arms``. Refusing
+#:   would replace that precise ``"out of the overflow-safe range"`` diagnosis
+#:   with a generic :class:`~brutex.config.rust_strict.RustFallbackRefused`.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({"kernel_input_refused"})
+
+#: EMPTY — nothing is held out of the taxonomy any more.
+#:
+#: ``kernel_refused`` used to live here because ONE ``except ValueError``
+#: around ``trading_core.stage1a_bar_bits_batch`` bundled the kernel's own
+#: STRUCTURAL refusals (CLASS A/B) together with an out-of-envelope input
+#: (CLASS C), indistinguishable at this choke point — and the crate's
+#: ``MAX_BAR_PAISA`` is private, so a Python-side pre-screen would have
+#: duplicated a private constant and invited drift. That is resolved: the
+#: crate now MARKS every input-envelope refusal it raises
+#: (:data:`_INPUT_REFUSED_MARKER`), :func:`_kernel_degrade_reason` routes
+#: those to ``kernel_input_refused`` in :data:`_STRICT_EXEMPT_REASONS` above,
+#: and ``kernel_refused`` retains exactly the UNMARKED remainder — a column
+#: -shape violation from ``stage1a_batch::validate_structure``, an ``Err``
+#: from the batch compute core, or a PyO3 argument-conversion failure — which
+#: is CLASS A/B and DOES refuse.
+#:
+#: The set is kept (empty) rather than deleted so a future "held pending a
+#: ruling" reason has a named, reviewable home instead of being quietly
+#: folded into the ruled exemption (the ``combo_rust`` precedent).
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset()
+
+#: The reasons strict mode does NOT refuse — the ruled CLASS-C exemption plus
+#: the (currently empty) unresolved-pending-ruling set, unioned at ONE point
+#: so the two provenances stay separately reviewable above.
+_STRICT_NOT_REFUSED: Final[frozenset[str]] = _STRICT_EXEMPT_REASONS | _STRICT_UNRESOLVED_REASONS
+
+
+def _kernel_degrade_reason(exc: BaseException) -> str:
+    """Classify a batch-FFI degrade as CLASS C (input) or CLASS A/B (fault).
+
+    The classification reads a marker the CRATE minted at its own raise site
+    — never a guess from the exception class, which is the single
+    ``ValueError`` both populations share:
+
+    * :data:`_INPUT_REFUSED_MARKER` present → ``kernel_input_refused`` (a
+      per-bar price/level/VWAP operand or bps knob outside the crate's
+      overflow-safe envelope; the oracle raises the identical error);
+    * absent → ``kernel_refused``, the genuine-fault remainder (a
+      ``validate_structure`` column-shape violation, an ``Err`` from the
+      batch compute core, or a PyO3 ``TypeError`` / ``OverflowError``
+      argument-conversion failure) which strict mode REFUSES.
     """
+    if _INPUT_REFUSED_MARKER in str(exc):
+        return "kernel_input_refused"
+    return "kernel_refused"
+
+
+def warn_fallback_once(reason: str, **context: object) -> None:
+    """Refuse under strict mode; else log ``rust_stage1a.fallback`` warn-once.
+
+    This is the ONE choke point every Stage-1A fall-back funnels through, so
+    :func:`~brutex.config.rust_strict.refuse_if_strict` here is a *complete*
+    block on the Python oracle — there is no unannounced path around it
+    (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    Four of the five reasons this facade can emit (``flag_unrecognised`` /
+    ``kernel_disabled`` / ``wheel_missing`` / ``kernel_refused``) mean Rust is
+    absent, latched, mis-configured or genuinely broke, so refusing them is
+    exactly the intent. The fifth, ``kernel_input_refused``, is the ruled
+    CLASS-C exemption in :data:`_STRICT_EXEMPT_REASONS` — see that constant
+    for the proof that degrading there is byte-equal, not a paper-over.
+
+    With strict mode OFF the historic behaviour is byte-identical: the seam
+    runs once per kernel BUILD (up to thousands per grid sweep), so a sticky
+    reason (a stale wheel, a latched kernel) would otherwise flood the logs,
+    and the fallback itself is bit-exact — the Python oracle serves the build.
+    """
+    if reason not in _STRICT_NOT_REFUSED:
+        refuse_if_strict("brutex.engine.rust_stage1a", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -395,8 +505,10 @@ def rust_bar_bits_or_none(
     except (ValueError, TypeError, OverflowError) as exc:
         # The boundary's own guard ValueErrors + PyO3 conversion failures
         # degrade to the oracle (which raises today's exact error or
-        # computes); MemoryError and every other type propagate.
-        warn_fallback_once("kernel_refused", error=repr(exc))
+        # computes); MemoryError and every other type propagate. The reason
+        # is CLASSIFIED from the crate's own marker, so strict mode can refuse
+        # a genuine kernel fault without crashing an out-of-envelope input.
+        warn_fallback_once(_kernel_degrade_reason(exc), error=repr(exc))
         return None
     if self_check_pending():
         expected = oracle()

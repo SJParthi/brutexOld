@@ -53,6 +53,51 @@ pub const DAY_US: i64 = 86_400_000_000;
 /// Python oracle, which produces any genuine `OverflowError` itself.
 pub const MAX_SAFE_TS_US: i64 = 253_402_214_400_000_000;
 
+/// `true` iff an epoch-µs / step integer lies inside the crate's fixed-IST
+/// envelope `[0, MAX_SAFE_TS_US)` — the ONE magnitude law of
+/// `DEC-FFI-MAGNITUDE-CEILING-001`.
+///
+/// This function is the crate's ONLY expression of that predicate: every
+/// decision site under `src/` calls it — the two lazy ABSTAIN gates
+/// ([`scan_bars`] and [`crate::materialize::scan_bars_strict`]), the
+/// per-timestamp abstain arm of [`crate::series::ownership_cut`], and the
+/// `#[pyfunction]` guard (`python.rs::require_ts_envelope`) — so the bound
+/// cannot drift between them. It lives beside [`MAX_SAFE_TS_US`] (the
+/// constant it tests) and is re-exported from [`crate::series`], the module
+/// whose label arithmetic the bound exists to keep overflow-free, so that
+/// public path keeps resolving.
+///
+/// The call sites differ only in how they EXPRESS the refusal, never in the
+/// test: the two scans and `ownership_cut` carry it in their return type
+/// (`Ok(None)` / `None` — ABSTAIN), while
+/// [`crate::series::expected_bar_instant`] returns a plain `bool`, so its
+/// FFI face raises `ValueError` instead.
+///
+/// ## Why this bound makes the label arithmetic provably overflow-free
+///
+/// `MAX_SAFE_TS_US` ≈ `2.534e17`, so for envelope-bounded `open_us`,
+/// `seg_start_us` and `step_us`:
+///
+/// * `open_us - seg_start_us` has magnitude `< MAX_SAFE_TS_US` (both
+///   operands are non-negative and bounded);
+/// * `div_euclid(step_us)` cannot hit the sole `i64` division overflow
+///   (`i64::MIN / -1`) — the numerator is bounded and `step_us >= 0`;
+/// * the quotient's magnitude is `<= |open_us - seg_start_us|` (dividing by
+///   `step_us >= 1`), so negating it cannot overflow (`i64::MIN` is
+///   unreachable);
+/// * `quotient * step_us` reconstructs a value of magnitude
+///   `<= |open_us - seg_start_us| < MAX_SAFE_TS_US`;
+/// * the final `open_us + …` is therefore `< 2 · MAX_SAFE_TS_US ≈ 5.1e17`,
+///   an order of magnitude inside `i64::MAX ≈ 9.22e18`.
+///
+/// A `step_us` of `0` is legal (it selects the derived-`1day` arm, which
+/// performs no arithmetic at all — only comparisons).
+#[must_use]
+#[inline]
+pub fn ts_in_envelope(value: i64) -> bool {
+    (0..MAX_SAFE_TS_US).contains(&value)
+}
+
 /// One owed bad-tick WARN, as integer coordinates only:
 /// `(emit_at_row, session_first_row, skipped, first_prev_row, first_skip_row)`.
 ///
@@ -177,7 +222,7 @@ pub fn scan_bars(
             //    not provably identical to `astimezone(IST).date()`
             //    (pre-1970 Kolkata offsets; `datetime.max` overflow), so the
             //    whole call degrades to the oracle.
-            if !(0..MAX_SAFE_TS_US).contains(&t) {
+            if !ts_in_envelope(t) {
                 return Ok(None);
             }
             // 3. IST session key: the civil day ordinal of `t + 05:30`

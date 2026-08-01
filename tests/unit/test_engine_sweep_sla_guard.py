@@ -425,3 +425,61 @@ class TestSweepOpsRouting:
             assert [p.decision.value for p in on] == ["allowed", "refused", "acknowledged"]
         finally:
             self._reset_facade()
+
+
+class TestClassCFallbackUnreachable:
+    """Both SLA seconds operands reach the crate — no CLASS-C degrade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. ``routed_sla_decision`` gates on
+    ``type(v) is float``, so before the call-site normalisation an ``int``
+    ``per_tuple_seconds``/``envelope_seconds`` (``30``, ``345_600`` — the
+    natural way an operator writes a whole number of seconds) announced
+    ``sla_decision_input_refused`` and served the Python oracle. The fix makes
+    ``_require_positive_finite`` RETURN ``float(value)``: validation is
+    unchanged (same raise, same message quoting the caller's value) and the
+    refusal becomes unreachable for every normal operator input.
+    """
+
+    def test_int_seconds_reach_the_crate(self) -> None:
+        """``int`` seconds route with ZERO fall-backs (crate engaged)."""
+        from tests.fakes.sweep_ops_crate import routed_fallback_reasons
+
+        projection, reasons, engaged = routed_fallback_reasons(
+            lambda: check_sweep_sla(
+                10,
+                acknowledge=False,
+                per_tuple_seconds=30,
+                envelope_seconds=345_600,
+                env={},
+            )
+        )
+        assert reasons == []
+        assert engaged == 1  # anti-vacuity: the crate genuinely ran
+        assert projection.decision is SlaDecision.ALLOWED
+
+    def test_int_seconds_are_value_identical_to_their_float_twins(self) -> None:
+        """Normalisation is value-neutral across the whole decision surface."""
+        as_int = check_sweep_sla(
+            1_000_000, acknowledge=False, per_tuple_seconds=30, envelope_seconds=345_600, env={}
+        )
+        as_float = check_sweep_sla(
+            1_000_000,
+            acknowledge=False,
+            per_tuple_seconds=30.0,
+            envelope_seconds=345_600.0,
+            env={},
+        )
+        assert as_int == as_float
+        assert as_int.decision is SlaDecision.REFUSED
+
+    def test_projection_seconds_is_always_the_declared_float(self) -> None:
+        """The one observable narrowing: the field now holds the type it declares."""
+        projection = check_sweep_sla(
+            10, acknowledge=False, per_tuple_seconds=30, envelope_seconds=345_600, env={}
+        )
+        assert type(projection.projected_seconds) is float
+
+    def test_env_seam_still_fails_loud_on_junk(self) -> None:
+        """Validation is untouched — a junk env still raises, quoting the raw value."""
+        with pytest.raises(ValueError, match=ENV_PER_TUPLE_SECONDS):
+            resolve_per_tuple_seconds({ENV_PER_TUPLE_SECONDS: "not-a-number"})

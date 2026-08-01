@@ -45,7 +45,7 @@
 //! strict scan (exactly as it was unreachable in the Python oracle after
 //! `DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001`).
 
-use crate::scan::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, WarnEvent};
+use crate::scan::{DAY_US, IST_OFFSET_US, WarnEvent, ts_in_envelope};
 
 /// Stop kind: the first offending field was a NON-POSITIVE price
 /// (`v <= 0.0` — Python raises `_positivity_error`).
@@ -166,8 +166,9 @@ pub fn scan_bars_strict(
             // 2. Lazy ABSTAIN gate — outside `[0, MAX_SAFE_TS_US)` the
             //    fixed +05:30 day-ordinal law is not provably identical to
             //    `astimezone(IST).date()` (pre-1970 Kolkata offsets;
-            //    `datetime.max` overflow).
-            if !(0..MAX_SAFE_TS_US).contains(&t) {
+            //    `datetime.max` overflow). The predicate is the crate's ONE
+            //    shared magnitude law (`scan::ts_in_envelope`).
+            if !ts_in_envelope(t) {
                 return Ok(None);
             }
             debug_assert!(t.checked_add(IST_OFFSET_US).is_some());

@@ -209,6 +209,29 @@ _OBSERVABILITY_MEMO: Final[set[str]] = set()
 #: The engaged-INFO memo key (not a fallback reason — namespaced apart).
 _ENGAGED_KEY: Final[str] = "__engaged__"
 
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.data.fno_symbol_rust"
+
+#: CLASS-C fall-back reasons — the ENVIRONMENT/INPUT is outside the crate's
+#: envelope and the Python oracle was ALWAYS the intended handler
+#: (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note"):
+#:
+#: * ``locale_unsupported`` — the fail-CLOSED locale guard
+#:   (:func:`_locale_engaged`). The crate parses the ``%b`` month abbreviation
+#:   against the ENGLISH table; a box whose ``LC_TIME`` yields different month
+#:   names (or whose ``_strptime.LocaleTime()`` construction raises) routes
+#:   EVERY parse to the Python oracle, which honours the live locale. This one
+#:   is the sharpest CLASS C in the repo: refusing here would break a
+#:   non-English box outright, turning a correctly-served parse into a crash.
+#:   The real fix is a locale-aware crate (or a pinned ``LC_TIME``), never a
+#:   refusal. Note it is emitted through BOTH choke points below, so BOTH must
+#:   honour this set.
+#:
+#: The remaining silent CLASS-C path — the non-ASCII PRE-gate
+#: (``if not symbol.isascii(): return python_law(symbol)``) — emits no token
+#: at all, so it is un-refusable by construction and needs no entry here.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({"locale_unsupported"})
+
 #: The expiry-year window mirrored from ``fno_symbol`` WITHOUT importing it
 #: (no runtime cycle — the values are the DEC-FNO-EXPIRY-YEAR-PIVOT-001
 #: constants, equality-pinned against the oracle module AND the crate's
@@ -382,8 +405,30 @@ def _live_month_table() -> tuple[str, ...]:
     return tuple(str(month) for month in strptime_mod.LocaleTime().a_month[1:])
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a Python fall-back under strict mode unless *reason* is CLASS C.
+
+    Function-local import: this module deliberately imports NOTHING from
+    ``brutex.engine`` / the wider config tree at module scope (module
+    docstring: the acyclic-in-both-directions law + the ``fno_math`` wheel
+    edge), so the gate is resolved at call time — the
+    ``observability_rust`` precedent.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    if reason in _STRICT_EXEMPT_REASONS:
+        return
+    refuse_if_strict(_STRICT_FACADE, reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``fno_symbol_rust.fallback`` WARN once per process per *reason*."""
+    """Log ``fno_symbol_rust.fallback`` WARN once per process per *reason*.
+
+    Choke point #1 of two. Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001)
+    refuses BEFORE the memo write, so an already-warned sticky reason cannot
+    slip through the early return.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -396,7 +441,12 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``fno_symbol_rust.autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``fno_symbol_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    Choke point #2 of two. Strict mode refuses BEFORE the latch write, which
+    makes every latched early-return on the dispatch path structurally
+    unreachable — the wiring is complete by construction, not by sampling.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
@@ -550,6 +600,11 @@ def routed_parse_fno_symbol[PartsT: SymbolParts](
         # ASCII pre-gate (module docstring) — a scope gate, deliberately
         # log-free: byte offsets ≡ char offsets no longer holds and the
         # oracle's Unicode-digit acceptance is out of the Rust contract.
+        #
+        # CLASS C under DEC-RUST-STRICT-NO-FALLBACK-001 and deliberately NOT
+        # wired: the INPUT is outside the crate's contract, so Python was
+        # always the intended handler; refusing would crash a legal symbol.
+        # It emits no reason token, so it is un-refusable by construction.
         return python_law(symbol)
     crate = _resolve_crate()
     if crate is None:

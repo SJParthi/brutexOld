@@ -172,8 +172,10 @@ class _TerminalStockAdapter(_DelegatingAdapter):
 class _EmptyThenBarsAdapter(_DelegatingAdapter):
     """One stock answers clean-EMPTY for its whole FIRST until-clean round, bars after.
 
-    ``empty_calls`` must cover the ingest's full in-pass EMPTY-retry budget
-    (1 initial + ``_DEFAULT_EMPTY_RETRY_ATTEMPTS`` re-fetches) so round 1 ends
+    ``empty_calls`` must cover the ingest's full in-pass EMPTY-retry budget.
+    That budget is ``range(max(1, empty_retry_attempts))`` — i.e.
+    ``_DEFAULT_EMPTY_RETRY_ATTEMPTS`` fetches in TOTAL, not one initial fetch
+    plus that many re-fetches — so round 1 ends
     with the window EMPTY (not settled → outstanding) and the RECOVERY lands in
     round 2 — the sync multi-round shape the summed ``pull.step.settled``
     bars/windows counts must include. ``bars_returned`` tallies every bar the
@@ -443,9 +445,25 @@ class TestSettleEventHonestyRound2:
         so the OLD-gap fast-settle stays out of the way). First-round-only (the old
         read) logs TCS's bars alone; last-round-only would log ADANIENT's alone —
         the event must carry the SUM (the F&O twin's semantics).
+
+        CLOCK PIN (calendar rot, fixed here): "RECENT" is judged against
+        ``old_cutoff = now_for_clamp.date() - OLD_GAP_HORIZON_DAYS`` inside
+        ``brutex.adapters.groww.ingest``, and ``pull_all_spot(now=…)`` reaches
+        only ``resolve_candle_range`` — it is NEVER threaded to the ingest
+        spine's ``now_ist``. So the cutoff was computed off the REAL wall clock
+        while this window is hardcoded, and once the calendar passed
+        ``2026-05-28 + 60 days`` the window turned OLD, round 1 fast-settled the
+        EMPTY window SKIPPED, and ``rounds`` read 1 instead of >= 2. The ingest
+        docstring already promises "a test's injected ``now_ist`` makes the
+        decision deterministic"; the dashboard spine simply never injects one, so
+        the pin below supplies it and makes the premise permanently true. This
+        red is PRE-EXISTING on ``origin/main`` (reproduced in a clean worktree)
+        and unrelated to strict mode (it fails with ``BRUTEX_RUST_STRICT=0`` too).
         """
         from brutex.adapters.groww.ingest import _DEFAULT_EMPTY_RETRY_ATTEMPTS
+        from brutex.calendars.nse import IST
 
+        monkeypatch.setattr("brutex.adapters.groww.ingest._now_ist", lambda: _NOW.astimezone(IST))
         monkeypatch.setattr("brutex.adapters.ingest_common._time_sleep", lambda _s: None)
         monkeypatch.setenv("BRUTEX_GROWW_FETCH_PIPELINE", "off")
         adapter = _EmptyThenBarsAdapter("ADANIENT", empty_calls=_DEFAULT_EMPTY_RETRY_ATTEMPTS)

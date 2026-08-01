@@ -33,14 +33,17 @@ from typing import Any
 
 import pytest
 import trading_core
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.data.models import CandleBar
 from brutex.engine import rust_stage1a
 from brutex.engine.rust_stage1a import (
+    _INPUT_REFUSED_MARKER,  # pyright: ignore[reportPrivateUsage]
     SELF_CHECK_BUILDS,
     STAGE1A_RUST_DEFAULT,
     STAGE1A_RUST_ENV,
     Stage1ABatchInputs,
     _first_diff_index,  # pyright: ignore[reportPrivateUsage]
+    _kernel_degrade_reason,  # pyright: ignore[reportPrivateUsage]
     consume_self_check_sample,
     disable_kernel,
     kernel_disabled,
@@ -53,6 +56,7 @@ from brutex.engine.rust_stage1a import (
     warn_fallback_once,
 )
 from brutex.engine.stage1a import Stage1AMatrixBuilder, build_bar_bits
+from brutex.strategies import combo_rust
 from structlog.testing import capture_logs
 
 # 09:15:00 IST == 03:45 UTC (the NSE session-open anchor).
@@ -67,6 +71,32 @@ def _fresh_seam_state() -> Iterator[None]:
     yield
     reset_self_check_for_tests()
     reset_observability_memo_for_tests()
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract in the mode that still HAS one.
+
+    Under the shipped strict default the CLASS-A/B reasons this seam emits
+    (``flag_unrecognised`` / ``wheel_missing`` / ``kernel_disabled``) are a
+    ``RustFallbackRefused``, not a fall-back — Rust is absent, mis-configured
+    or latched, and DEC-RUST-STRICT-NO-FALLBACK-001 forbids Python serving it.
+    That refusal is pinned POSITIVELY in
+    :class:`TestStrictModeRefusesTheFallback`; the tests below pin the *other*
+    half of the contract — that with the documented kill switch thrown, the
+    historic oracle path is byte-identical — so both halves stay covered.
+
+    (``kernel_refused`` joined that set once the crate learned to MARK its
+    input-envelope refusals: the CLASS-C half now reports the distinct,
+    strict-EXEMPT ``kernel_input_refused``, so the UNMARKED remainder is
+    CLASS A/B and refuses like its siblings. Tests that drive an out-of-envelope
+    INPUT still need no kill switch — see ``TestStrictModeRefusesTheFallback``.)
+
+    Uses the SHARED ``monkeypatch`` — never a module-scoped
+    ``MonkeyPatch.context()`` — so set/unset ordering with the sibling
+    ``STAGE1A_RUST_ENV`` pins in this file stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _bar(
@@ -138,7 +168,9 @@ def test_flag_whitespace_empty_falls_to_the_default_without_warning(
     assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
 
 
-def test_flag_junk_fails_safe_off_with_one_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flag_junk_fails_safe_off_with_one_warn(
+    monkeypatch: pytest.MonkeyPatch, strict_off: None
+) -> None:
     monkeypatch.setenv(STAGE1A_RUST_ENV, "flase")
     with capture_logs() as logs:
         assert stage1a_rust_enabled() is False
@@ -176,7 +208,7 @@ def test_disable_kernel_latches_once_and_logs_once() -> None:
     assert kernel_disabled() is True
 
 
-def test_warn_fallback_once_suppresses_repeats() -> None:
+def test_warn_fallback_once_suppresses_repeats(strict_off: None) -> None:
     with capture_logs() as logs:
         warn_fallback_once("wheel_missing")
         warn_fallback_once("wheel_missing")
@@ -205,7 +237,7 @@ def test_first_diff_index_finds_the_divergence_and_length_skews() -> None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def test_latched_kernel_short_circuits_to_none() -> None:
+def test_latched_kernel_short_circuits_to_none(strict_off: None) -> None:
     disable_kernel("mask_mismatch")
     bars = _two_day_feed()
     with capture_logs() as logs:
@@ -215,7 +247,9 @@ def test_latched_kernel_short_circuits_to_none() -> None:
     assert reasons == ["kernel_disabled"]
 
 
-def test_stale_wheel_symbol_falls_back_with_warn_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stale_wheel_symbol_falls_back_with_warn_once(
+    monkeypatch: pytest.MonkeyPatch, strict_off: None
+) -> None:
     monkeypatch.delattr(trading_core, "stage1a_bar_bits_batch")
     bars = _two_day_feed()
     with capture_logs() as logs:
@@ -225,7 +259,12 @@ def test_stale_wheel_symbol_falls_back_with_warn_once(monkeypatch: pytest.Monkey
     assert reasons == ["wheel_missing"]  # warn-once
 
 
-def test_ffi_value_error_falls_back_as_kernel_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ffi_value_error_falls_back_as_kernel_refused(
+    monkeypatch: pytest.MonkeyPatch, strict_off: None
+) -> None:
+    # UNMARKED → CLASS A/B ``kernel_refused``; strict mode refuses it (pinned
+    # in ``TestStrictModeRefusesTheFallback``), so the degrade half needs the
+    # documented kill switch.
     def _refuse(*_args: object, **_kwargs: object) -> list[int]:
         raise ValueError("boundary refusal")
 
@@ -313,7 +352,7 @@ def test_burn_in_pass_consumes_budget_and_engages() -> None:
 
 
 def test_burn_in_mismatch_ships_oracle_autoreverts_and_latches(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, strict_off: None
 ) -> None:
     bars = _two_day_feed()
     real = trading_core.stage1a_bar_bits_batch
@@ -432,7 +471,7 @@ def test_flag_on_returns_the_identical_list(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_flag_on_fallback_falls_through_without_reconsuming_the_iterator(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, strict_off: None
 ) -> None:
     monkeypatch.setenv(STAGE1A_RUST_ENV, "1")
     disable_kernel("mask_mismatch")  # force the named fallback path
@@ -480,6 +519,12 @@ def test_out_of_envelope_price_raises_identical_error_both_arms(
     # G-6: ₹2·10¹² = 2·10¹⁴ paisa exceeds the kernel's MAX_BAR_PAISA — the ON
     # arm's boundary refuses, falls back, and the ORACLE raises the same
     # per-bar evaluate ValueError the OFF arm raises.
+    #
+    # Runs under the SHIPPED strict default (no ``strict_off``): this is the
+    # end-to-end proof of the CLASS-C exemption over the REAL crate — the
+    # marked refusal reports ``kernel_input_refused``, which strict does NOT
+    # refuse, so the oracle's precise diagnosis survives instead of being
+    # replaced by a generic ``RustFallbackRefused``.
     bars = [
         _minute_bar(date(2024, 1, 2), 0, "100", "110", "90", "105"),
         _minute_bar(
@@ -494,9 +539,13 @@ def test_out_of_envelope_price_raises_identical_error_both_arms(
     assert type(off) is type(on)
     assert str(off) == str(on)
     assert "overflow-safe range" in str(off)
-    # The ON arm went through the named kernel_refused fallback first.
+    # BOTH arms carry the crate's CLASS-C marker (the OFF arm reaches the same
+    # guard per bar through ``evaluate_with_levels``) — that identity is what
+    # makes the exemption provable rather than guessed.
+    assert _INPUT_REFUSED_MARKER in str(off)
+    # The ON arm went through the named kernel_input_refused fallback first.
     reasons = [e["reason"] for e in logs if e.get("event") == "rust_stage1a.fallback"]
-    assert reasons == ["kernel_refused"]
+    assert reasons == ["kernel_input_refused"]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -766,3 +815,172 @@ def test_batch_inputs_carrier_is_frozen_with_slots() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         inputs.prior_n = 9  # type: ignore[misc]  # pyright: ignore[reportAttributeAccessIssue]
     assert not hasattr(inputs, "__dict__")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Strict mode — DEC-RUST-STRICT-NO-FALLBACK-001
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestStrictModeRefusesTheFallback:
+    """The POSITIVE half of the contract the ``strict_off`` fixture defers.
+
+    Under the shipped default (``BRUTEX_RUST_STRICT`` unset ⇒ strict ON) the
+    CLASS-A/B reasons this seam emits are a hard :class:`RustFallbackRefused`,
+    never a quiet Python re-run. The ``strict_off`` tests above pin the other
+    half — that with the documented kill switch thrown the historic oracle path
+    is byte-identical — so between the two every reason is covered in BOTH
+    modes.
+
+    The one ``except ValueError`` around the batch call used to bundle a
+    kernel refusal (CLASS A/B) with an out-of-envelope price (CLASS C), so
+    ``kernel_refused`` was HELD in ``_STRICT_UNRESOLVED_REASONS``. The crate
+    now MARKS its input-envelope refusals, so the split is real:
+    ``kernel_input_refused`` is the ruled CLASS-C exemption (degrade — the
+    oracle raises the IDENTICAL error) and the UNMARKED ``kernel_refused``
+    remainder REFUSES. Both halves are pinned below, so neither the exemption
+    nor the refusal can be silently flipped, and the HOLD set is now EMPTY.
+    """
+
+    def test_wheel_missing_refuses_under_the_shipped_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # the shipped default
+        monkeypatch.delattr(trading_core, "stage1a_bar_bits_batch")
+        bars = _two_day_feed()
+        with pytest.raises(RustFallbackRefused, match="wheel_missing"):
+            rust_bar_bits_or_none(_inputs_for(bars), oracle=lambda: _oracle_for(bars))
+
+    def test_refusal_names_this_facade(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+        monkeypatch.delattr(trading_core, "stage1a_bar_bits_batch")
+        bars = _two_day_feed()
+        with pytest.raises(RustFallbackRefused, match="brutex.engine.rust_stage1a"):
+            rust_bar_bits_or_none(_inputs_for(bars), oracle=lambda: _oracle_for(bars))
+
+    @pytest.mark.parametrize("reason", ["wheel_missing", "flag_unrecognised", "kernel_disabled"])
+    def test_every_class_ab_reason_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, reason: str
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+        with pytest.raises(RustFallbackRefused, match=reason):
+            warn_fallback_once(reason)
+
+    def test_nothing_is_held_out_of_the_taxonomy(self) -> None:
+        # The GOAL of the crate-side split: no reason is classified-by-refusal
+        # any more, so strict mode's coverage of this facade is complete.
+        assert frozenset() == rust_stage1a._STRICT_UNRESOLVED_REASONS  # pyright: ignore[reportPrivateUsage]
+
+    def test_class_c_input_refusal_is_exempt_and_only_logs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The ruled CLASS-C exemption: the crate declined an out-of-envelope
+        # INPUT, the oracle raises the identical error, so strict degrades.
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+        with capture_logs() as logs:
+            warn_fallback_once("kernel_input_refused")
+        events = [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
+        assert [e["reason"] for e in events] == ["kernel_input_refused"]
+
+    def test_unmarked_kernel_refused_now_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The other half of the split: the UNMARKED remainder is a genuine
+        # kernel/marshalling fault and must NOT be papered over by the oracle.
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+        with pytest.raises(RustFallbackRefused, match="kernel_refused"):
+            warn_fallback_once("kernel_refused")
+
+    def test_marked_ffi_error_degrades_under_strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # End-to-end through the real seam: a MARKED boundary ValueError is
+        # classified CLASS C, so strict returns None (the oracle serves).
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+
+        def _refuse(*_args: object, **_kwargs: object) -> list[int]:
+            raise ValueError(
+                f"bar price/level magnitude 999 out of the overflow-safe range "
+                f"[-1, 1] paisa — {_INPUT_REFUSED_MARKER}"
+            )
+
+        monkeypatch.setattr(trading_core, "stage1a_bar_bits_batch", _refuse)
+        bars = _two_day_feed()
+        with capture_logs() as logs:
+            assert (
+                rust_bar_bits_or_none(_inputs_for(bars), oracle=lambda: _oracle_for(bars)) is None
+            )
+        events = [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
+        assert [e["reason"] for e in events] == ["kernel_input_refused"]
+
+    def test_unmarked_ffi_error_refuses_under_strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The mirror: an UNMARKED boundary ValueError (a structural refusal —
+        # e.g. a column-length skew) is CLASS A/B and hard-refuses.
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+
+        def _refuse(*_args: object, **_kwargs: object) -> list[int]:
+            raise ValueError("high_paisa length 0 != open_paisa length 1")
+
+        monkeypatch.setattr(trading_core, "stage1a_bar_bits_batch", _refuse)
+        bars = _two_day_feed()
+        with pytest.raises(RustFallbackRefused, match="kernel_refused"):
+            rust_bar_bits_or_none(_inputs_for(bars), oracle=lambda: _oracle_for(bars))
+
+    @pytest.mark.parametrize(
+        ("detail", "expected"),
+        [
+            (f"whatever — {_INPUT_REFUSED_MARKER}", "kernel_input_refused"),
+            ("stage1a_batch: day_index 3 beyond the validated day table", "kernel_refused"),
+        ],
+    )
+    def test_degrade_reason_classifier_reads_the_crate_marker(
+        self, detail: str, expected: str
+    ) -> None:
+        assert _kernel_degrade_reason(ValueError(detail)) == expected
+
+    def test_marker_literal_matches_the_real_crate(self) -> None:
+        # Cross-language drift pin against the REAL wheel: an out-of-envelope
+        # bar price must carry the exact fragment this facade classifies on.
+        bars = _two_day_feed()
+        poisoned = dataclasses.replace(
+            _inputs_for(bars),
+            open_paisa=[10**15, *_inputs_for(bars).open_paisa[1:]],  # past MAX_BAR_PAISA
+        )
+        with pytest.raises(ValueError, match="overflow-safe range") as excinfo:
+            trading_core.stage1a_bar_bits_batch(
+                poisoned.open_paisa,
+                poisoned.high_paisa,
+                poisoned.low_paisa,
+                poisoned.close_paisa,
+                poisoned.typical_paisa,
+                poisoned.volume,
+                poisoned.tod_seconds,
+                poisoned.pre_open,
+                poisoned.session_key,
+                poisoned.session_day,
+                poisoned.contract_reset,
+                poisoned.day_index,
+                poisoned.ema20_paisa,
+                poisoned.ema200_paisa,
+                poisoned.day_pivot_levels,
+                poisoned.day_fib_levels,
+                poisoned.day_has_pivot,
+                poisoned.day_has_fib,
+                poisoned.pivot_bps,
+                poisoned.pdh_pdl_bps,
+                poisoned.fib_bps,
+                poisoned.swing_bps,
+                poisoned.prior_n,
+                poisoned.anchor_dependent_mask,
+                poisoned.fib_dependent_mask,
+                poisoned.applies_to_1day_mask,
+                poisoned.apply_1day_mask,
+            )
+        assert _INPUT_REFUSED_MARKER in str(excinfo.value)
+
+    def test_marker_is_the_shared_cross_crate_literal(self) -> None:
+        # ONE fragment for both crates — a rename must land on both sides.
+        assert _INPUT_REFUSED_MARKER == combo_rust._INPUT_REFUSED_MARKER  # pyright: ignore[reportPrivateUsage]
+
+    def test_junk_strict_env_keeps_strict_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Inverted polarity: only an explicit-falsy value disarms strict; junk
+        # must NOT silently re-open the Python path.
+        monkeypatch.setenv(RUST_STRICT_ENV, "garbage")
+        with pytest.raises(RustFallbackRefused, match="wheel_missing"):
+            warn_fallback_once("wheel_missing")

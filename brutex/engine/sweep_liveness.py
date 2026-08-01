@@ -166,18 +166,32 @@ def progress_verdict(
     # running=True payload is ever probed — the injected-probe call count is
     # part of the observable contract).
     alive = pid_alive(pid)
+    # Normalise ALL THREE clock operands to exact floats
+    # (DEC-RUST-STRICT-NO-FALLBACK-001). ``wall`` always was — it arrives from
+    # a JSON payload and the guard above admits ``int | float``. The other two
+    # are caller-supplied and were not: ``routed_liveness_tail`` gates on
+    # ``type(v) is float``, so an ``int`` ``now_wall``/``fresh_seconds`` (an
+    # epoch second, a ``600`` window) announced ``liveness_tail_input_refused``
+    # and served the oracle — a CLASS-C "outside the crate's envelope" degrade
+    # on inputs the law handles exactly. Value-neutral: the tail is one
+    # subtraction and one comparison, and ``float()`` is the same conversion
+    # CPython's mixed ``int``/``float`` arithmetic performs implicitly; the
+    # ``isfinite``/``> 0`` gate above already rejected everything it could not
+    # carry.
+    now_wall_f = float(now_wall)
     wall_f = float(wall)
+    fresh_f = float(fresh_seconds)
     if sweep_ops_rust_enabled():
         return RunVerdict(
             routed_liveness_tail(
                 alive,
-                now_wall,
+                now_wall_f,
                 wall_f,
-                fresh_seconds,
-                python_law=lambda: _liveness_tail_python(alive, now_wall, wall_f, fresh_seconds),
+                fresh_f,
+                python_law=lambda: _liveness_tail_python(alive, now_wall_f, wall_f, fresh_f),
             )
         )
-    return RunVerdict(_liveness_tail_python(alive, now_wall, wall_f, fresh_seconds))
+    return RunVerdict(_liveness_tail_python(alive, now_wall_f, wall_f, fresh_f))
 
 
 def _liveness_tail_python(alive: bool, now_wall: float, wall_f: float, fresh_seconds: float) -> str:

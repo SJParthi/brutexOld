@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import env_flag_tristate
 
 if TYPE_CHECKING:
@@ -164,8 +165,35 @@ def reset_lake_rust_stats_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None
     _OBSERVABILITY_MEMO.clear()
 
 
+#: The ONE class-C reason at this choke point: the payload carries a
+#: legitimate Python value pyo3 cannot represent (an int outside ``i64``, a
+#: lone-surrogate ``str``), classified by :func:`_beyond_crate` BEFORE the
+#: crate is called. The stdlib oracle was always the intended handler for
+#: these, so refusing would drop a shard write over an input the Rust arm
+#: never claimed — see that function for the pyo3 evidence.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({"render_input_beyond_crate"})
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``lake_rust_stats.fallback`` WARN once per process per *reason*."""
+    """Log ``lake_rust_stats.fallback`` WARN once per process per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Every reason funnelled here is CLASS A (``flag_unrecognised`` — the
+    junk-flag arm; ``render_error`` — the crate ran and raised) or CLASS B
+    (``render_result_refused`` — a non-``str`` crate return), EXCEPT the
+    single class-C member of :data:`_STRICT_EXEMPT_REASONS`
+    (``render_input_beyond_crate``), which is decided by a Python-side gate
+    before the FFI so ``render_error`` keeps its fault-only meaning.
+    Strict-OFF is byte-identical to the prior behaviour.
+
+    STORED-BYTE SAFETY: the shard body this renders is written by the
+    caller's own ``atomic_write_simple``, and every hook is best-effort — a
+    refusal removes a shard WRITE, it never rewrites a shard byte. The shard
+    is a read-accelerator whose absence degrades to the legacy live scan
+    (DEC-LAKE-STATS-MANIFEST-001), never to a wrong number.
+    """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        refuse_if_strict("brutex.data.lake_rust_stats", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -178,7 +206,17 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``lake_rust_stats.render_autoreverted`` at ERROR
     (the burn-in autorevert — a genuine wrongness signal); guard latches
     log ``lake_rust_stats.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` — absent/foreign install;
+    ``crate_panic``) or CLASS B (``burn_in_byte_mismatch`` — the crate's
+    shard body disagreed with the stdlib oracle's); none is class C, so none
+    is exempt. The refusal fires BEFORE the latch is written, so under strict
+    mode the latch is never set and every ``rust_stats_disabled()``
+    early-return is structurally unreachable. Strict-OFF is byte-identical
+    to the prior behaviour.
     """
+    refuse_if_strict("brutex.data.lake_rust_stats", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
@@ -243,6 +281,78 @@ def _panic_belt_errors() -> tuple[type[BaseException], ...]:
     return tuple(belt)
 
 
+#: The crate's integer envelope: every ``FileRowIn`` / header int is
+#: extracted as a Rust ``i64``, so a Python ``int`` outside this range is
+#: unrepresentable ACROSS THE FFI — not a crate fault.
+_I64_MIN: Final = -(2**63)
+_I64_MAX: Final = 2**63 - 1
+
+
+def _beyond_crate(payload: ShardRenderPayload) -> str | None:
+    """Name the first payload field OUTSIDE the crate's FFI envelope, else ``None``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 CLASS C. Two legitimate Python values
+    cannot cross pyo3 at all, and in BOTH cases the stdlib oracle is the
+    intended handler rather than a symptom of a broken crate:
+
+    * an ``int`` outside ``i64`` (a filesystem can report an ``mtime_ns``
+      of ``2**63``; Python ints are unbounded, Rust's are not) — pyo3
+      raises ``TypeError("failed to extract field FileRowIn.4")``;
+    * a ``str`` carrying a lone surrogate (``"bad\\ud800rel"`` — legal in a
+      Python ``str``, illegal in Rust's UTF-8 ``String``) — pyo3 raises a
+      ``UnicodeEncodeError``.
+
+    Both previously arrived at the ``render_error`` choke point, which is a
+    fault-only CLASS A token and therefore REFUSES under strict mode — so a
+    lake with one such file would have lost its shard write instead of
+    falling back to the byte-identical CPython render. This gate classifies
+    them BEFORE the call, so ``render_error`` keeps its honest meaning (the
+    crate ran and broke) and the out-of-envelope input takes the exempt
+    ``render_input_beyond_crate`` reason.
+
+    Returns the offending field name (for the WARN context) so the log says
+    WHICH value was out of range, never a bare "something was wrong".
+    """
+
+    def _bad_int(value: int, field: str) -> str | None:
+        return field if not _I64_MIN <= value <= _I64_MAX else None
+
+    def _bad_str(value: str, field: str) -> str | None:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return field
+        return None
+
+    checks: list[str | None] = [
+        _bad_int(payload.version, "version"),
+        _bad_int(payload.row_count, "row_count"),
+        _bad_str(payload.kind, "kind"),
+        _bad_str(payload.min_ts_iso, "min_ts_iso"),
+        _bad_str(payload.max_ts_iso, "max_ts_iso"),
+        _bad_str(payload.updated_utc, "updated_utc"),
+    ]
+    for index, (name, value) in enumerate(payload.key):
+        checks.append(_bad_str(name, f"key[{index}].name"))
+        checks.append(_bad_str(value, f"key[{index}].value"))
+    for index, ident in enumerate(payload.identity_key):
+        checks.append(_bad_str(ident, f"identity_key[{index}]"))
+    for index, row in enumerate(payload.files):
+        rel, rows, row_min, row_max, mtime_ns, size, raw_hash = row
+        checks.append(_bad_str(rel, f"files[{index}].rel"))
+        checks.append(_bad_int(rows, f"files[{index}].rows"))
+        checks.append(_bad_str(row_min, f"files[{index}].min_ts_iso"))
+        checks.append(_bad_str(row_max, f"files[{index}].max_ts_iso"))
+        checks.append(_bad_int(mtime_ns, f"files[{index}].mtime_ns"))
+        checks.append(_bad_int(size, f"files[{index}].size"))
+        if raw_hash is not None:
+            checks.append(_bad_str(raw_hash, f"files[{index}].raw_hash"))
+    for field in checks:
+        if field is not None:
+            return field
+    return None
+
+
 def render_shard_json(
     *,
     payload_factory: Callable[[], ShardRenderPayload],
@@ -273,6 +383,13 @@ def render_shard_json(
         return python_render()
     try:
         payload = payload_factory()
+        beyond = _beyond_crate(payload)
+        if beyond is not None:
+            # CLASS C: a legitimate value pyo3 cannot carry. The oracle is
+            # the intended handler, so this is exempt from the strict
+            # refusal — see _beyond_crate + _STRICT_EXEMPT_REASONS.
+            _warn_once("render_input_beyond_crate", field=beyond)
+            return python_render()
         rust_body = crate.render_stats_shard_json(
             payload.version,
             payload.kind,

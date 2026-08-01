@@ -54,7 +54,38 @@
 //! — the seam additionally guards BOTH conditions Python-side before the
 //! FFI, so the arms are defense-in-depth, structurally unreachable from the
 //! production seam.
+//!
+//! ## Strict-mode error taxonomy (DEC-RUST-STRICT-NO-FALLBACK-001)
+//!
+//! Every way this call can fail is classified for the facade's strict gate,
+//! and the classification is carried IN THE MESSAGE — never guessed
+//! Python-side from an exception class the two populations share:
+//!
+//! * **CLASS C — the input is outside this crate's envelope** (the Python
+//!   oracle was always the intended handler, so strict mode must keep
+//!   degrading): the FFI extractions. `pnls` is not a sequence of ints, an
+//!   element is a non-int (`TypeError`), or an element is an int past i64
+//!   range (`OverflowError` — the Python oracle's ints are unbounded);
+//!   `alpha_bps` is a non-int the Python `1 <= alpha_bps <= 10_000` gate
+//!   nonetheless admits (e.g. the float `500.0`). Both extractions are
+//!   performed EXPLICITLY (rather than via the argument signature) so their
+//!   failures can be re-stamped with
+//!   [`crate::input_refused::INPUT_REFUSED_MARKER`]; the extracted values
+//!   are otherwise byte-identical to the previous signature-level
+//!   extraction.
+//! * **CLASS A/B — a crate FAULT** (strict mode REFUSES): anything
+//!   UNMARKED — a stale wheel whose call shape drifted (a PyO3 arity /
+//!   keyword `TypeError` raised before this body runs), a foreign or
+//!   byzantine module bound to the symbol, broken internals.
+//!
+//! The two structural `Err(String)` arms below are deliberately left
+//! UNMARKED (⇒ CLASS A/B ⇒ refused). They are NOT the "Python was the
+//! intended handler" shape: the seam raises `ValueError` on the identical
+//! two conditions BEFORE the FFI, so the Python oracle refuses them too and
+//! no legitimate, pinned call can reach them. Refusing a Rust-side "I ran
+//! and said no" is therefore the conservative posture that crashes nothing.
 
+use crate::input_refused::mark_input_refusal;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -108,11 +139,31 @@ pub fn cvar_tail_fold_checked(pnls: &[i64], alpha_bps: u32) -> Result<(usize, i6
 /// `[1, 10_000]`; the `brutex.ranking.cvar_gate` seam routes any error to
 /// the Python oracle instead of surfacing it.
 ///
+/// The `Vec<i64>` / `u32` extractions are performed EXPLICITLY (rather than
+/// via the argument signature) so their failures — a non-int element, an
+/// int past i64 range, a non-sequence `pnls`, a non-int `alpha_bps` — are
+/// re-stamped with [`crate::input_refused::INPUT_REFUSED_MARKER`]: they are
+/// inputs outside this crate's envelope, not crate faults, so the facade
+/// must keep degrading to the Python oracle even under strict mode
+/// (DEC-RUST-STRICT-NO-FALLBACK-001; module header's taxonomy). The
+/// extracted values are byte-identical to the previous signature-level
+/// extraction, and the argument NAMES (`pnls`, `alpha_bps`) are unchanged.
+///
 /// FFI cost (disclosed): one `O(n)` list→Vec copy in plus one in-kernel
 /// `O(n)` working copy; the return is three scalars.
 #[pyfunction]
-pub fn stats_cvar_tail_fold(pnls: Vec<i64>, alpha_bps: u32) -> PyResult<(u64, i64, i128)> {
-    cvar_tail_fold_checked(&pnls, alpha_bps)
+pub fn stats_cvar_tail_fold(
+    py: Python<'_>,
+    pnls: &Bound<'_, PyAny>,
+    alpha_bps: &Bound<'_, PyAny>,
+) -> PyResult<(u64, i64, i128)> {
+    let owned: Vec<i64> = pnls
+        .extract()
+        .map_err(|err| mark_input_refusal(py, "stats_cvar_tail_fold: pnls", &err))?;
+    let alpha: u32 = alpha_bps
+        .extract()
+        .map_err(|err| mark_input_refusal(py, "stats_cvar_tail_fold: alpha_bps", &err))?;
+    cvar_tail_fold_checked(&owned, alpha)
         .map(|(k, var_paisa, tail_sum)| (k as u64, var_paisa, tail_sum))
         .map_err(PyValueError::new_err)
 }
@@ -219,6 +270,27 @@ mod tests {
     fn alpha_above_10000_is_err() {
         let err = cvar_tail_fold_checked(&[1], 10_001).unwrap_err();
         assert!(err.contains("alpha_bps"), "unexpected message: {err}");
+    }
+
+    /// DEC-RUST-STRICT-NO-FALLBACK-001: the two structural arms are the
+    /// CLASS-A/B remainder — deliberately UNMARKED, so the facade's
+    /// `kernel_error` reason keeps them and strict mode REFUSES. (The
+    /// CLASS-C population is the FFI extraction, stamped in the
+    /// `#[pyfunction]` wrapper; its marker text is pinned in
+    /// `crate::input_refused`.) A future edit that stamped these arms would
+    /// silently move them into the strict-exempt half — this pin fails first.
+    #[test]
+    fn structural_arms_are_unmarked_class_a_b() {
+        for err in [
+            cvar_tail_fold_checked(&[], 500).unwrap_err(),
+            cvar_tail_fold_checked(&[1], 0).unwrap_err(),
+            cvar_tail_fold_checked(&[1], 10_001).unwrap_err(),
+        ] {
+            assert!(
+                !err.contains(crate::input_refused::INPUT_REFUSED_MARKER),
+                "structural arm must stay UNMARKED (CLASS A/B): {err}"
+            );
+        }
     }
 
     // ── properties ──

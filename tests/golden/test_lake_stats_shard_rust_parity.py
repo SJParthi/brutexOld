@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
+import types
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -35,6 +37,10 @@ if not hasattr(brutex_lake, "render_stats_shard_json"):  # pragma: no cover - st
         allow_module_level=True,
     )
 
+from brutex.config.rust_strict import (  # noqa: E402
+    RUST_STRICT_ENV,
+    RustFallbackRefused,
+)
 from brutex.data import lake_rust_stats as lrs  # noqa: E402
 from brutex.data import lake_stats_manifest as lsm  # noqa: E402
 from brutex.data import partition  # noqa: E402
@@ -383,11 +389,17 @@ class TestDegradeLaws:
         )
 
     def test_mtime_ns_beyond_i64_degrades_to_python_with_one_warn(self) -> None:
-        """2**63 is unrepresentable crate-side — OverflowError → oracle serves.
+        """2**63 is unrepresentable crate-side — the oracle serves, strict or not.
 
-        Fails-before-proven: with OverflowError dropped from the seam's
-        degrade set this raises instead of serving the (still-correct)
-        stdlib body.
+        DEC-RUST-STRICT-NO-FALLBACK-001 CLASS C: a filesystem may legitimately
+        report an ``mtime_ns`` outside ``i64``, so the crate never claimed this
+        input and the stdlib render is the intended handler — NOT a Rust fault.
+        ``_beyond_crate`` classifies it BEFORE the FFI under the exempt
+        ``render_input_beyond_crate`` reason, and the WARN NAMES the field, so
+        the fault-only ``render_error`` token keeps its honest meaning.
+
+        Fails-before-proven: with the gate removed this arrives as
+        ``render_error`` and REFUSES under the shipped strict default.
         """
         stats = self._one_row_stats(mtime_ns=2**63)
         expected = _python_body(stats)
@@ -395,11 +407,18 @@ class TestDegradeLaws:
             body = lsm.render_shard(stats)
         assert body == expected
         warns = [entry for entry in logs if entry["event"] == "lake_rust_stats.fallback"]
-        assert len(warns) == 1 and warns[0]["reason"] == "render_error"
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "render_input_beyond_crate"
+        assert warns[0]["field"] == "files[0].mtime_ns"
         assert not lrs.rust_stats_disabled()  # degrade, never a latch
 
     def test_lone_surrogate_string_degrades_to_python(self) -> None:
-        """A lone surrogate cannot cross PyO3 (UnicodeEncodeError ⊂ ValueError)."""
+        """A lone surrogate cannot cross PyO3 — CLASS C, exempt from strict.
+
+        Legal in a Python ``str``, illegal in Rust's UTF-8 ``String``; CPython
+        escapes it as ``\\ud800`` and that render is correct, so the oracle is
+        the intended handler here too.
+        """
         stats = self._one_row_stats(rel="bad\ud800rel")
         expected = _python_body(stats)  # CPython escapes it as \ud800
         assert "\\ud800" in expected
@@ -407,7 +426,33 @@ class TestDegradeLaws:
             body = lsm.render_shard(stats)
         assert body == expected
         warns = [entry for entry in logs if entry["event"] == "lake_rust_stats.fallback"]
-        assert len(warns) == 1 and warns[0]["reason"] == "render_error"
+        assert len(warns) == 1
+        assert warns[0]["reason"] == "render_input_beyond_crate"
+        assert warns[0]["field"] == "files[0].rel"
+
+    def test_crate_fault_still_refuses_under_strict(self) -> None:
+        """The class-C gate must NOT weaken the fault-only ``render_error``.
+
+        A crate that RAN and raised is still a loud refusal — the gate only
+        reclassifies inputs the crate never claimed.
+        """
+        stats = self._one_row_stats()
+        broken = types.SimpleNamespace(
+            render_stats_shard_json=lambda *args: (_ for _ in ()).throw(RuntimeError("boom")),
+            option_partition_stem=lambda *args: "x",
+            validate_year_month=lambda *args: None,
+        )
+        with (
+            _rust_arm(),
+            pytest.MonkeyPatch.context() as mp,
+        ):
+            mp.delenv(RUST_STRICT_ENV, raising=False)
+            mp.setitem(sys.modules, "brutex_lake", broken)
+            with pytest.raises(RustFallbackRefused, match="render_error") as excinfo:
+                lsm.render_shard(stats)
+        text = str(excinfo.value)
+        assert "brutex.data.lake_rust_stats" in text
+        assert f"{RUST_STRICT_ENV}=0" in text
 
 
 class TestHypothesisDifferential:

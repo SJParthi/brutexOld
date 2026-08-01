@@ -28,7 +28,8 @@ compared byte-for-byte against the verbatim Python oracle:
 from __future__ import annotations
 
 import json
-from typing import Any
+from decimal import Decimal
+from typing import Any, ClassVar
 
 import brutex.strategies.combo_rust as cr
 import pytest
@@ -43,12 +44,12 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
-pytest.importorskip(
+#: The real crate module, bound ONCE by the module-level skip guard (the wheel
+#: ships no ``py.typed`` marker, so the binding is deliberately ``Any``).
+_CRATE: Any = pytest.importorskip(
     "brutex_strategies",
     reason="brutex_strategies wheel not installed — the dual-arm differential needs the kernel",
 )
-
-from decimal import Decimal
 
 
 def _rust_on(mp: pytest.MonkeyPatch) -> None:
@@ -176,7 +177,7 @@ class TestCanonicalDifferential:
             routed = cr.routed_canonical_json(tree, python_law=_stdlib_canonical_json)
         assert routed == _dumps(tree)  # the oracle serves, byte-equal
         warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
-        assert warns[0]["reason"] == "canonical_json_error"
+        assert warns[0]["reason"] == "canonical_json_input_refused"
         assert cr.rust_combo_disabled() is False  # degrade, never latch
 
     def test_weird_index_int_subclass_renders_true_value(
@@ -216,7 +217,7 @@ class TestCanonicalDifferential:
         assert routed == _dumps(tree)
         assert "\\ud800" in routed
         warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
-        assert warns[0]["reason"] == "canonical_json_error"
+        assert warns[0]["reason"] == "canonical_json_input_refused"
 
     def test_str_subclass_key_refused_byte_equal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The crate's exact-str KEY gate: a subclass key could sort
@@ -246,7 +247,7 @@ class TestCanonicalDifferential:
             routed = cr.routed_canonical_json(tree, python_law=_stdlib_canonical_json)
         assert routed == _dumps(tree)
         warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
-        assert warns[0]["reason"] == "canonical_json_error"
+        assert warns[0]["reason"] == "canonical_json_input_refused"
 
     def test_bare_float_direct_call_degrades_byte_equal(
         self, monkeypatch: pytest.MonkeyPatch
@@ -260,7 +261,7 @@ class TestCanonicalDifferential:
             routed = cr.routed_canonical_json(tree, python_law=_stdlib_canonical_json)
         assert routed == _dumps(tree)
         warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
-        assert warns[0]["reason"] == "canonical_json_error"
+        assert warns[0]["reason"] == "canonical_json_input_refused"
 
     def test_end_to_end_canonicalise_params_raw_params(
         self, monkeypatch: pytest.MonkeyPatch
@@ -495,3 +496,100 @@ class TestScanDifferential:
         off_hash = _call("s" * 64)
         _rust_on(monkeypatch)
         assert _call("s" * 64) == off_hash
+
+
+class TestInputRefusalMarkerContract:
+    """The REAL wheel stamps the CLASS-C marker at every enumerated site.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 task #8. The facade's strict-mode
+    taxonomy classifies a degrade by a marker the CRATE minted at its own
+    raise site (``python.rs::INPUT_REFUSED_MARKER`` /
+    ``NONEXACT_KEY_MSG``) — so a cross-language drift on either side must
+    fail loudly HERE rather than silently reclassify a legitimate
+    out-of-envelope input as a Rust fault (which strict mode would then turn
+    into a crash).
+    """
+
+    #: Every distinct crate condition that raises an input-envelope refusal.
+    _CANONICAL_REFUSALS: ClassVar[list[tuple[str, Any]]] = [
+        ("beyond_i128_positive", {"big": 2**200}),
+        ("beyond_i128_negative", {"big": -(2**200)}),
+        ("lone_surrogate_value", {"k": "\ud800tail"}),
+        ("lone_surrogate_exact_key", {"\udc80": 1}),
+        ("non_str_key", {1: 2}),
+        ("unsupported_node_type", {"f": 1.5}),
+    ]
+
+    @pytest.mark.parametrize(
+        "tree",
+        [case for _name, case in _CANONICAL_REFUSALS],
+        ids=[name for name, _case in _CANONICAL_REFUSALS],
+    )
+    def test_canonical_refusals_carry_the_marker(self, tree: Any) -> None:
+        with pytest.raises(cr._DEGRADE_ERRORS) as excinfo:  # the class varies by site
+            _CRATE.canonical_json(tree)
+        assert cr._INPUT_REFUSED_MARKER in str(excinfo.value)
+        # ... and lands in the facade's degrade set, so it routes at all.
+        assert isinstance(excinfo.value, cr._DEGRADE_ERRORS)
+
+    @pytest.mark.parametrize(
+        "tree",
+        [case for _name, case in _CANONICAL_REFUSALS],
+        ids=[name for name, _case in _CANONICAL_REFUSALS],
+    )
+    def test_canonical_refusals_degrade_byte_equal_under_strict(self, tree: Any) -> None:
+        # Strict mode is ON by default and must NOT refuse these — nested
+        # MonkeyPatch context, never a module-level autouse env fixture.
+        with pytest.MonkeyPatch.context() as mp:
+            _rust_on(mp)
+            with capture_logs() as logs:
+                routed = cr.routed_canonical_json(tree, python_law=_stdlib_canonical_json)
+        assert routed == _dumps(tree)
+        warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
+        assert warns[0]["reason"] == "canonical_json_input_refused"
+        assert cr.rust_combo_disabled() is False
+
+    def test_str_subclass_key_keeps_its_own_marker(self) -> None:
+        class K(str):
+            __slots__ = ()
+
+        with pytest.raises(TypeError) as excinfo:
+            _CRATE.canonical_json({K("a"): 1})
+        # Its OWN older marker — deliberately NOT the generic one, so it
+        # keeps the distinct ``nonexact_key_refused`` reason.
+        assert cr._NONEXACT_KEY_MARKER in str(excinfo.value)
+        assert cr._INPUT_REFUSED_MARKER not in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "values",
+        [[1], ["\ud800"], 5],
+        ids=["non_str_element", "lone_surrogate_element", "non_sequence"],
+    )
+    def test_scan_refusals_carry_the_marker(self, values: Any) -> None:
+        with pytest.raises(cr._DEGRADE_ERRORS) as excinfo:  # the class varies by site
+            _CRATE.first_unit_separator(values)
+        assert cr._INPUT_REFUSED_MARKER in str(excinfo.value)
+        assert isinstance(excinfo.value, cr._DEGRADE_ERRORS)
+
+    def test_scan_refusal_degrades_byte_equal_under_strict(self) -> None:
+        # A non-str VALUE reaches the crate's Vec<String> extraction; the
+        # oracle re-runs over the materialized pairs and raises ITS OWN
+        # error with today's class + bytes.
+        pairs = [("a", "clean"), ("b", 7)]
+        with pytest.MonkeyPatch.context() as mp:
+            _rust_on(mp)
+            with capture_logs() as logs, pytest.raises(TypeError):
+                cr.routed_first_offending_field(
+                    pairs,  # type: ignore[arg-type]
+                    python_law=_first_offending_field,
+                )
+        warns = [e for e in logs if e["event"] == "combo_rust.fallback"]
+        assert warns[0]["reason"] == "scan_input_refused"
+        assert cr.rust_combo_disabled() is False
+
+    def test_happy_paths_are_untouched_by_the_marking(self) -> None:
+        tree = {"b": 2, "a": [1, "x", None, True], "z": {"n": -5}}
+        assert _CRATE.canonical_json(tree) == _dumps(tree)
+        assert _CRATE.first_unit_separator(["a", "x\x1fy", "\x1f"]) == 1
+        assert _CRATE.first_unit_separator(["a", "b"]) is None
+        assert _CRATE.first_unit_separator([]) is None

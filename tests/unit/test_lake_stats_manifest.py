@@ -49,6 +49,28 @@ BARS_KEY: dict[str, str] = {
 OPTIONS_KEY: dict[str, str] = {"series": "FNO__NSE__IDX__NIFTY__2026-07-30__CE__24000"}
 
 
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Degrade-lattice suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so a
+    crate that is absent / stale / errored / burn-in-poisoned now RAISES
+    ``RustFallbackRefused`` at the ``lake_rust_stats`` choke point instead of
+    quietly serving the Python oracle.  The shard-render routing tests below
+    exercise that oracle machinery — the still-supported
+    ``BRUTEX_RUST_STRICT=0`` mode — so the mode is DECLARED once, here,
+    rather than by weakening any assertion.  Strict-ON refusal is pinned in
+    ``tests/unit/test_lake_rust_stats.py::TestStrictRefusal``.
+
+    Uses the SAME shared ``monkeypatch`` object as the sibling autouse
+    fixtures (never its own ``MonkeyPatch.context()``): one object means one
+    LIFO undo stack, so the value cannot leak past this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
 def _ts(year: int, month: int, day: int, hour: int = 9, minute: int = 15) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
 

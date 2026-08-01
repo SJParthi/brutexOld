@@ -117,6 +117,7 @@ from typing import TYPE_CHECKING, Final, cast
 import structlog
 
 from brutex.calendars.nse import IST_FIXED_OFFSET, IST_UTC_OFFSET
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
@@ -348,6 +349,36 @@ def reset_rust_batch_for_tests() -> None:
     _RUST_BATCH_STATE.flag_warned = False
 
 
+def _refuse_rust_batch_if_strict(reason: str, **context: object) -> None:
+    """Strict-mode gate for the Rust-BATCH seam — DEC-RUST-STRICT-NO-FALLBACK-001.
+
+    Unlike the sibling facades this module has no single ``warn_fallback_once``
+    funnel: the batch seam announces at THREE independent sites, each writing
+    its own :data:`_RUST_BATCH_STATE` field and logging directly
+    (:func:`greeks_rust_batch_enabled`'s junk-flag arm, and the two
+    autorevert arms inside :func:`_batch_solve_outcomes`). All three call
+    this helper BEFORE their state write, so under strict mode
+    ``_RUST_BATCH_STATE.disabled`` / ``.flag_warned`` can never be set and
+    the ``batch_on`` early-return that consumes them is structurally
+    unreachable — which is what makes the wiring provably complete.
+
+    Every reason here is CLASS A (the wheel is absent/stale or the batch
+    call faulted — ``flag_unrecognised``, ``exception``) or CLASS B (the
+    kernel ran and DISAGREED with the per-row oracle —
+    ``self_check_mismatch``), so the gate is UNCONDITIONAL and this seam
+    carries no exemption set.
+
+    SCOPE (the honesty clause): this covers ONLY the crate-degrade path. The
+    per-bar domain demotions this module also emits — ``NO_RATE`` /
+    ``NO_SPOT`` / ``BELOW_INTRINSIC`` / ``BAD_INPUT`` / ``AT_EXPIRY``, plus
+    the ``bar_skipped_nonfinite`` / ``spot_invalid`` screens — are honest
+    DOMAIN outcomes of the enrichment law itself, identical on both arms and
+    produced by the Python oracle too. They are NOT Rust fall-backs and are
+    deliberately untouched.
+    """
+    refuse_if_strict("brutex.data.greeks_enrich", reason, **context)
+
+
 def greeks_rust_batch_enabled(env: Mapping[str, str] | None = None) -> bool:
     """Resolve the ``BRUTEX_GREEKS_RUST_BATCH`` tristate (default ON per
     DEC-RUST-DEFAULT-ON-WAVE-001, operator directive 2026-07-23).
@@ -366,6 +397,11 @@ def greeks_rust_batch_enabled(env: Mapping[str, str] | None = None) -> bool:
     if verdict is not None:
         return verdict
     if raw.strip():
+        # ANNOUNCE SITE 1 of 3 (CLASS A — an operator typo disarms the Rust
+        # batch, which strict mode must refuse rather than silently serve
+        # per-row Python). Fires BEFORE the flag_warned write so the
+        # warn-once early-return can never shadow a later refusal.
+        _refuse_rust_batch_if_strict("flag_unrecognised", value=repr(raw))
         if not _RUST_BATCH_STATE.flag_warned:
             _RUST_BATCH_STATE.flag_warned = True
             _LOG.warning("greeks_enrich.rust_batch_flag_unrecognised", value=repr(raw))
@@ -1296,6 +1332,11 @@ def _batch_solve_outcomes(pending: list[_PendingSolve]) -> dict[int, GreeksBatch
         # fault (a stale wheel's AttributeError, an FFI marshal fault, a
         # length-mismatch ValueError) must ship the oracle values, never
         # a crashed pass or a silently wrong bar.
+        # ANNOUNCE SITE 2 of 3 (CLASS A). Fires BEFORE the latch write, so
+        # under strict mode `disabled` is never set.
+        _refuse_rust_batch_if_strict(
+            "exception", error=repr(str(exc)), error_type=type(exc).__name__
+        )
         _RUST_BATCH_STATE.disabled = True
         _LOG.error(
             "greeks_enrich.rust_batch_autoreverted",
@@ -1310,6 +1351,9 @@ def _batch_solve_outcomes(pending: list[_PendingSolve]) -> dict[int, GreeksBatch
     check_n = min(_RUST_BATCH_STATE.self_check_left, len(outcomes))
     for slot in range(check_n):  # burn-in BEFORE adoption
         if _outcome_key(outcomes[slot]) != _outcome_key(_solve_one(pending[slot])):
+            # ANNOUNCE SITE 3 of 3 (CLASS B — the kernel ran and DISAGREED
+            # with the per-row oracle). Fires BEFORE the latch write.
+            _refuse_rust_batch_if_strict("self_check_mismatch", slot=slot)
             _RUST_BATCH_STATE.disabled = True
             _LOG.error(
                 "greeks_enrich.rust_batch_autoreverted",

@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV
 from brutex.data.models import CandleBar
 from brutex.engine.rust_metrics import (
     MAX_EXACT_EQUITY_PAISA,
@@ -36,6 +37,19 @@ from brutex.metrics.types import ClosedTrade, EquityCurve
 from brutex.strategies.types import Side
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
+
+
+@pytest.fixture
+def _strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable strict mode for the boundary case that PROVES the envelope
+    guard degrades (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    One paisa past 2⁵² is a Python fall-back, which strict mode refuses. The
+    degrade contract is still a supported, kill-switched mode and this test
+    pins it, so it opts in by name rather than weakening its assertion.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
 
 _OPEN_UTC = datetime(2024, 1, 2, 3, 46, tzinfo=UTC)  # 09:16 IST
 
@@ -173,6 +187,7 @@ def test_kernel_seam_matches_drawdown_stats_bitwise(
     assert struct.pack("<d", got[3]) == struct.pack("<d", expected[3])
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_near_envelope_boundary_stays_bit_identical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

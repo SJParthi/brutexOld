@@ -19,6 +19,7 @@ import pytest
 from brutex.backup import backup_rust, deadman
 from brutex.backup.deadman import DeadmanReport, DeadmanVerdict, evaluate_deadman
 from brutex.backup.state import BackupState, DeadmanState, empty_backup_state
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 
 NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -40,6 +41,27 @@ def _fresh_seam() -> Iterator[None]:
 @pytest.fixture
 def flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "1")
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract to the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    where a Class-A (crate absent/stale/errored) or Class-B (crate answered
+    but the RESULT is structurally refused) fall-back RAISES
+    :class:`RustFallbackRefused` at the seam's choke point instead of serving
+    the Python oracle.  The degrade machinery is not deleted — it stays
+    reachable through the documented ``BRUTEX_RUST_STRICT=0`` kill switch,
+    and THAT is the mode the tests requesting this fixture describe.  The
+    strict-ON refusal for the SAME induced fault is pinned positively by
+    :class:`TestStrictModeRefusesTheFallback`, so no coverage is traded away.
+
+    Uses the SHARED ``monkeypatch`` (never a module-scoped
+    ``MonkeyPatch.context()``) so set/unset ordering with sibling env pins in
+    this file stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _clock() -> datetime:
@@ -186,7 +208,7 @@ class TestFakeCrateRouting:
         assert backup_rust.burn_in_remaining("evaluate_deadman") == backup_rust.BURN_IN_SAMPLES - 1
 
     def test_drifted_fake_decision_autoreverts_to_oracle(
-        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, strict_off: None
     ) -> None:
         # A WRONG verdict (fresh where the oracle says never_succeeded).
         _install_fake(monkeypatch, (9, "fresh", False, None, 0.0))
@@ -195,12 +217,39 @@ class TestFakeCrateRouting:
         assert backup_rust.disabled_reason() == "burn_in_mismatch"
 
     def test_poisoned_decision_shape_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None, strict_off: None
     ) -> None:
         _install_fake(monkeypatch, (2, "never_succeeded", 1, None, 0.0))  # int, not bool
         report = _routed(None, DeadmanState())
         assert report == _oracle(None, DeadmanState())
         assert backup_rust.disabled_reason() is None, "refused, not latched"
+
+
+class TestStrictModeRefusesTheFallback:
+    """The no-fallback guarantee, pinned POSITIVELY on this facade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001.  Each test induces the SAME fault its
+    ``strict_off`` twin in :class:`TestFakeCrateRouting` induces, but leaves
+    ``BRUTEX_RUST_STRICT`` at its shipped default (ON) and asserts the seam
+    RAISES rather than quietly serving the Python oracle.  Without these the
+    ``strict_off`` pins above would be a coverage trade, not a relocation.
+    """
+
+    def test_drifted_decision_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, (9, "fresh", False, None, 0.0))
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch"):
+            _routed(None, DeadmanState())
+
+    def test_poisoned_decision_shape_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, flag_on: None
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        _install_fake(monkeypatch, (2, "never_succeeded", 1, None, 0.0))
+        with pytest.raises(RustFallbackRefused):
+            _routed(None, DeadmanState())
 
 
 class TestReportFromDecision:

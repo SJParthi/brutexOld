@@ -20,16 +20,35 @@ COMMON), and makes it ALIAS-AWARE:
   ONE ``roll_schedule`` of the same resolution).
 
 DEC-FEED-RUST-MATERIALIZE-002 (the T17 zero-Python endgame): the loader's
-DECISION arithmetic — the expected-bar-instant geometry, the IST-date
-ownership cut, the boundary-monotonicity verdict — runs EXCLUSIVELY in the
-REQUIRED ``brutex_feed`` Rust wheel over exact epoch-µs integers; Python
-keeps the ORCHESTRATION (Catalog/reconcile/calendar/futures-series I/O,
-the window intersection that feeds the Python ``Catalog`` API, and every
-error/log materialization). The ownership cut runs the fixed +05:30
+DECISION arithmetic — the expected-bar-instant GEOMETRY, the IST-date
+ownership cut, the boundary-monotonicity verdict — runs in the REQUIRED
+``brutex_feed`` Rust wheel over exact epoch-µs integers; Python keeps the
+ORCHESTRATION (Catalog/reconcile/calendar/futures-series I/O, the window
+intersection that feeds the Python ``Catalog`` API, and every error/log
+materialization). The ownership cut runs the fixed +05:30
 civil-day-ordinal law — provably ``astimezone(IST).date()`` inside the
 envelope ``[epoch 0, 9999-12-31T00:00:00Z)``; an out-of-envelope stored
 timestamp REFUSES loudly (planted/out-of-band data only — real FNO bars
 are post-2020 by the ``GROWW_HISTORY_FLOOR`` law).
+
+Honest scope of "runs in the wheel" (Golden Rule #10)
+-----------------------------------------------------
+"In the wheel" is the GEOMETRY, not the whole verdict.
+:func:`_expected_bar_time_in_window` has THREE Python-decided early returns
+that produce a verdict WITHOUT consulting the wheel at all, because they
+short-circuit BEFORE the ``require_feed_kernel()`` call: a degenerate
+intersection (``seg_end < seg_start`` → ``False``), an unmodellable TF label
+(→ ``True``), and a calendar-coverage abstain (→ ``True``). All three are
+deliberate — a window with no instants, or a grid/calendar the loader cannot
+model, needs no geometry — and all three are documented on that helper. They
+are NOT strict-mode fall-backs (the wheel never faulted, so no facade choke
+point is reached and ``BRUTEX_RUST_STRICT`` cannot see them); a genuinely
+missing/stale wheel on the ORDINARY path still raises the loud typed
+``FeedError``. VERIFIED 2026-07-31 by blocking the ``brutex_feed`` import
+under ``BRUTEX_RUST_STRICT=1``: the three arms returned ``True``/``True``/
+``False`` while an ordinary in-coverage window raised ``FeedError``. The two
+sibling seams (``ownership_cut``, ``boundary_monotonic_break``) have no such
+arm — they call the wheel unconditionally.
 
 The IST-DATE cut (never a ``09:15`` clamp) means muhurat-evening bars and
 special-weekend sessions are owned by their own date, and the derived FNO
@@ -177,9 +196,18 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
     that is not a known lake TF label (its grid cannot be modelled). O(days in
     the window intersection), bounded by one contract's ownership span.
 
+    Both abstains, AND the degenerate ``seg_end < seg_start`` → ``False``
+    early return, short-circuit BEFORE :func:`require_feed_kernel` — so on
+    those three paths Python returns the verdict and the wheel is never
+    consulted (a window with no instants, or a grid/calendar the loader
+    cannot model, needs no geometry). They are NOT strict-mode fall-backs:
+    no Rust facade faults, so no choke point is reached and
+    ``BRUTEX_RUST_STRICT`` neither sees nor refuses them. A missing/stale
+    wheel on the ORDINARY path still raises the loud typed ``FeedError``.
+
     DEC-FEED-RUST-MATERIALIZE-002: Python keeps the CALENDAR I/O + both
-    ABSTAIN arms; the GEOMETRIC verdict comes from the REQUIRED
-    ``brutex_feed`` wheel (``expected_bar_instant``) over the sessions'
+    ABSTAIN arms (+ the degenerate return above); the GEOMETRIC verdict comes
+    from the REQUIRED ``brutex_feed`` wheel (``expected_bar_instant``) over the sessions'
     exact epoch-µs instants. Verdict-equivalence with the deleted
     early-return day walk: the kernel ORs the per-day geometry over the
     collected days, and a mid-walk coverage abstain returns ``True``

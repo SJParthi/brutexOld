@@ -150,6 +150,7 @@ from typing import TYPE_CHECKING, Final, TypeGuard
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.engine.combo_mask import MAX_VOCAB_BITS, count_combos, iter_masks_k_of_bits
 
 # The truthy + falsy literal sets are defined ONCE on the sweep-flag vocabulary
@@ -265,6 +266,30 @@ _SHADOW_RANGES_REMAINING: Final[dict[str, int]] = dict.fromkeys(
 #: disabled for this process, else ``None`` (same documented exception).
 _KERNEL_DISABLED_REASON: Final[dict[str, str | None]] = dict.fromkeys(_WIDTHS, None)
 
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.engine.rust_enum"
+
+#: CLASS-C fall-back reasons — the INPUT is outside the crate's envelope and
+#: the Python arm was ALWAYS the intended handler (DEC-RUST-STRICT-NO-FALLBACK-001
+#: §"Scope note"). Refusing here would turn a legitimate call into a crash, so
+#: strict mode deliberately lets these degrade. Widening the crate — never
+#: refusing — is the real fix for each:
+#:
+#: * ``legacy_dedup_path`` — the caller is on the legacy no-digest dedup arm,
+#:   which is pure Python BY CONTRACT (module docstring: "the legacy no-digest
+#:   dedup arm and the Apriori arm stay pure Python by contract"). The kernel
+#:   was never offered this shape; the real fix is teaching the legacy arm the
+#:   digest path, not crashing every legacy-arm tuple.
+#: * ``count_overflow`` — ``C(n, k)`` exceeds ``2**64 - 1``, i.e. beyond the
+#:   kernel's u64 RANK domain (the rank type, not the mask width). The input is
+#:   legal; the fix is a u128-rank monomorphisation, not a refusal.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "legacy_dedup_path",
+        "count_overflow",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RustEnumResult:
@@ -350,7 +375,15 @@ def disable_kernel(width: str, reason: str, **context: object) -> None:
     mismatching tuple ships ORACLE values (the mid-tuple continuation). The
     latch is PER WIDTH (design §5 round-5): a u64 defect must never silently
     certify — or block — the u128 kernel and vice versa.
+
+    Under strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) this REFUSES before
+    the latch is written: a burn-in mismatch is CLASS B (Rust ran and answered
+    wrongly), never a legitimate input shape. Refusing pre-latch also makes the
+    latched ``kernel_disabled`` early-return in
+    :func:`enum_prefilter_via_kernel` structurally unreachable — the wiring is
+    complete by construction rather than by sampling.
     """
+    refuse_if_strict(_STRICT_FACADE, reason, width=width, **context)
     if _KERNEL_DISABLED_REASON[width] is None:
         _KERNEL_DISABLED_REASON[width] = reason
         _LOG.error("sweep_rust_enum.kernel_autoreverted", width=width, reason=reason, **context)
@@ -394,7 +427,15 @@ def warn_fallback_once(reason: str, **context: object) -> None:
     first occurrence is loud (WARNING); repeats of the same reason fall back
     silently. The fallback itself is bit-exact regardless (the untouched
     Python loop serves the tuple).
+
+    This is the module's ONE fall-back choke point, so strict mode
+    (DEC-RUST-STRICT-NO-FALLBACK-001) refuses here — BEFORE the warn-once memo
+    is written, so a repeat of the same reason cannot slip through the
+    already-warned early return. :data:`_STRICT_EXEMPT_REASONS` carries the
+    CLASS-C tokens that are legitimate Python-serves.
     """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        refuse_if_strict(_STRICT_FACADE, reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -407,6 +448,11 @@ def _warn_advisory_once(key: str, event: str, **context: object) -> None:
     Used by the knob clamps + the shadow floor-unmet signal — conditions that
     do NOT change which arm serves the tuple, only how it is configured or
     how much burn-in coverage it got.
+
+    Deliberately NOT wired to strict mode (DEC-RUST-STRICT-NO-FALLBACK-001):
+    every caller of this helper keeps the KERNEL serving. There is no Python
+    fall-back to refuse — refusing an advisory would crash a call the Rust arm
+    answered.
     """
     if key in _OBSERVABILITY_MEMO:
         return
@@ -494,6 +540,13 @@ def _validated_unique_bits(bits: Sequence[int], k: int) -> tuple[int, ...] | Non
     generator then raises its canonical error at first ``next()``, so error
     behaviour is flag-invariant by construction
     (``combo_mask.py`` / ``conflicts.py`` are never edited).
+
+    Deliberately NOT wired to strict mode: this is not a fall-back at all.
+    Python does not *serve* the tuple here — the generator RAISES
+    (``iter_masks_k_of_bits`` raises ``ValueError`` for an out-of-range
+    position or an out-of-range ``k``, ``TypeError`` on the ``1 << pos`` for a
+    non-int). Refusing would only swap one exception for another while
+    breaking the flag-invariant error contract.
     """
     seen: set[int] = set()
     # Widened view for the runtime type belt below: the isinstance check
@@ -791,6 +844,15 @@ def enum_prefilter_via_kernel(
         ):
             # A domain-invalid range is a kernel BUG: refuse it LOUDLY (never
             # silently adopted) and serve the WHOLE tuple from the Python loop.
+            # CLASS B under strict mode — Rust RAN and returned a structurally
+            # refused result; the Python re-run must not paper over it. Refuse
+            # BEFORE the memo write so a repeat cannot slip past.
+            refuse_if_strict(
+                _STRICT_FACADE,
+                "kernel_result_refused",
+                k=k,
+                start_rank=rank,
+            )
             if "kernel_result_refused" not in _OBSERVABILITY_MEMO:
                 _OBSERVABILITY_MEMO.add("kernel_result_refused")
                 _LOG.error(

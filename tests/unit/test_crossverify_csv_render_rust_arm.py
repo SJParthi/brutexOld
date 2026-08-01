@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from brutex.calendars.nse import TradingSession, get_session_checked
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.crossverify import csv_render, rust_seam
 from brutex.crossverify.canonical import CanonicalIdentity
 from brutex.crossverify.csv_render import ExportContractError, ExportRow, render_day_csv
@@ -70,6 +71,31 @@ def _fresh_seam() -> Iterator[None]:
     rust_seam.reset_crossverify_rust_for_tests()
     yield
     rust_seam.reset_crossverify_rust_for_tests()
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract to the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    where a Class-A (crate absent/stale/errored) or Class-B (crate answered
+    but the RESULT is structurally refused) fall-back RAISES
+    :class:`RustFallbackRefused` at the seam's choke point instead of serving
+    the Python oracle.  A LATCHED seam is exactly that class: this facade's
+    :func:`brutex.crossverify.rust_seam._disable` refuses BEFORE it writes the
+    latch, so under strict mode the latch can never be set and every latched
+    early-return is structurally unreachable.  The degrade machinery is not
+    deleted — it stays reachable through the documented
+    ``BRUTEX_RUST_STRICT=0`` kill switch, and THAT is the mode the tests
+    requesting this fixture describe.  The strict-ON refusal for the SAME
+    induced fault is pinned positively by
+    :class:`TestStrictModeRefusesTheFallback`, so no coverage is traded away.
+
+    Uses the SHARED ``monkeypatch`` (never a module-scoped
+    ``MonkeyPatch.context()``) so set/unset ordering with the sibling
+    ``CROSSVERIFY_RUST_ENV`` pins this file sets inline stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 class _FakeOpsModule(types.ModuleType):
@@ -149,10 +175,58 @@ class TestRenderDayCsvFlagOn:
         with pytest.raises(ExportContractError, match="rows not strictly increasing"):
             render_day_csv(identity=_IDENTITY, rows=rows, session=_session())
 
-    def test_flag_on_latched_seam_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_flag_on_latched_seam_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch, strict_off: None
+    ) -> None:
         monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "1")
         _plant_faithful_crate(monkeypatch)
         rust_seam._disable("test_latch")
         assert render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session()) == (
             _oracle_bytes()
         )
+
+
+class TestStrictModeRefusesTheFallback:
+    """The no-fallback guarantee, pinned POSITIVELY on this facade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001.  Each test induces a fall-back with
+    ``BRUTEX_RUST_STRICT`` at its shipped default (ON) and asserts the seam
+    RAISES rather than quietly serving the Python oracle.  Without these the
+    ``strict_off`` pin on
+    :meth:`TestRenderDayCsvFlagOn.test_flag_on_latched_seam_serves_the_oracle`
+    would be a coverage trade, not a relocation.
+
+    WHERE the refusal fires is facade-specific and was read out of
+    ``brutex/crossverify/rust_seam.py`` rather than assumed:
+    :func:`~brutex.crossverify.rust_seam._disable` calls the strict gate
+    BEFORE writing :data:`~brutex.crossverify.rust_seam._DISABLED_REASON`, so
+    latching the seam the SAME way the ``strict_off`` twin does raises at the
+    ``_disable`` call itself and the latch is never written — the latched
+    early-returns in both ``render_day_csv`` and ``routed_render_csv`` are
+    structurally unreachable under strict mode.  The first test pins exactly
+    that; the second pins a refusal that genuinely surfaces OUT OF the routed
+    call, by inducing the Class-A crate-absent fall-back from inside it.
+    """
+
+    def test_latching_the_seam_raises_before_the_latch_is_written(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "1")
+        _plant_faithful_crate(monkeypatch)
+        with pytest.raises(RustFallbackRefused, match="test_latch"):
+            rust_seam._disable("test_latch")
+        assert rust_seam.rust_seam_disabled() is False, "strict refuses BEFORE the latch write"
+        # …so the latched early-return is unreachable: the seam still routes.
+        assert render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session()) == (
+            _oracle_bytes()
+        )
+
+    def test_routed_render_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setenv(rust_seam.CROSSVERIFY_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_ops", None)  # the bomb: import → ImportError
+        with pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+            render_day_csv(identity=_IDENTITY, rows=_rows(), session=_session())

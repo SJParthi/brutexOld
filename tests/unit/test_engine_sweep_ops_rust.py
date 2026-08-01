@@ -9,12 +9,14 @@ lives in ``tests/integration/test_sweep_ops_rust_parity.py``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
+from brutex.config import rust_strict
 from brutex.engine import sweep_ops_rust
 from brutex.engine.sweep_ops_rust import (
     BURN_IN_SAMPLES,
@@ -66,6 +68,27 @@ def _isolate_facade_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None, No
     reset_sweep_ops_rust_for_tests()
 
 
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-enable the Python oracle fall-back for a *degrade-behaviour* class.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` ON by
+    default, so a class-A (crate absent / stale / errored) or class-B
+    (structurally refused crate result) reason now RAISES
+    :class:`~brutex.config.rust_strict.RustFallbackRefused` instead of
+    silently serving the oracle. The classes below exercise the still-supported
+    ``BRUTEX_RUST_STRICT=0`` mode — the degrade LATTICE itself is unchanged,
+    only its default reachability moved — so every assertion stays untouched
+    (Golden Rule #10: a gate is repaired by opting in, never by weakening).
+
+    DELIBERATELY NOT ``autouse``: each degrade class opts in by name via
+    ``@pytest.mark.usefixtures("strict_off")``, so strict mode keeps its teeth
+    for :class:`TestStrictRefusal` in this file and for every other test in
+    the repo.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
 def _good_crate() -> SimpleNamespace:
     """A behavior-correct fake crate (the shared §11-COMMON builder)."""
     return build_fake_sweep_ops_crate()
@@ -112,6 +135,7 @@ def _call_run_path() -> Path:
 # ───────────────────────────── the flag law ─────────────────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestFlagLaw:
     @pytest.mark.parametrize("raw", ["1", "true", "YES", " on "])
     def test_truthy_enables(self, monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
@@ -246,6 +270,7 @@ class TestFlagLaw:
 # ─────────────────────── import guard / handshake ───────────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestCrateResolution:
     def test_absent_wheel_latches_crate_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -291,6 +316,7 @@ class TestCrateResolution:
 # ───────────────────────── routed_run_path law ─────────────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedRunPath:
     def test_parity_with_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -446,6 +472,7 @@ def _fragment_oracle_both() -> dict[str, Any]:
     return {"overfit": list(_OVERFIT), "stage3": [10, 200, 3]}
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedGateFragment:
     @pytest.mark.parametrize(
         ("overfit", "stage3_enable", "knobs", "expected"),
@@ -469,29 +496,122 @@ class TestRoutedGateFragment:
         result = routed_gate_fragment(overfit, stage3_enable, knobs, python_law=lambda: expected)
         assert result == expected
 
-    def test_set_max_sl_hit_rate_routes_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The train-b tier-2 seam gate (#1699 knob × #1665 facade): a SET
-        ``max_sl_hit_rate`` is outside the crate fragment law's domain — the
-        WHOLE computation routes to the oracle, the crate is never even
-        imported, and the refusal is the NAMED warn-once
-        ``gate_fragment_beyond_crate`` (never a latch/autorevert)."""
+    def test_set_max_sl_hit_rate_is_served_by_the_crate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001 (the RETIREMENT pin).
+
+        A SET ``max_sl_hit_rate`` used to bounce the WHOLE computation back
+        to the Python oracle with the ``gate_fragment_beyond_crate``
+        warn-once. The crate now carries the leg, so the knob is served IN
+        RUST: the crate IS consulted, the identity key survives verbatim,
+        and the retired reason is emitted by nothing.
+        """
         _enable(monkeypatch)
-        calls = _install_import_bomb(monkeypatch)
-        sentinel = {"overfit": list(_OVERFIT), "max_sl_hit_rate": 0.35}
+        crate = _good_crate()
+        seen: list[tuple[object, ...]] = []
+        real = crate.gate_config_fragment
+
+        def _spy(*args: object) -> object:
+            seen.append(args)
+            return real(*args)
+
+        crate.gate_config_fragment = _spy
+        _install_crate(monkeypatch, crate)
+        oracle = {"overfit": list(_OVERFIT), "max_sl_hit_rate": 0.35}
         with capture_logs() as logs:
             result = routed_gate_fragment(
                 _OVERFIT,
                 False,
                 (1, 2, 3),
                 max_sl_hit_rate=0.35,
+                python_law=lambda: oracle,
+            )
+        assert result == oracle
+        assert result is not None
+        assert result["max_sl_hit_rate"] == 0.35  # the identity key survives
+        assert len(seen) == 1  # the crate IS consulted now
+        assert seen[0][1] == 0.35  # …and the ceiling crossed the FFI
+        assert [e for e in logs if e.get("reason") == "gate_fragment_beyond_crate"] == []
+        assert sweep_ops_rust_disabled() is False
+
+    def test_set_cvar_is_served_by_the_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cvar half of the same widening (DEC-RANK-CVAR-TAIL-GATE-001).
+
+        The caller used to return the oracle SILENTLY for a set cvar gate —
+        an UNANNOUNCED Python arm the facade's warn-once could never see.
+        The leg is now crate-served and announced by nothing.
+        """
+        _enable(monkeypatch)
+        crate = _good_crate()
+        seen: list[tuple[object, ...]] = []
+        real = crate.gate_config_fragment
+
+        def _spy(*args: object) -> object:
+            seen.append(args)
+            return real(*args)
+
+        crate.gate_config_fragment = _spy
+        _install_crate(monkeypatch, crate)
+        oracle = {"cvar": [500, 1000]}
+        with capture_logs() as logs:
+            result = routed_gate_fragment(
+                None,
+                False,
+                (1, 2, 3),
+                cvar_values=(500, 1000),
+                python_law=lambda: oracle,
+            )
+        assert result == oracle
+        assert len(seen) == 1
+        assert seen[0][2] == (500, 1000)
+        assert [e for e in logs if e.get("event") == "sweep_ops_rust.fallback"] == []
+
+    def test_nonfloat_max_sl_hit_rate_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The NAMED RESIDUE of the widening (honest, not closed).
+
+        ``SweepGridConfig.__post_init__`` accepts a finite numeric ceiling in
+        ``(0.0, 1.0]`` WITHOUT an exact-``float`` gate, so an ``int`` 1
+        reaches here. The oracle renders it verbatim (JSON ``1``) while an
+        f64 roundtrip would render ``1.0`` — a digest split — so the exact
+        shapes refuse to the oracle exactly like a non-float overfit knob.
+        """
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        sentinel = {"max_sl_hit_rate": 1}
+        with capture_logs() as logs:
+            result = routed_gate_fragment(
+                None,
+                False,
+                (1, 2, 3),
+                max_sl_hit_rate=1,  # int, not float — lossy across f64
                 python_law=lambda: sentinel,
             )
         assert result is sentinel
         assert calls == []
-        warns = [e for e in logs if e.get("reason") == "gate_fragment_beyond_crate"]
+        warns = [e for e in logs if e.get("reason") == "gate_fragment_input_refused"]
         assert len(warns) == 1
         assert warns[0]["leg"] == "max_sl_hit_rate"
         assert sweep_ops_rust_disabled() is False
+
+    def test_nonint_cvar_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cvar exact-int gate (``bool`` is an ``int`` subclass — excluded)."""
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        sentinel = {"cvar": [True, 1000]}
+        with capture_logs() as logs:
+            result = routed_gate_fragment(
+                None,
+                False,
+                (1, 2, 3),
+                cvar_values=(True, 1000),  # type: ignore[arg-type]
+                python_law=lambda: sentinel,
+            )
+        assert result is sentinel
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "gate_fragment_input_refused"]
+        assert len(warns) == 1
+        assert warns[0]["leg"] == "cvar"
 
     def test_unset_max_sl_hit_rate_keeps_crate_routing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -562,11 +682,14 @@ class TestRoutedGateFragment:
 
         crate.gate_config_fragment = boom
         _install_crate(monkeypatch, crate)
+        # The knobs are deliberately IN-BAND: the fault must come from the
+        # crate, not from the ``_i64_refused`` input gate, or this test would
+        # silently measure ``gate_fragment_input_refused`` instead.
         with capture_logs() as logs:
             result = routed_gate_fragment(
-                None, True, (2**70, 2, 3), python_law=lambda: {"stage3": [2**70, 2, 3]}
+                None, True, (1, 2, 3), python_law=lambda: {"stage3": [1, 2, 3]}
             )
-        assert result == {"stage3": [2**70, 2, 3]}
+        assert result == {"stage3": [1, 2, 3]}
         warns = [e for e in logs if e.get("reason") == "gate_fragment_error"]
         assert len(warns) == 1
 
@@ -610,6 +733,18 @@ class TestRoutedGateFragment:
             (None, (1, 2)),  # stage3 leg wrong arity
             (None, (1, 2, True)),  # stage3 leg bool member
             (None, [1, 2, 3]),  # stage3 leg non-tuple
+            # ── the FOUR-leg shapes (DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001).
+            # These unpack cleanly, so unlike the 2-tuples above they reach
+            # ``_valid_fragment_legs`` itself and exercise its per-leg refusals
+            # → the ``gate_fragment_result_refused`` arm.
+            ((0.95, 0.05, 0.0), None, None, None),  # overfit leg wrong arity, 4-leg
+            (None, 1, None, None),  # max_sl leg non-float (an exact int)
+            (None, "0.5", None, None),  # max_sl leg a str
+            (None, None, (1,), None),  # cvar leg wrong arity
+            (None, None, (1, 2.0), None),  # cvar leg non-int member
+            (None, None, [1, 2], None),  # cvar leg non-tuple
+            (None, None, (1, True), None),  # cvar leg bool member
+            (None, None, None, (1, 2)),  # stage3 leg wrong arity, 4-leg shape
         ],
     )
     def test_malformed_result_refused(self, monkeypatch: pytest.MonkeyPatch, legs: Any) -> None:
@@ -624,8 +759,9 @@ class TestRoutedGateFragment:
     def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
         crate = _good_crate()
-        # Well-shaped but WRONG: drops the stage3 leg.
-        crate.gate_config_fragment = lambda *args: (None, None)
+        # Well-shaped but WRONG: drops the stage3 leg (four legs since
+        # DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001).
+        crate.gate_config_fragment = lambda *args: (None, None, None, None)
         _install_crate(monkeypatch, crate)
         oracle = {"stage3": [10, 200, 3]}
         with capture_logs() as logs:
@@ -651,6 +787,7 @@ class TestRoutedGateFragment:
 # ─────────────────────── routed_stall_timeout law ───────────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedStallTimeout:
     @pytest.mark.parametrize(
         ("factor", "estimate", "expected"),
@@ -796,6 +933,7 @@ def _call_progress_derived() -> tuple[float, float, float, float | None, float]:
     return routed_progress_derived(200, 25, 4, 100.0, 110.0, python_law=lambda: _DERIVED_EXPECTED)
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedProgressDerived:
     def test_parity_with_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -925,6 +1063,7 @@ class TestRoutedProgressDerived:
 # ─────────────── slice 1b — routed_sla_decision law ───────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedSlaDecision:
     @pytest.mark.parametrize(
         ("tuple_count", "acknowledge", "expected"),
@@ -1024,6 +1163,7 @@ class TestRoutedSlaDecision:
 # ──────────────── slice 1b — routed_rank_plan law ────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedRankPlan:
     @pytest.mark.parametrize(
         ("n_masks", "budget", "mode", "has_top_k", "digest", "expected"),
@@ -1156,6 +1296,7 @@ def _call_preflight_missing() -> tuple[tuple[str, str], ...]:
     )
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedPreflightMissing:
     def test_parity_with_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -1240,6 +1381,7 @@ _VERDICTS = {("Z", "5minute"): "stale", ("A", "1day"): "fresh", ("A", "5minute")
 _STALE_EXPECTED = (("A", "5minute"), ("Z", "5minute"))
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedFreshnessStale:
     def test_parity_with_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -1307,6 +1449,7 @@ class TestRoutedFreshnessStale:
 # ─────────────── slice 1b — routed_liveness_tail law ───────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedLivenessTail:
     @pytest.mark.parametrize(
         ("pid_ok", "now_wall", "expected"),
@@ -1437,6 +1580,7 @@ _G1_FIELDS = (
 _G1_HASH = "ab1df54e0d8428288ece95f9b5e462f4af17beb3046ea429c6ee86d67e33ff2e"
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedAuditEntryHash:
     def test_parity_with_oracle_and_golden(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -1504,6 +1648,7 @@ def _ok_step_args() -> tuple[Any, ...]:
     return (0, "0" * 64, 0, "0" * 64, *_G1_FIELDS[2:], _G1_HASH)
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedChainVerifyStep:
     def test_parity_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
@@ -1631,6 +1776,7 @@ class TestRoutedChainVerifyStep:
 # ─────────────── slice 2 — routed_stamp_verdict law ───────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedStampVerdict:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -1719,6 +1865,7 @@ class TestRoutedStampVerdict:
 # ─────────────── slice 2 — routed_chain_link_state law ───────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedChainLinkState:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -1835,6 +1982,7 @@ class TestRoutedChainLinkState:
 # ─────────────── slice 2 — routed_count_violations law ───────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedCountViolations:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -1890,17 +2038,15 @@ class TestRoutedCountViolations:
         assert len(warns) == 1
 
     def test_overflow_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The crate's ONE checked arithmetic maps an i64 overflow to
-        # ValueError — the facade degrades (the real crate does this; the
-        # fake mirrors it here via a raising stand-in).
+        # The crate's ONE checked arithmetic (audit_chain.rs:273-275) returns
+        # Err when ``evaluated + in_flight`` leaves i64. Since the band gates
+        # (DEC-SWEEP-OPS-INT-BAND-GATES-001) the facade PRE-DECIDES that sum,
+        # so the degrade is the honest class-C ``*_input_refused`` and the
+        # crate is never even reached — ``count_violations_error`` now means
+        # exactly one thing (a real crate fault). The oracle-serve half of
+        # this pin is unchanged; only the reason token moved to the split one.
         _enable(monkeypatch)
-        crate = _good_crate()
-
-        def raising(*args: Any) -> str:
-            raise ValueError("evaluated + in_flight overflows i64")
-
-        crate.count_reconciliation = raising
-        _install_crate(monkeypatch, crate)
+        calls = _install_import_bomb(monkeypatch)
         oracle = "evaluated 9223372036854775807 + in_flight 1 > enumerated 1"
         with capture_logs() as logs:
             assert (
@@ -1909,7 +2055,8 @@ class TestRoutedCountViolations:
                 )
                 == oracle
             )
-        warns = [e for e in logs if e.get("reason") == "count_violations_error"]
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "count_violations_input_refused"]
         assert len(warns) == 1
 
     def test_burn_in_mismatch_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1975,6 +2122,7 @@ class TestSliceTwoDriftPins:
 # ─────────────────── slice 3 — the durable-artifacts family ───────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedExitStatusResolution:
     _OK = ("running", None, 100.5, None, None)
 
@@ -2072,6 +2220,7 @@ class TestRoutedExitStatusResolution:
         )
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedQuarantineNextOrdinal:
     @pytest.mark.parametrize(
         ("names", "prefix", "suffix", "expected"),
@@ -2161,6 +2310,7 @@ class TestRoutedQuarantineNextOrdinal:
         )
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedCheckpointRecordDecision:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -2202,22 +2352,20 @@ class TestRoutedCheckpointRecordDecision:
 
     def test_out_of_i64_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The REAL wheel's pyo3 i64 conversion raises OverflowError on an
-        # out-of-band index (parity-suite-proven); the fake mirrors it here
-        # via a raising stand-in (the slice-2 overflow-test idiom).
+        # out-of-band index — which is INDISTINGUISHABLE from a crate fault.
+        # Since the band gates (DEC-SWEEP-OPS-INT-BAND-GATES-001) the facade
+        # decides it FIRST, so the crate is never reached and the reason is
+        # the honest class-C ``*_input_refused``. The oracle-serve half of
+        # this pin is unchanged; only the token moved off ``*_error``.
         _enable(monkeypatch)
-        crate = _good_crate()
-
-        def raising(*args: Any) -> str:
-            raise OverflowError("out of i64")
-
-        crate.checkpoint_record_decision = raising
-        _install_crate(monkeypatch, crate)
+        calls = _install_import_bomb(monkeypatch)
         with capture_logs() as logs:
             assert (
                 routed_checkpoint_record_decision(2**64, -1, 2**65, python_law=lambda: "advance")
                 == "advance"
             )
-        warns = [e for e in logs if e.get("reason") == "checkpoint_record_error"]
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "checkpoint_record_input_refused"]
         assert len(warns) == 1
 
     @pytest.mark.parametrize("result", [7, "banana", None])
@@ -2247,6 +2395,7 @@ class TestRoutedCheckpointRecordDecision:
         assert reverts[0]["reason"] == "burn_in_mismatch_checkpoint_record"
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedCheckpointAdoptionVerdict:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -2354,6 +2503,7 @@ class TestSliceThreeDriftPins:
         assert produced == sweep_ops_rust._ADOPTION_TOKENS
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedDetachProbeVerdict:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -2446,6 +2596,7 @@ class TestRoutedDetachProbeVerdict:
         assert reverts[0]["reason"] == "burn_in_mismatch_detach_probe"
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedHealMismatch:
     @pytest.mark.parametrize(
         ("src", "plan", "dest", "expected"),
@@ -2559,6 +2710,7 @@ class TestRoutedHealMismatch:
         assert reverts[0]["reason"] == "burn_in_mismatch_heal_mismatch"
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedScheduleNextFire:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -2652,6 +2804,7 @@ class TestRoutedScheduleNextFire:
         assert reverts[0]["reason"] == "burn_in_mismatch_schedule_next_fire"
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedResumeDecision:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -2691,19 +2844,19 @@ class TestRoutedResumeDecision:
         assert len(warns) == 1
 
     def test_out_of_i64_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Since the band gates (DEC-SWEEP-OPS-INT-BAND-GATES-001) an
+        # out-of-i64 index is decided at the facade's OWN gate, so the crate
+        # is never reached and the reason is the honest class-C
+        # ``*_input_refused``. The oracle-serve half of this pin is unchanged;
+        # only the token moved off the overloaded ``*_error``.
         _enable(monkeypatch)
-        crate = _good_crate()
-
-        def raising(*args: Any) -> tuple[str, int]:
-            raise OverflowError("out of i64")
-
-        crate.resume_decision = raising
-        _install_crate(monkeypatch, crate)
+        calls = _install_import_bomb(monkeypatch)
         with capture_logs() as logs:
             assert routed_resume_decision(
                 True, True, 2**64, 2**65, python_law=lambda: ("resume", 2**64)
             ) == ("resume", 2**64)
-        warns = [e for e in logs if e.get("reason") == "resume_decision_error"]
+        assert calls == []
+        warns = [e for e in logs if e.get("reason") == "resume_decision_input_refused"]
         assert len(warns) == 1
 
     @pytest.mark.parametrize(
@@ -2793,6 +2946,7 @@ class TestSliceFourDriftPins:
         assert sweep_ops_rust._LIVENESS_TAIL_TOKENS < sweep_ops_rust._RUN_VERDICT_TOKENS
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedRecountVerdict:
     @pytest.mark.parametrize(
         ("args", "expected"),
@@ -2886,6 +3040,7 @@ class TestRoutedRecountVerdict:
         )
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedAprioriJoinPrune:
     _SINGLETONS: ClassVar[list[tuple[int, ...]]] = [(0,), (1,), (2,)]
 
@@ -2939,7 +3094,7 @@ class TestRoutedAprioriJoinPrune:
             [(0, 0)],  # duplicate bit (not strictly ascending)
             [(1,), (0,)],  # not lex-sorted
             [(0,), (0,)],  # duplicate tuple (not STRICTLY sorted)
-            [(64,)],  # bit out of range
+            [(128,)],  # bit out of range (u128 ceiling, DEC-APRIORI-U128-WIDEN-001)
             [(True,)],  # bool bit
         ],
     )
@@ -2966,7 +3121,7 @@ class TestRoutedAprioriJoinPrune:
             (1, (), 10, 100, 65_536),  # int drop_conflicts
             (False, [5], 10, 100, 65_536),  # list conflict_masks
             (False, (0,), 10, 100, 65_536),  # zero pair-mask
-            (False, (2**64,), 10, 100, 65_536),  # beyond u64
+            (False, (2**128,), 10, 100, 65_536),  # beyond u128
             (False, (), -1, 100, 65_536),  # negative n_bars
             (False, (), 10, 0, 65_536),  # zero limit
             (False, (), 10, 100, 0),  # zero stride
@@ -3102,9 +3257,20 @@ class TestSliceFiveDriftPins:
         assert produced == sweep_ops_rust._RECOUNT_VERDICT_TOKENS
 
     def test_apriori_max_bit_mirrors_the_module_guard(self) -> None:
-        from brutex.engine.sweep_apriori import _U64_BITS
+        # THREE-WAY drift pin (DEC-APRIORI-U128-WIDEN-001): the Python oracle's
+        # ceiling, the seam's refuse-poison gate, and the Rust kernel's
+        # ``verify::MASK_BITS`` must move in ONE commit — a widened kernel with
+        # a stale Python guard would refuse tuples Rust can serve, and the
+        # reverse would hand the kernel an over-width bit.
+        from brutex.engine.sweep_apriori import _MASK_BITS
 
-        assert _U64_BITS == sweep_ops_rust._APRIORI_MAX_BIT
+        assert _MASK_BITS == sweep_ops_rust._APRIORI_MAX_BIT == 128
+
+        kernel = pytest.importorskip("brutex_sweep_ops")
+        # The kernel's own ceiling, read from its refusal message (the only
+        # surface it exposes) — proves the crate was rebuilt alongside Python.
+        with pytest.raises(ValueError, match=r"out of range \[0, 128\)"):
+            kernel.apriori_join_prune([[128]], False, [], 10, 100, 65_536)
 
     def test_conflict_pair_masks_mirror_the_canonical_pairs(self) -> None:
         from brutex.engine.sweep_apriori import _CONFLICT_PAIR_MASKS
@@ -3122,6 +3288,7 @@ class TestSliceFiveDriftPins:
 # ─────────────────────── slice 6: run-core/orchestrator ───────────────────────
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedRecordStride:
     @pytest.mark.parametrize(
         ("total", "expected"),
@@ -3176,6 +3343,7 @@ class TestRoutedRecordStride:
         assert routed_record_stride(100_000, python_law=forbidden_oracle) == 10
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedDiffcheckBudget:
     @pytest.mark.parametrize(
         ("k", "total", "expected"),
@@ -3237,6 +3405,7 @@ class TestRoutedDiffcheckBudget:
         assert routed_diffcheck_budget(200, 7, python_law=forbidden_oracle) == 28
 
 
+@pytest.mark.usefixtures("strict_off")
 class TestRoutedGridTupleCount:
     @pytest.mark.parametrize(
         ("axes", "expected"),
@@ -3346,3 +3515,363 @@ class TestConftestBelt:
 
     def test_conftest_literal_equals_the_env_constant(self) -> None:
         assert SWEEP_OPS_RUST_ENV == "BRUTEX_SWEEP_OPS_RUST"
+
+
+# ── strict-Rust refusal (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────
+#
+# DELIBERATELY NOT marked ``usefixtures("strict_off")`` — this class is the
+# teeth that prove the default-ON strict gate actually raises, so silencing it
+# with the degrade-class opt-in would make every other class above vacuous.
+
+
+class TestStrictRefusal:
+    """The wired choke points refuse under the default-ON strict gate."""
+
+    def test_crate_absent_refuses_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A class-A reason (Rust absent) is a REFUSAL, never a silent oracle."""
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, ModuleNotFoundError("brutex_sweep_ops"))
+        with pytest.raises(rust_strict.RustFallbackRefused):
+            _call_run_path()
+
+    def test_burn_in_mismatch_refuses_at_the_disable_choke_point(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A class-B reason (crate answered wrongly) refuses via ``_disable``."""
+        _enable(monkeypatch)
+        crate = _good_crate()
+        crate.grid_tuple_count = lambda axes: 999_999
+        _install_crate(monkeypatch, crate)
+        with pytest.raises(rust_strict.RustFallbackRefused):
+            routed_grid_tuple_count((2, 3), python_law=lambda: 6)
+
+    def test_held_out_input_gate_still_serves_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A class-C reason (input outside the envelope) degrades, never raises.
+
+        The Door-6 residue: ``SweepGridConfig`` admits a non-exact-``float``
+        ceiling, which the oracle renders differently from an f64 round-trip,
+        so the gate MUST keep serving Python even under strict mode.
+        """
+        _enable(monkeypatch)
+        calls = _install_import_bomb(monkeypatch)
+        oracle = {"max_sl_hit_rate": 1}
+        assert (
+            routed_gate_fragment(
+                None,
+                False,
+                (0, 0, 0),
+                max_sl_hit_rate=1,  # exact int — outside the crate's envelope
+                cvar_values=None,
+                python_law=lambda: oracle,
+            )
+            is oracle
+        )
+        assert calls == []
+
+    def test_held_out_overflow_error_still_serves_the_bigint_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``grid_tuple_count_error`` is held out — an astronomical grid is
+        oracle territory (``routed_grid_tuple_count``'s own docstring), so the
+        crate's declared ``ValueError`` must degrade, never crash the sweep."""
+        _enable(monkeypatch)
+        crate = _good_crate()
+
+        def _overflow(axes: object) -> int:
+            raise ValueError("axis product exceeds u64")
+
+        crate.grid_tuple_count = _overflow
+        _install_crate(monkeypatch, crate)
+        axes = (2**63, 4)
+        assert routed_grid_tuple_count(axes, python_law=lambda: 2**65) == 2**65
+
+    def test_held_out_set_is_the_input_gates_union_the_two_named_errors(self) -> None:
+        """Drift pin: the exemption set is EXACTLY the ``*_input_refused``
+        literals present in the facade UNION the TWO named ``*_error``
+        reasons, so a new gate is added consciously, never inherited.
+
+        The set shrank five → two when the ``i64`` argument band gates landed
+        (``DEC-SWEEP-OPS-INT-BAND-GATES-001``): every law whose overflow was a
+        PyO3 ARGUMENT-extraction ``OverflowError`` now decides the out-of-band
+        value at its own gate, so only the two crate-INTERNAL overflows (an
+        axis PRODUCT past u64; a PARSED quarantine ordinal past u64) remain
+        un-bindable Python-side.
+        """
+        source = Path(sweep_ops_rust.__file__).read_text(encoding="utf-8")
+        emitted = set(re.findall(r'_warn_once\(\s*"([a-z0-9_]+_input_refused)"', source))
+        named_errors = {
+            "grid_tuple_count_error",
+            "quarantine_ordinal_error",
+        }
+        assert emitted, "the input-gate scan must not be vacuous"
+        assert emitted | named_errors == sweep_ops_rust._STRICT_HELD_OUT_REASONS
+
+
+# ── the i64 argument-band split (DEC-SWEEP-OPS-INT-BAND-GATES-001) ──────────
+#
+# Each law below used to emit ONE overloaded ``<law>_error`` for BOTH a crate
+# fault (class A/B) and an out-of-``i64`` argument (class C: PyO3 raises
+# ``OverflowError`` at extraction, before a line of Rust runs). The band gate
+# splits them, so this class pins BOTH halves per law:
+#
+#   * the class-C half — an out-of-band ``int`` emits ``*_input_refused`` and
+#     serves the oracle EVEN UNDER STRICT MODE (the crate is never imported);
+#   * the class-A/B half — a crate fault now emits ``*_error`` and REFUSES
+#     under strict mode, while still degrading with the kill switch set.
+#
+# Every test opens its OWN nested ``pytest.MonkeyPatch.context()`` for the
+# strict env — NEVER a module/class-level autouse fixture, which leaks the var
+# across modules (the real cross-module leak seen in ``test_rust_stats.py``).
+
+_OVER_I64 = 2**63  # one past ``i64::MAX`` — PyO3 cannot extract it
+
+
+def _fault_crate(attr: str) -> SimpleNamespace:
+    """A good crate whose *attr* law raises the crate's declared ``ValueError``."""
+    crate = _good_crate()
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("crate fault")
+
+    setattr(crate, attr, _boom)
+    return crate
+
+
+class TestI64BandSplit:
+    """Out-of-band ``int`` → class C (degrade); crate fault → class A/B (refuse)."""
+
+    #: ``(law_callable_name, kwargs_builder, crate_attr, reason_stem)`` per law.
+    #: The builder returns ``(args, kwargs)`` for an OTHERWISE-VALID call whose
+    #: single named argument is swapped for the out-of-band value.
+    def _sla(self, count: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return (count, 1.0, 100.0, False), {"python_law": lambda: (1.0, "ok")}
+
+    def _rank(self, masks: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return (masks, 1024, "auto", True, True), {"python_law": lambda: (0, "batch")}
+
+    def _chain_verify(self, seq: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return (
+            (seq, "p", seq, "p", "t", "a", "act", "s", "{}", "h"),
+            {"python_law": lambda: ("ok", "", "")},
+        )
+
+    def _chain_link(self, idx: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return ("pull", idx, None, False, None, None, None, None), {
+            "python_law": lambda: ("pending", "")
+        }
+
+    def _counts(self, total: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return (total, total, 0, 0, 0, 0, None, False), {"python_law": lambda: ""}
+
+    def _cp_record(self, idx: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return (idx, 0, 10), {"python_law": lambda: "advance"}
+
+    def _cp_adopt(self, total: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return ("sid", total, "sid", 10), {"python_law": lambda: "adopt"}
+
+    def _resume(self, idx: int) -> tuple[tuple[object, ...], dict[str, object]]:
+        return (True, True, idx, 10), {"python_law": lambda: ("resume", 0)}
+
+    @property
+    def _cases(self) -> tuple[tuple[str, Any, Any, str], ...]:
+        return (
+            ("sla_decision", routed_sla_decision, self._sla, "sla_decision"),
+            ("rank_plan_decision", routed_rank_plan, self._rank, "rank_plan"),
+            (
+                "chain_verify_step",
+                routed_chain_verify_step,
+                self._chain_verify,
+                "chain_verify_step",
+            ),
+            (
+                "chain_link_state",
+                routed_chain_link_state,
+                self._chain_link,
+                "chain_link_state",
+            ),
+            (
+                "count_reconciliation",
+                routed_count_violations,
+                self._counts,
+                "count_violations",
+            ),
+            (
+                "checkpoint_record_decision",
+                routed_checkpoint_record_decision,
+                self._cp_record,
+                "checkpoint_record",
+            ),
+            (
+                "checkpoint_adoption_verdict",
+                routed_checkpoint_adoption_verdict,
+                self._cp_adopt,
+                "checkpoint_adoption",
+            ),
+            ("resume_decision", routed_resume_decision, self._resume, "resume_decision"),
+        )
+
+    def test_out_of_band_int_degrades_under_strict_and_never_imports(self) -> None:
+        """CLASS C: an out-of-``i64`` argument serves the oracle, strict-ON.
+
+        The band gate decides BEFORE the crate resolve, so the import bomb
+        proves Rust is never even reached — the token is ``*_input_refused``,
+        which the held-out set exempts by design.
+        """
+        for crate_attr, law, build, stem in self._cases:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+                assert rust_strict.strict_mode() is True
+                _enable(mp)
+                reset_sweep_ops_rust_for_tests()
+                calls = _install_import_bomb(mp)
+                args, kwargs = build(_OVER_I64)
+                with capture_logs() as logs:
+                    law(*args, **kwargs)
+                assert calls == [], f"{crate_attr}: crate imported on the gate path"
+                reasons = {entry.get("reason") for entry in logs}
+                assert f"{stem}_input_refused" in reasons, f"{crate_attr}: {reasons}"
+
+    def test_crate_fault_refuses_under_strict(self) -> None:
+        """CLASS A/B: the now-unambiguous ``<law>_error`` refuses, strict-ON."""
+        for crate_attr, law, build, _stem in self._cases:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+                _enable(mp)
+                reset_sweep_ops_rust_for_tests()
+                _install_crate(mp, _fault_crate(crate_attr))
+                args, kwargs = build(1)
+                with pytest.raises(rust_strict.RustFallbackRefused, match=crate_attr[:6]):
+                    law(*args, **kwargs)
+
+    def test_crate_fault_degrades_with_the_kill_switch(self) -> None:
+        """The one kill switch restores the warn-and-degrade arm for the same fault."""
+        for crate_attr, law, build, stem in self._cases:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+                _enable(mp)
+                reset_sweep_ops_rust_for_tests()
+                _install_crate(mp, _fault_crate(crate_attr))
+                args, kwargs = build(1)
+                with capture_logs() as logs:
+                    law(*args, **kwargs)  # the oracle serves — no raise
+                reasons = {entry.get("reason") for entry in logs}
+                assert f"{stem}_error" in reasons, f"{crate_attr}: {reasons}"
+
+
+class TestGateFragmentBandSplit:
+    """The two ``gate_fragment`` ``i64`` legs (cvar / stage3) split the same way."""
+
+    def test_out_of_band_cvar_leg_degrades_under_strict(self) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            _enable(mp)
+            reset_sweep_ops_rust_for_tests()
+            calls = _install_import_bomb(mp)
+            oracle: dict[str, object] = {"cvar": []}
+            with capture_logs() as logs:
+                got = routed_gate_fragment(
+                    None,
+                    False,
+                    (0, 0, 0),
+                    max_sl_hit_rate=None,
+                    cvar_values=(_OVER_I64, 1),
+                    python_law=lambda: oracle,
+                )
+            assert got is oracle
+            assert calls == []
+            assert "gate_fragment_input_refused" in {e.get("reason") for e in logs}
+
+    def test_out_of_band_stage3_leg_degrades_under_strict(self) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            _enable(mp)
+            reset_sweep_ops_rust_for_tests()
+            calls = _install_import_bomb(mp)
+            oracle: dict[str, object] = {"stage3": []}
+            with capture_logs() as logs:
+                got = routed_gate_fragment(
+                    None,
+                    True,
+                    (_OVER_I64, 0, 0),
+                    max_sl_hit_rate=None,
+                    cvar_values=None,
+                    python_law=lambda: oracle,
+                )
+            assert got is oracle
+            assert calls == []
+            assert "gate_fragment_input_refused" in {e.get("reason") for e in logs}
+
+    def test_crate_fault_refuses_under_strict(self) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            _enable(mp)
+            reset_sweep_ops_rust_for_tests()
+            _install_crate(mp, _fault_crate("gate_config_fragment"))
+            with pytest.raises(rust_strict.RustFallbackRefused):
+                routed_gate_fragment(
+                    None,
+                    False,
+                    (0, 0, 0),
+                    max_sl_hit_rate=None,
+                    cvar_values=None,
+                    python_law=dict,
+                )
+
+
+class TestCountViolationsIssuedSumBand:
+    """``evaluated + in_flight`` is the crate's ONE checked arithmetic.
+
+    ``audit_chain.rs:273-275`` returns ``Err`` when that sum leaves ``i64``,
+    which would surface indistinguishably from a real crate fault — so the
+    facade pre-decides it as ``count_violations_input_refused``.
+    """
+
+    def test_in_band_operands_whose_sum_overflows_degrade_under_strict(self) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            _enable(mp)
+            reset_sweep_ops_rust_for_tests()
+            calls = _install_import_bomb(mp)
+            big = 2**62
+            with capture_logs() as logs:
+                got = routed_count_violations(
+                    big,
+                    big,
+                    big,  # evaluated
+                    0,
+                    0,
+                    big,  # in_flight — the sum is 2**63, one past i64::MAX
+                    None,
+                    False,
+                    python_law=lambda: "oracle",
+                )
+            assert got == "oracle"
+            assert calls == []
+            reasons = {entry.get("reason") for entry in logs}
+            assert "count_violations_input_refused" in reasons
+
+
+class TestHeldOutCrateInternalOverflow:
+    """The TWO surviving class-C ``*_error`` tokens still degrade, strict-ON.
+
+    Both overflow on a value DERIVED INSIDE Rust (an axis PRODUCT past u64;
+    a PARSED quarantine ordinal past u64), so no Python-side input gate can
+    pre-decide them — widening the crate's return type is the honest fix,
+    never refusing a legitimate sweep.
+    """
+
+    def test_quarantine_ordinal_error_still_serves_the_bigint_oracle(self) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            _enable(mp)
+            reset_sweep_ops_rust_for_tests()
+            _install_crate(mp, _fault_crate("quarantine_next_ordinal"))
+            got = routed_quarantine_next_ordinal(
+                ("q-" + str(2**64),), "q-", "", python_law=lambda: 2**64 + 1
+            )
+            assert got == 2**64 + 1

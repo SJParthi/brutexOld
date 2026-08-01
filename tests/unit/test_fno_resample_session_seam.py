@@ -28,6 +28,28 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Degrade-lattice suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so a
+    crate that is absent / stale / errored / burn-in-poisoned now RAISES
+    ``RustFallbackRefused`` at the facade choke point instead of quietly
+    serving the Python oracle.  The tests below exist precisely to exercise
+    that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned in each facade's own
+    ``TestStrictRefusal`` class.
+
+    Uses the SAME shared ``monkeypatch`` object as the sibling autouse
+    fixtures (never its own ``MonkeyPatch.context()``): one object means one
+    LIFO undo stack, so the value cannot leak past this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _fresh_process_view() -> Iterator[None]:
     lrs.reset_lake_rust_resample_for_tests()
     yield

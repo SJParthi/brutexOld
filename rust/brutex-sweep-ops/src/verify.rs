@@ -92,11 +92,22 @@ pub fn recount_verdict(
     "cell_inconclusive"
 }
 
-/// Pack an ascending bit-position tuple into its u64 mask (`_mask_of`).
-fn mask_of(positions: &[u8]) -> u64 {
-    let mut mask = 0u64;
+/// The Apriori frontier mask width — the maximum (exclusive) condition-bit
+/// index the join accepts. Mirrors `sweep_apriori._MASK_BITS`; drift-pinned
+/// by `tests/unit/test_engine_sweep_ops_rust.py`.
+pub const MASK_BITS: u8 = 128;
+
+/// Pack an ascending bit-position tuple into its u128 mask (`_mask_of`).
+///
+/// u128 since DEC-APRIORI-U128-WIDEN-001: the 74-bit vocabulary
+/// (`IMPLEMENTED_MASK.bit_length() == 74`) does not fit a single u64 limb,
+/// so the u64 frontier refused EVERY tuple carrying a `>= 64` bit and the
+/// extinction ladder silently fell back to `k=1,2`. Below 64 bits the
+/// packing is bit-identical to the u64 original.
+fn mask_of(positions: &[u8]) -> u128 {
+    let mut mask = 0u128;
     for &p in positions {
-        mask |= 1u64 << p;
+        mask |= 1u128 << p;
     }
     mask
 }
@@ -104,9 +115,9 @@ fn mask_of(positions: &[u8]) -> u64 {
 /// `sweep_apriori._join_and_prune`'s level fold with the strided budget trip.
 ///
 /// *frontier* is the frequent `(j-1)`-frontier as LEX-SORTED ascending
-/// bit-position tuples (every bit `< 64` — `Err` otherwise, defensive: the
-/// facade gates, and `generate_apriori_candidates` refuses `>= 64` bits
-/// before any join). Buckets the frontier by its shared `j-2` prefix
+/// bit-position tuples (every bit `< MASK_BITS` — `Err` otherwise,
+/// defensive: the facade gates, and `generate_apriori_candidates` refuses
+/// out-of-range bits before any join). Buckets the frontier by its shared `j-2` prefix
 /// (lex-sorted input ⇒ equal prefixes are CONTIGUOUS, so contiguous
 /// grouping reproduces Python's insertion-ordered dict buckets), joins
 /// every ordered pair within a bucket, keeps a candidate iff ALL its
@@ -125,7 +136,7 @@ fn mask_of(positions: &[u8]) -> u64 {
 pub fn apriori_join_prune(
     frontier: &[Vec<u8>],
     drop_conflicts: bool,
-    conflict_masks: &[u64],
+    conflict_masks: &[u128],
     n_bars: u64,
     limit: u64,
     stride: u64,
@@ -138,12 +149,12 @@ pub fn apriori_join_prune(
             return Err("frontier tuples must be non-empty".to_string());
         }
         for &bit in tuple {
-            if bit >= 64 {
-                return Err(format!("frontier bit {bit} out of range [0, 64)"));
+            if bit >= MASK_BITS {
+                return Err(format!("frontier bit {bit} out of range [0, {MASK_BITS})"));
             }
         }
     }
-    let frontier_masks: BTreeSet<u64> = frontier.iter().map(|t| mask_of(t)).collect();
+    let frontier_masks: BTreeSet<u128> = frontier.iter().map(|t| mask_of(t)).collect();
 
     // Contiguous prefix grouping over the lex-sorted frontier — Python's
     // insertion-ordered `buckets.setdefault(tpl[:-1], []).append(tpl[-1])`.
@@ -192,7 +203,7 @@ pub fn apriori_join_prune(
 }
 
 /// `has_conflict` over pre-packed conflict pair-masks (`mask & pm == pm`).
-fn has_conflict(mask: u64, conflict_masks: &[u64]) -> bool {
+fn has_conflict(mask: u128, conflict_masks: &[u128]) -> bool {
     for &pair_mask in conflict_masks {
         if mask & pair_mask == pair_mask {
             return true;
@@ -202,10 +213,10 @@ fn has_conflict(mask: u64, conflict_masks: &[u64]) -> bool {
 }
 
 /// `_all_subsets_frequent` — every `(len-1)`-subset mask is frequent.
-fn all_subsets_frequent(candidate: &[u8], frontier_masks: &BTreeSet<u64>) -> bool {
+fn all_subsets_frequent(candidate: &[u8], frontier_masks: &BTreeSet<u128>) -> bool {
     let full = mask_of(candidate);
     for &drop in candidate {
-        let subset = full & !(1u64 << drop);
+        let subset = full & !(1u128 << drop);
         if !frontier_masks.contains(&subset) {
             return false;
         }
@@ -307,7 +318,7 @@ mod tests {
     fn join_drop_conflicts_removes_pair_mask_carriers() {
         // Conflict pair (0, 2) → pair-mask 0b101; (0,1)/(1,2) survive.
         let frontier = tuples(&[&[0], &[1], &[2]]);
-        let conflict = [(1u64 << 0) | (1u64 << 2)];
+        let conflict = [(1u128 << 0) | (1u128 << 2)];
         let (cands, tripped) =
             apriori_join_prune(&frontier, true, &conflict, 10, 1_000_000, 65_536).unwrap();
         assert_eq!(tripped, None);
@@ -376,8 +387,57 @@ mod tests {
 
     #[test]
     fn join_defensive_errs() {
-        assert!(apriori_join_prune(&tuples(&[&[64]]), false, &[], 1, 1, 1).is_err());
+        // 128 (== MASK_BITS) is the first out-of-range bit since
+        // DEC-APRIORI-U128-WIDEN-001; 64..=127 are now LEGAL.
+        assert!(apriori_join_prune(&tuples(&[&[128]]), false, &[], 1, 1, 1).is_err());
         assert!(apriori_join_prune(&[], false, &[], 1, 1, 0).is_err());
         assert!(apriori_join_prune(&tuples(&[&[]]), false, &[], 1, 1, 1).is_err());
+    }
+
+    #[test]
+    fn join_accepts_the_74_bit_vocabulary() {
+        // The whole point: bits >= 64 used to be a hard Err, so the 74-bit
+        // vocabulary could never run Apriori at all. Bit 73 is the top
+        // implemented condition bit (IMPLEMENTED_MASK.bit_length() == 74).
+        let frontier = tuples(&[&[0], &[64], &[73]]);
+        let (cands, tripped) =
+            apriori_join_prune(&frontier, false, &[], 10, 1_000_000, 65_536).unwrap();
+        assert_eq!(tripped, None);
+        assert_eq!(cands, tuples(&[&[0, 64], &[0, 73], &[64, 73]]));
+    }
+
+    #[test]
+    fn join_below_64_is_bit_identical_to_the_u64_era() {
+        // Byte-parity floor: every pre-widening input must still produce the
+        // exact pre-widening output (the u64 domain is untouched).
+        let frontier = tuples(&[&[0, 1], &[0, 2], &[1, 2], &[0, 3]]);
+        let (cands, tripped) =
+            apriori_join_prune(&frontier, false, &[], 10, 1_000_000, 65_536).unwrap();
+        assert_eq!(tripped, None);
+        assert_eq!(cands, tuples(&[&[0, 1, 2]]));
+    }
+
+    #[test]
+    fn join_subset_prune_holds_across_the_64_bit_limb_boundary() {
+        // A candidate straddling the old u64 limb edge survives ONLY if all
+        // its (j-1)-subsets are frequent — the anti-monotone law must not
+        // break at bit 63/64.
+        let frontier = tuples(&[&[63, 64], &[63, 65], &[64, 65]]);
+        let (cands, _) = apriori_join_prune(&frontier, false, &[], 10, 1_000_000, 65_536).unwrap();
+        assert_eq!(cands, tuples(&[&[63, 64, 65]]));
+        // Drop one subset ⇒ the 3-candidate must be pruned away.
+        let thin = tuples(&[&[63, 64], &[63, 65]]);
+        let (none, _) = apriori_join_prune(&thin, false, &[], 10, 1_000_000, 65_536).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn join_conflict_masks_carry_high_bits() {
+        // Conflict pair-masks must survive the widening past bit 63.
+        let frontier = tuples(&[&[64], &[65], &[66]]);
+        let conflict = [(1u128 << 64) | (1u128 << 66)];
+        let (cands, _) =
+            apriori_join_prune(&frontier, true, &conflict, 10, 1_000_000, 65_536).unwrap();
+        assert_eq!(cands, tuples(&[&[64, 65], &[65, 66]]));
     }
 }

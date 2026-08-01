@@ -30,10 +30,12 @@ from typing import Any, Protocol
 # default path is byte-identical (including attribute-access order); the
 # verbatim Python law below is the live oracle. This law feeds RUN IDENTITY
 # (`grid_identity` / `tuple_cache_key` / `_tuple_digest`) — the facade's
-# burn-in + exact-type gates are the anti-drift teeth. A SET
-# `max_sl_hit_rate` (DEC-METRICS-KELLY-GROWTH-001 — the identity axis
-# post-dates the crate's fragment law) is refused to the oracle INSIDE the
-# facade (`gate_fragment_beyond_crate`; the train-b tier-2 seam remedy).
+# burn-in + exact-type gates are the anti-drift teeth. Since
+# DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001 the crate carries ALL FOUR legs
+# (overfit / max_sl_hit_rate / cvar / stage3), so neither the Door-6 ceiling
+# (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) nor the CVaR tail gate
+# (DEC-RANK-CVAR-TAIL-GATE-001) bounces the computation back to Python any
+# more — the facade's `gate_fragment_beyond_crate` refusal is RETIRED.
 from brutex.engine.sweep_ops_rust import routed_gate_fragment, sweep_ops_rust_enabled
 from brutex.ranking import CvarGateConfig, OverfitGateConfig
 
@@ -122,14 +124,6 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
     """
     if not sweep_ops_rust_enabled():
         return _gate_config_fragment_python(grid)
-    if grid.cvar_gate is not None:
-        # DEC-RANK-CVAR-TAIL-GATE-001 × DEC-RUST-SWEEP-OPS-001: the crate
-        # fragment law predates the cvar leg, so a SET gate is OUTSIDE its
-        # domain — post-burn-in the crate would serve a fragment silently
-        # DROPPING the ``cvar`` key (a run-identity-class divergence). The
-        # WHOLE computation routes to the Python oracle instead (the
-        # ``max_sl_hit_rate`` beyond-crate seam remedy, mirrored).
-        return _gate_config_fragment_python(grid)
     overfit = grid.overfit
     overfit_values = (
         None
@@ -141,11 +135,20 @@ def _gate_config_fragment(grid: _GateConfigInput) -> dict[str, Any] | None:
             overfit.default_excess_kurtosis,
         )
     )
+    cvar = grid.cvar_gate
+    # DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001: the cvar + max_sl_hit_rate
+    # legs now cross the FFI and are emitted IN RUST. Both used to bounce the
+    # WHOLE computation to the Python oracle — cvar SILENTLY here (an
+    # UNANNOUNCED fall-back the facade's warn-once choke point could never
+    # see), max_sl_hit_rate via the facade's ``gate_fragment_beyond_crate``.
+    # Widening the crate is what retires both arms.
+    cvar_values = None if cvar is None else (cvar.alpha_bps, cvar.threshold_paisa)
     return routed_gate_fragment(
         overfit_values,
         bool(grid.stage3_enable),
         (grid.stage3_top_k, grid.stage3_max_fevals, grid.stage3_max_restarts),
         max_sl_hit_rate=grid.max_sl_hit_rate,
+        cvar_values=cvar_values,
         python_law=lambda: _gate_config_fragment_python(grid),
     )
 

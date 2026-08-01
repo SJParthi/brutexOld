@@ -16,6 +16,7 @@ import types
 from typing import TYPE_CHECKING
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.nightly import nightly_rust
 from brutex.nightly.chain import (
     LinkOutcome,
@@ -226,6 +227,19 @@ class TestFlagOnParity:
 
 
 class TestFlagOnRefuseAndDegrade:
+    """The legacy warn-and-degrade arms, pinned under the kill switch.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON, so every arm below
+    would now raise instead of degrading. The degrade law is still exactly
+    what ``BRUTEX_RUST_STRICT=0`` restores, so it is pinned here with the
+    switch explicitly off; :class:`TestStrictRefusesTheSameArms` pins that
+    the SAME poisonings refuse when it is not.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
     def test_junk_breaker_index_degrades_to_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(
             monkeypatch,
@@ -277,3 +291,70 @@ class TestFlagOnRefuseAndDegrade:
             assert exit_code_for(_GREEN_RUN, ()) == 0
         assert nightly_rust.nightly_rust_disabled() is True
         assert any(entry["event"] == "nightly_rust.kernel_autoreverted" for entry in logs)
+
+
+class TestStrictRefusesTheSameArms:
+    """The SAME poisonings raise instead of degrading when strict is ON.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: with the kill switch unset (the shipped
+    default) a broken crate is a LOUD refusal, never a silent Python answer.
+    Every chain reason is a refusing class — ``first_breaker`` returns
+    ``Option`` and ``render_launchd_plist`` returns ``String`` (no ``Err``, so
+    an exception can only be a fault), and ``exit_code_for`` /
+    ``audit_reconcile_tripwire`` ``Err`` only on a length mismatch their own
+    crate doc-comments call *"a facade bug — refuse loudly"*. So NONE of the
+    four is in :data:`~brutex.nightly.nightly_rust._STRICT_UNRESOLVED_REASONS`
+    and each arm below refuses.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+
+    @staticmethod
+    def _assert_names_facade_and_switch(excinfo: pytest.ExceptionInfo[Exception]) -> None:
+        """The refusal must NAME the facade and the exact way to turn it off."""
+        text = str(excinfo.value)
+        assert "brutex.nightly.nightly_rust" in text
+        assert f"{RUST_STRICT_ENV}=0" in text
+
+    def test_junk_breaker_index_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_first_breaker_index=lambda statuses: 99),
+        )
+        with pytest.raises(RustFallbackRefused, match="first_breaker_error") as excinfo:
+            first_breaker(_FAILED_RUN)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_non_int_breaker_index_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_first_breaker_index=lambda statuses: "1"),
+        )
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            first_breaker(_FAILED_RUN)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_poisoned_exit_code_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch, build_fake_crate(nightly_exit_code=lambda *args: "6"))
+        with pytest.raises(RustFallbackRefused, match="exit_code_for_result_refused") as excinfo:
+            exit_code_for(_SWEEP_HINT_RUN, ())
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_junk_audit_detail_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_audit_reconcile_detail=lambda *args: 7),
+        )
+        with pytest.raises(RustFallbackRefused, match="audit_reconcile_tripwire_error") as excinfo:
+            audit_reconcile_tripwire(
+                nightly_id="n-4", events=_TORN_EVENTS, outcomes=_CLEAN_OUTCOMES
+            )
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_wrong_value_refuses_at_the_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(monkeypatch, build_fake_crate(nightly_exit_code=lambda *args: 5))
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch") as excinfo:
+            exit_code_for(_GREEN_RUN, ())
+        self._assert_names_facade_and_switch(excinfo)

@@ -744,11 +744,25 @@ class TestExecRustDispatch:
         documented loudness law). The seam now validates the wire and
         warn-onces ``exec_rust.kernel_fallback`` (``KernelWireFault``)
         BEFORE returning the fallback sentinel; the value is the
-        byte-identical OFF arm."""
+        byte-identical OFF arm.
+
+        LEGACY-ARM PIN (DEC-RUST-STRICT-NO-FALLBACK-001): a malformed kernel
+        wire is CLASS B — the crate ANSWERED, wrongly — so under the shipped
+        strict default the honest outcome is a refusal, not a Python-arm serve.
+        The loudness law this test pins (validate the wire, warn-once
+        ``exec_rust.kernel_fallback`` with ``KernelWireFault`` BEFORE the
+        fallback sentinel) is exactly what the refusal is built ON, so it stays
+        worth pinning; it is pinned here with the strict switch explicitly OFF,
+        and the strict-ON refusal for the SAME induced wire is pinned positively
+        by :class:`TestStrictRefusesTheMalformedWire`. The pin is scoped to THIS
+        test rather than the class so the sibling dispatch tests keep running
+        under the live strict default."""
         import fno_math
         from brutex import exec_rust
+        from brutex.config.rust_strict import RUST_STRICT_ENV
         from structlog.testing import capture_logs
 
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
         source = _Source()
         off = self._off(monkeypatch, source)
         exec_rust.reset_warn_memo_for_tests()
@@ -772,3 +786,63 @@ class TestExecRustDispatch:
         assert events[0]["site"] == "materialize_option_tail"
         assert events[0]["error_type"] == "KernelWireFault"
         exec_rust.reset_warn_memo_for_tests()
+
+
+class TestStrictRefusesTheMalformedWire:
+    """The strict-ON twin of the malformed-wire arm (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    A wrong-arity / wrong-element-type options wire is CLASS B — the crate was
+    reached and it ANSWERED, wrongly. Serving the Python tail there IS the
+    Python fall-back the strict switch forbids, so under the shipped default
+    (``BRUTEX_RUST_STRICT`` unset ⇒ ON) the seam must REFUSE instead, naming the
+    facade, the ``kernel:`` reason and the wire fault. This is the positive pin
+    for what :meth:`TestExecRustDispatch.test_malformed_kernel_wire_warns_and_serves_the_python_arm`
+    pins with the switch off, so no coverage is traded away by that pin.
+    """
+
+    @pytest.mark.parametrize(
+        "wire",
+        [list(range(16)), list("abcdefghijklmnopq")],
+        ids=["wrong-arity", "wrong-element-type"],
+    )
+    def test_strict_refuses_instead_of_serving_the_python_arm(
+        self, monkeypatch: pytest.MonkeyPatch, wire: list[object]
+    ) -> None:
+        import fno_math
+        from brutex import exec_rust
+        from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
+
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(
+            exec_options_materialize=lambda *_a: ("trade", wire),
+            **{
+                n: getattr(fno_math, n) for n in ("exec_option_charge_stack", "exec_apply_slippage")
+            },
+        )
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_Source())
+        message = str(excinfo.value)
+        assert "kernel:materialize_option_tail" in message
+        assert "KernelWireFault" in message
+        assert "BRUTEX_RUST_STRICT" in message
+        exec_rust.reset_warn_memo_for_tests()
+
+    def test_flag_off_is_unaffected_by_strict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Anti-vacuous: strict only bites where the Rust arm was ASKED to serve.
+
+        With ``BRUTEX_EXEC_RUST=0`` the kernel is never consulted, so there is
+        no fall-back to forbid and the Python tail is the INTENDED answer — the
+        refusal above is a property of the induced wire fault, not of the file.
+        """
+        from brutex import exec_rust
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        assert isinstance(
+            materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_Source()),
+            MaterializedTrade,
+        )

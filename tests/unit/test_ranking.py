@@ -1246,3 +1246,55 @@ class TestRustDispatchSeam:
         monkeypatch.setattr(rust_ranking, "rank_combos_via_rust", _boom)
         ranked = rank_combos([(0b1, _m())])
         assert [rc.mask for rc in ranked] == [0b1]
+
+
+class TestOverfitGateConfigNormalisation:
+    """Every knob is NORMALISED to an exact ``float`` — and it is DIGEST-NEUTRAL.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 × DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001
+    (MIGRATION.md #1715). ``routed_gate_fragment`` gates the four overfit legs
+    on ``type(v) is float``, so an ``int`` knob (``OverfitGateConfig(dsr_min=1,
+    weight=0)`` — how an operator naturally writes a whole number) announced
+    ``gate_fragment_input_refused`` and served the Python oracle.
+
+    Normalising here is safe on the RUN-IDENTITY rail because the Python
+    fragment law has ALWAYS emitted this leg through explicit ``float()``
+    calls (the DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 review-fix NIT), so the
+    minted digest was already the float-rendered one. The int/float digest
+    equality below is the load-bearing proof — not an assumption.
+    """
+
+    def test_int_knobs_are_normalised_to_float(self) -> None:
+        cfg = OverfitGateConfig(dsr_min=1, weight=0, default_skew=0, default_excess_kurtosis=0)
+        for name in ("dsr_min", "weight", "default_skew", "default_excess_kurtosis"):
+            assert type(getattr(cfg, name)) is float, name
+
+    def test_normalisation_runs_after_validation(self) -> None:
+        """Error messages still quote the CALLER's value, not a coerced one."""
+        with pytest.raises(ValueError, match=r"got 1\.5"):
+            OverfitGateConfig(dsr_min=1.5)
+
+    def test_int_knobs_reach_the_crate(self) -> None:
+        """An ``int``-knob config routes with ZERO fall-backs (crate engaged)."""
+        from brutex.engine.sweep_identity import _gate_config_fragment
+
+        from tests.fakes.sweep_ops_crate import routed_fallback_reasons
+        from tests.unit.test_engine_sweep_orchestrator import _grid
+
+        grid = _grid(overfit=OverfitGateConfig(dsr_min=1, weight=0))
+        fragment, reasons, engaged = routed_fallback_reasons(lambda: _gate_config_fragment(grid))
+        assert reasons == []
+        assert engaged == 1  # anti-vacuity: the crate genuinely ran
+        assert fragment == {"overfit": [1.0, 0.0, 0.0, 0.0]}
+
+    def test_int_knobs_mint_the_same_tuple_digest_as_their_float_twin(self) -> None:
+        """RUN-IDENTITY RAIL: normalisation moves NO minted digest."""
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        from tests.unit.test_engine_sweep_orchestrator import _grid, _tuple
+
+        as_int = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=1, weight=0)))
+        as_float = _tuple_digest(
+            _tuple(), _grid(overfit=OverfitGateConfig(dsr_min=1.0, weight=0.0))
+        )
+        assert as_int == as_float

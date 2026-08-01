@@ -83,6 +83,8 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
+
 # §11 COMMON — ONE flag vocabulary + ONE panic belt for the brutex-lake
 # facades. `env_flag_tristate` is the sibling's public helper;
 # `_panic_belt_errors` is a same-package private import (the underscore is
@@ -197,8 +199,42 @@ def reset_window_ledger_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> N
     _OBSERVABILITY_MEMO.clear()
 
 
+#: CLASS-C reasons EXEMPT from the strict-mode refusal
+#: (DEC-RUST-STRICT-NO-FALLBACK-001). Enumerated + reviewable here, never
+#: buried in an inline condition. Everything NOT listed refuses.
+#:
+#: * ``merge_key_nondate_refused`` — :func:`routed_window_merge_key`'s
+#:   EXACT-TYPE input gate. ``datetime`` IS a ``date`` subclass whose
+#:   ``isoformat()`` renders a DIFFERENT string, and the crate's FFI takes
+#:   plain ``(year, month, day)`` ints, so a ``WindowKey`` carrying a
+#:   ``datetime`` (or any other ``date`` subclass) start/end is an input the
+#:   crate never claimed — the Python oracle was ALWAYS the intended handler
+#:   for it, and the gate exists precisely so a subclass can never render a
+#:   silently WRONG merge key post-burn-in. Refusing here would crash a
+#:   legitimate caller over a value Python handles correctly; the honest fix
+#:   is to widen the crate/FFI to accept the subclass render until this arm
+#:   is unreachable, then delete the entry — not to refuse.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset({"merge_key_nondate_refused"})
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``window_ledger_rust.fallback`` WARN once per process per *reason*."""
+    """Log ``window_ledger_rust.fallback`` WARN once per process per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``
+    unless *reason* is in :data:`_STRICT_EXEMPT_REASONS`. The refused set is
+    CLASS A (``flag_unrecognised`` — the junk-flag arm; ``classify_error`` /
+    ``merge_key_error`` — the crate raised) and CLASS B
+    (``classify_result_refused`` / ``merge_key_result_refused`` —
+    refuse-poison rejected the crate's return type). Strict-OFF is
+    byte-identical to the prior behaviour.
+
+    STORED-BYTE SAFETY: neither routed law renders a persisted byte — the
+    ledger Parquet is written by ``window_ledger_store``'s own pyarrow/
+    parquet-rs render, which this facade never touches. A refusal removes a
+    ledger RECORD/merge-key computation, so no stored byte is rewritten.
+    """
+    if reason not in _STRICT_EXEMPT_REASONS:
+        refuse_if_strict("brutex.data.window_ledger_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -211,7 +247,17 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``window_ledger_rust.autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``window_ledger_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` / ``crate_stale`` /
+    ``crate_panic``) or CLASS B (``burn_in_mismatch_classify`` /
+    ``burn_in_mismatch_merge_key`` — the crate disagreed with the oracle);
+    none is class C, so none is exempt. The refusal fires BEFORE the latch
+    is written, so under strict mode the latch is never set and every
+    ``rust_window_ledger_disabled()`` early-return is structurally
+    unreachable. Strict-OFF is byte-identical to the prior behaviour.
     """
+    refuse_if_strict("brutex.data.window_ledger_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

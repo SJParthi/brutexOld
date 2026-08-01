@@ -47,14 +47,34 @@
 /// by a degenerate period.
 ///
 /// # Errors
-/// `Err(String)` if `period < 1`.
+/// `Err(String)` if `period < 1`, or if `period + 1` overflows `i64`
+/// (`DEC-FFI-MAGNITUDE-CEILING-001` — see the `checked_add` note below).
 pub fn ema_alpha(period: i64) -> Result<f64, String> {
     if period < 1 {
         return Err(format!("EMA period must be >= 1, got {period}"));
     }
     // Mirror Python `2.0 / (period + 1)` exactly: the `period + 1` is an integer
     // add, then an int→float division producing the same IEEE-754 double.
-    Ok(2.0 / (period + 1) as f64)
+    //
+    // The add is `checked_add`, NOT a bare `+`, because this crate's
+    // `[profile.release]` carries BOTH `overflow-checks = true` AND
+    // `panic = "abort"` (Cargo.toml). A bare `period + 1` at `i64::MAX` therefore
+    // does not wrap and does not unwind into pyo3's catch-and-convert wrapper --
+    // it ABORTS the CPython interpreter that called `trading_core.ema_alpha` /
+    // `.compute_ema`, so `except ValueError` cannot see it and the whole
+    // dashboard/CLI process dies (executed proof in the DEC entry). Routing the
+    // refusal through this function's EXISTING `Err(String)` channel turns that
+    // SIGABRT into the `ValueError` `python.rs::py_ema_alpha` already maps every
+    // error to.
+    //
+    // BIT-IDENTICAL for every period that does not overflow: same integer add,
+    // same int->float cast, same divide, same operand order -- so no currently
+    // valid EMA value moves and `indicator_version` (which folds this crate's
+    // VERSION string, unchanged) cannot re-key any run identity.
+    let denominator = period
+        .checked_add(1)
+        .ok_or_else(|| format!("EMA period too large: {period} + 1 overflows i64"))?;
+    Ok(2.0 / denominator as f64)
 }
 
 /// The SMA seed at bar `N-1`: `seed_sum / period` (mirrors `ema.py`'s

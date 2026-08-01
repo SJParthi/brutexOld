@@ -204,6 +204,30 @@ _MAX_SAFE_EMIN: Final[int] = -12
 #: Unicode digits — which Python ``Decimal()`` accepts — never match).
 _FIXED_POINT_RE: Final[re.Pattern[str]] = re.compile(r"-?\d+(\.\d+)?", re.ASCII)
 
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.models_rust"
+
+#: CLASS-C fall-back reasons — DELIBERATELY EMPTY
+#: (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note").
+#:
+#: This seam's CLASS-C paths — an input outside the crate's envelope, where
+#: Python was always the intended handler — are *structurally silent*: they
+#: never reach a choke point at all, so there is nothing to exempt. Both:
+#:
+#: * the ELIGIBILITY gate — :func:`_encode_tick_input` returns ``None`` for a
+#:   non-fixed-point / oversized / extreme-exponent / hostile-context input and
+#:   the dispatch returns ``python_law(raw)`` with NO warn and NO latch;
+#: * the LAW refusal — the crate answering "not a valid tick size" returns
+#:   ``adopted is None`` and the dispatch returns ``python_law(raw)`` so the
+#:   ONE canonical ``TickSizeFormatError`` message is minted Python-side.
+#:
+#: Every reason that DOES reach :func:`_warn_once` / :func:`_disable` is
+#: CLASS A (``flag_unrecognised``, ``crate_unavailable``, ``crate_stale``,
+#: ``crate_panic``, ``normalise_tick_size_error``) or CLASS B
+#: (``normalise_tick_size_result_refused``,
+#: ``burn_in_mismatch_normalise_tick_size``) — all refusable.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset()
+
 
 def models_rust_enabled() -> bool:
     """Resolve ``BRUTEX_CORE_RUST_MODELS`` (default ON, junk loud-OFF).
@@ -249,8 +273,30 @@ def reset_models_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a Python fall-back under strict mode unless *reason* is CLASS C.
+
+    Function-local import: this module is the ROOT-adjacent leaf
+    :mod:`brutex.models`' Rust seam, and :mod:`brutex.config.rust_strict`
+    imports ``brutex.models`` for :class:`~brutex.models.BruteXError` — a
+    module-scope import here would close that cycle (the
+    ``observability_rust`` precedent).
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    if reason in _STRICT_EXEMPT_REASONS:
+        return
+    refuse_if_strict(_STRICT_FACADE, reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``models_rust.fallback`` WARN once per process per *reason*."""
+    """Log ``models_rust.fallback`` WARN once per process per *reason*.
+
+    Choke point #1 of two. Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001)
+    refuses BEFORE the memo write, so an already-warned repeat cannot slip
+    through the early return.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -263,7 +309,13 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``models_rust.autoreverted`` at ERROR (the burn-in
     autorevert); guard latches log ``models_rust.rust_path_disabled`` at
     WARN. Repeats are no-ops.
+
+    Choke point #2 of two. Strict mode refuses BEFORE the latch write, which
+    makes the latched ``models_rust_disabled()`` early-return on the
+    :func:`normalise_tick_size` dispatch structurally unreachable — the
+    wiring is complete by construction, not by sampling.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

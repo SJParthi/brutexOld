@@ -41,7 +41,11 @@ Fail-closed layers, in order (every path returns the PYTHON value):
    ``ValueError`` on inputs it cannot mirror faithfully (non-ASCII
    ``--at`` text, out-of-``datetime``-range components, a non-finite
    duration) and the oracle then produces the genuine Python behavior —
-   the value OR the original Python exception;
+   the value OR the original Python exception. Those refusals are STAMPED
+   crate-side with :data:`_INPUT_REFUSED_MARKER`, so under strict mode
+   (DEC-RUST-STRICT-NO-FALLBACK-001) :func:`_degrade_reason` separates the
+   legitimate wide INPUT (keeps degrading) from a crate FAULT (refuses) on
+   evidence the crate itself supplied — never on message prose;
 5. the refuse-poison gate — a wrong-shaped crate return (non-int exit
    code, non-str plist, a malformed summary tuple) is never consumed.
 
@@ -65,6 +69,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import env_flag_tristate
 
 if TYPE_CHECKING:
@@ -181,8 +186,123 @@ def reset_nightly_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+#: The crate's input-envelope refusal MARKER — the stable fragment
+#: ``rust/brutex-ops/src/nightly.rs::INPUT_REFUSED_MARKER`` stamps on every
+#: refusal that is an out-of-envelope INPUT rather than a crate FAULT
+#: (DEC-RUST-STRICT-NO-FALLBACK-001; the ``brutex/strategies/combo_rust.py``
+#: doctrine, same literal, one lane over). Its PRESENCE is what separates
+#: CLASS C (keep degrading, even under strict mode) from CLASS A/B (refuse)
+#: inside the shared :data:`_DEGRADE_ERRORS` classes — the classification
+#: reads evidence the crate itself minted at its own raise site, never a
+#: natural-language sniff of an arbitrary message. A crate FAULT (a stale
+#: wheel's arity mismatch, a mapped panic, broken internals) is deliberately
+#: left UNMARKED. Cross-language drift is pinned crate-side by
+#: ``input_refused_marker_literal_is_the_facade_contract`` and Python-side by
+#: the unit suite.
+_INPUT_REFUSED_MARKER: Final[str] = "input outside the crate envelope"
+
+#: DEC-RUST-STRICT-NO-FALLBACK-001 — the ruled CLASS-C exemption: reasons
+#: strict mode must NOT refuse because the CRATE ITSELF declined a legitimate
+#: INPUT that sits outside its faithful-mirror envelope and handed the call
+#: back so the Python oracle — always the intended handler for these — could
+#: decide. Refusing one would crash a legitimate call.
+#:
+#: Every member is minted ONLY when the crate's message carries
+#: :data:`_INPUT_REFUSED_MARKER` (see :func:`_degrade_reason`), and each
+#: names ONE law's out-of-envelope population (crate evidence in
+#: ``rust/brutex-ops/src/nightly.rs``, whose four marked cores each carry an
+#: ENVELOPE-ERR INVARIANT note stating that EVERY ``Err`` they return is an
+#: input refusal — a future fault arm must not reuse it):
+#:
+#: * ``summary_lines_input_refused`` — a non-finite or
+#:   ``>= MAX_EXACT_DURATION`` (2**53) elapsed-seconds duration, outside the
+#:   f64 exactly-representable-integer domain the mirror needs.
+#: * ``parse_at_input_refused`` — non-ASCII ``--at`` text (CPython's
+#:   un-flagged ``\\d`` matches Unicode decimal digits and the hand-rolled
+#:   ASCII matcher refuses to re-derive that), or a ``str`` the FFI cannot
+#:   extract (a surrogateescape'd non-UTF-8 argv byte).
+#: * ``pmset_wake_command_input_refused`` — ``checked_mul``/``add``/``sub``
+#:   overflow, or an out-of-``i64`` ``int`` argument.
+#: * ``seconds_since_scheduled_fire_input_refused`` — a datetime component
+#:   outside its documented range, or an out-of-``i64`` ``int`` argument.
+#:
+#: Enumerated EXPLICITLY (not a ``_input_refused`` suffix rule) so the
+#: exemption is fail-closed: a marked message surfacing under any OTHER
+#: kernel name still refuses.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "summary_lines_input_refused",
+        "parse_at_input_refused",
+        "pmset_wake_command_input_refused",
+        "seconds_since_scheduled_fire_input_refused",
+    }
+)
+
+#: EMPTY — nothing is held out of the taxonomy any more.
+#:
+#: ``{summary_lines,parse_at,pmset_wake_command,seconds_since_scheduled_fire}
+#: _error`` used to live here because each bundled a genuine "Rust broke"
+#: fault together with the crate's refuse-to-guess arm, indistinguishable at
+#: the choke point (both arrive as the same ``ValueError`` from pyo3's
+#: ``Err(String)`` mapping). That is resolved: the crate now MARKS every
+#: input-envelope refusal it raises (:data:`_INPUT_REFUSED_MARKER`), those
+#: cases route to the ``*_input_refused`` members of
+#: :data:`_STRICT_EXEMPT_REASONS` above, and the four original tokens retain
+#: exactly the UNMARKED remainder — a stale wheel's arity/type mismatch, a
+#: mapped panic, broken internals — which is CLASS A/B and DOES refuse.
+#:
+#: The other four kernels never needed a split: ``first_breaker`` (impl
+#: returns ``Option``, no ``Err``) and ``render_launchd_plist`` (impl returns
+#: ``String``, no ``Err``) can only fault; ``exit_code_for`` and
+#: ``audit_reconcile_tripwire`` ``Err`` only on a length mismatch their own
+#: doc-comments call *"a facade bug — refuse loudly"*, so their FFI faces
+#: deliberately keep the UNMARKED mapping.
+#:
+#: The set is kept (empty) rather than deleted so a future "held pending a
+#: ruling" reason has a named, reviewable home instead of being quietly
+#: folded into the ruled exemption.
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset()
+
+#: The reasons strict mode does NOT refuse — the ruled CLASS-C exemption
+#: plus the (currently empty) unresolved-pending-ruling set, unioned at ONE
+#: point so the two provenances stay separately reviewable above.
+_STRICT_NOT_REFUSED: Final[frozenset[str]] = _STRICT_EXEMPT_REASONS | _STRICT_UNRESOLVED_REASONS
+
+
+def _degrade_reason(kernel: str, exc: BaseException) -> str:
+    """Classify a crate-call degrade as CLASS C (input) or CLASS A/B (fault).
+
+    Reads the marker the CRATE minted at its own raise site
+    (:data:`_INPUT_REFUSED_MARKER`) — never a guess from the exception
+    class, which is shared across both populations inside
+    :data:`_DEGRADE_ERRORS`:
+
+    * marked → ``{kernel}_input_refused``, the ruled CLASS-C exemption
+      (:data:`_STRICT_EXEMPT_REASONS`) — keeps degrading to the oracle even
+      under strict mode, because the oracle is the intended handler;
+    * UNMARKED → ``{kernel}_error``, the genuine-fault remainder, which
+      strict mode REFUSES.
+
+    Only the four cores whose ``Err`` is provably input-only are marked
+    crate-side, so an unmarked message from ANY kernel is a fault.
+    """
+    if _INPUT_REFUSED_MARKER in str(exc):
+        return f"{kernel}_input_refused"
+    return f"{kernel}_error"
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``nightly_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``nightly_rust.fallback`` warn-once.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. CLASS A (``flag_unrecognised``, every
+    ``{kernel}_error`` — now the UNMARKED fault remainder) and CLASS B
+    (every ``{kernel}_result_refused`` — the crate ran and its shape gate
+    rejected the output) refuse. Only :data:`_STRICT_NOT_REFUSED` — the
+    ruled CLASS-C ``*_input_refused`` exemption, unioned with the now-EMPTY
+    unresolved set — returns instead and keeps degrading to the oracle.
+    """
+    if reason not in _STRICT_NOT_REFUSED:
+        refuse_if_strict("brutex.nightly.nightly_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -190,12 +310,21 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
 
     ``error=True`` logs ``nightly_rust.kernel_autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``nightly_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: reasons here are CLASS A
+    (``crate_unavailable``, ``crate_panic``) or CLASS B (``burn_in_mismatch``
+    — the crate DISAGREED with the oracle), so the refusal is UNCONDITIONAL.
+    It fires BEFORE the latch write, so under strict mode the latch can never
+    be set and :func:`nightly_rust_disabled`'s early-return in
+    :func:`route_kernel` is structurally unreachable — wiring these two
+    functions therefore covers every announced fall-back this facade takes.
     """
+    refuse_if_strict("brutex.nightly.nightly_rust", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
@@ -297,7 +426,11 @@ def route_kernel[T](
     try:
         value = crate_call(crate)
     except _DEGRADE_ERRORS as exc:
-        _warn_once(f"{kernel}_error", error_detail=repr(exc))
+        # ONE classification point: the crate MARKS its out-of-envelope input
+        # refusals, so a legitimate wide input keeps degrading to the oracle
+        # (CLASS C) while an UNMARKED fault refuses under strict mode
+        # (CLASS A/B) — DEC-RUST-STRICT-NO-FALLBACK-001, :func:`_degrade_reason`.
+        _warn_once(_degrade_reason(kernel, exc), error_detail=repr(exc))
         return python_call()
     except (KeyboardInterrupt, SystemExit, MemoryError):
         # The escape set (the errors.py doctrine): operator interrupt /

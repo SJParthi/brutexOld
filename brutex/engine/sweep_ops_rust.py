@@ -24,14 +24,13 @@ byte-identical including attribute-access order):
    precedent); EXACT-type gates (``float``/``int``, ``bool`` excluded)
    refuse anything lossy to the oracle. This law feeds RUN IDENTITY
    (``grid_identity`` / ``tuple_cache_key`` / ``_tuple_digest``) — the
-   burn-in + the exact-type gates are the anti-drift teeth. ELIGIBILITY
-   GATE (the train-b tier-2 seam remedy): a SET ``max_sl_hit_rate`` (the
-   DEC-METRICS-KELLY-GROWTH-001 identity axis, which post-dates the
-   crate's fragment law) is OUTSIDE the oracle-equivalent FFI domain —
-   the crate would silently DROP the key post-burn-in — so the WHOLE
-   computation routes to the Python oracle
-   (``gate_fragment_beyond_crate`` warn-once); teaching the crate the
-   knob is the NAMED follow-up "crate-max-sl-hit-rate parity".
+   burn-in + the exact-type gates are the anti-drift teeth. The crate
+   carries ALL FOUR legs (overfit / ``max_sl_hit_rate`` / ``cvar`` /
+   stage3) since DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001, which
+   RETIRED the old ``gate_fragment_beyond_crate`` eligibility gate: the
+   Door-6 ceiling (DEC-METRICS-LOSSRATE-FIRSTCLASS-001) and the CVaR
+   tail gate (DEC-RANK-CVAR-TAIL-GATE-001) used to bounce the WHOLE
+   computation back to the oracle; both are now computed in Rust.
 3. **Scaled stall-timeout law** (:func:`routed_stall_timeout`) —
    ``brutex/engine/sweep_stall_policy.py``'s raise-only scaled tail. The
    fail-loud env parses + ``StallPolicy`` construction stay Python.
@@ -280,8 +279,10 @@ implementation, the ``flight_recorder`` precedent).
   and latches ``crate_stale``. Both serve the oracle with one loud WARN.
 * **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
   FFI error surface), ``TypeError``/``OverflowError`` (PyO3 argument
-  conversion — an out-of-``i64`` stage-3 knob lands here),
-  ``AttributeError`` (broken-crate-internals belt). ``MemoryError`` is
+  conversion; since :data:`_I64_MIN`/:data:`_I64_MAX` every ``i64``-typed
+  argument is band-gated BEFORE the call, so this arm is now a belt, not a
+  routine path), ``AttributeError`` (broken-crate-internals belt).
+  ``MemoryError`` is
   DELIBERATELY absent — OOM re-raises raw, identical to the pure-Python
   path; ``KeyboardInterrupt``/``SystemExit`` propagate raw.
 * **Refuse-poison gates** — exact-type INPUT gates (a ``Path``/``bool``/
@@ -345,6 +346,7 @@ import structlog
 # §11 COMMON — ONE flag vocabulary (the engine's home) + ONE panic belt (the
 # brutex-lake facades' guardedly-resolved PanicException fold; underscore =
 # module-privacy toward OUTSIDE consumers, the window_ledger_rust precedent).
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import _panic_belt_errors
 from brutex.engine.sweep_lookahead import env_flag_tristate
 
@@ -491,6 +493,7 @@ _CRATE_API: Final[tuple[str, ...]] = (
 #: FFI shapes — refuse-poison gates below).
 _OVERFIT_LEG_ARITY: Final[int] = 4
 _STAGE3_LEG_ARITY: Final[int] = 3
+_CVAR_LEG_ARITY: Final[int] = 2
 _STALL_PAIR_ARITY: Final[int] = 2
 
 #: Structural shapes of the slice-1b crate results (refuse-poison gates).
@@ -614,11 +617,36 @@ _RECOUNT_VERDICT_TOKENS: Final[frozenset[str]] = frozenset(
         "cell_inconclusive",
     }
 )
-#: The Apriori frontier bit ceiling (`sweep_apriori._U64_BITS` — drift-pinned
-#: by the facade suite; the generator refuses ``>= 64`` bits before any join).
-_APRIORI_MAX_BIT: Final[int] = 64
-#: The u64 exclusive ceiling for conflict pair-masks crossing the FFI.
+#: The Apriori frontier bit ceiling (`sweep_apriori._MASK_BITS` — drift-pinned
+#: by the facade suite; the generator refuses ``>= 128`` bits before any join).
+#: 128 since DEC-APRIORI-U128-WIDEN-001 — the 74-bit vocabulary does not fit
+#: one u64 limb, so the old 64 ceiling refused every real production tuple.
+_APRIORI_MAX_BIT: Final[int] = 128
+#: The exclusive ceiling for a CONFLICT PAIR-MASK crossing the FFI. The kernel
+#: types this argument ``Vec<u128>`` (DEC-APRIORI-U128-WIDEN-001), so the gate
+#: is 2**128 — DELIBERATELY WIDER than :data:`_U64_CEILING` below.
+_APRIORI_MASK_CEILING: Final[int] = 2**128
+#: The exclusive ceiling for every argument the kernel types ``u64``: the
+#: Apriori ``n_bars``/``limit``/``stride`` scalars and the grid-tuple-count
+#: axes. MUST STAY 2**64 — widening it hands the crate a value that overflows
+#: its own parameter type. Kept separate from
+#: :data:`_APRIORI_MASK_CEILING` precisely so a mask widening can never
+#: silently widen these too.
 _U64_CEILING: Final[int] = 2**64
+
+#: The INCLUSIVE band every argument the crate types ``i64`` accepts
+#: (DEC-SWEEP-OPS-INT-BAND-GATES-001 — the named follow-up this change
+#: closes). A Python ``int`` outside it cannot reach the crate AT ALL:
+#: PyO3's argument conversion raises ``OverflowError`` (the module
+#: docstring's degrade-set clause — "an out-of-``i64`` stage-3 knob lands
+#: here") before a single line of Rust runs. That is an INPUT-envelope
+#: verdict, never a Rust fault — so the ten laws whose gates used to admit
+#: an unbounded ``int`` now decide it HERE, as ``*_input_refused``, and
+#: their ``*_error`` reason means exactly one thing again: the crate ran
+#: and misbehaved. Routed-domain NO-OP by construction — every value the
+#: crate could ever have served is inside the band.
+_I64_MIN: Final[int] = -(2**63)
+_I64_MAX: Final[int] = 2**63 - 1
 
 #: Once-per-process-per-reason log memo.
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
@@ -635,6 +663,19 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
     OverflowError,
     AttributeError,
 )
+
+
+def _i64_refused(value: object) -> bool:
+    """``True`` when *value* may NOT cross the FFI as a crate ``i64``.
+
+    The exact-``int`` gate (``bool`` IS an ``int`` subclass whose canonical
+    render differs — excluded) UNION the :data:`_I64_MIN`/:data:`_I64_MAX`
+    band. Replaces the bare ``type(v) is not int`` gates of the ten laws
+    whose crate parameter is ``i64``, so an out-of-band ``int`` is decided
+    as an INPUT verdict here instead of surfacing as an ambiguous
+    ``<law>_error`` from PyO3's conversion ``OverflowError``.
+    """
+    return type(value) is not int or not _I64_MIN <= value <= _I64_MAX
 
 
 def sweep_ops_rust_enabled() -> bool:
@@ -677,8 +718,138 @@ def reset_sweep_ops_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+#: Fall-back reasons DELIBERATELY exempt from the strict-Rust refusal
+#: (DEC-RUST-STRICT-NO-FALLBACK-001, the module's own "input outside the
+#: crate's envelope" class). The retained Python oracle was ALWAYS the
+#: intended handler for these, so refusing them would turn a legitimate
+#: input into a crash — which the strict-mode doctrine explicitly forbids.
+#: TWO families, both evidence-grounded (never a blanket exemption):
+#:
+#: 1. Every ``*_input_refused`` gate. The value the caller supplied is one
+#:    the crate's flat-typed FFI cannot carry without a lossy conversion —
+#:    an ``int`` where the law renders a ``float``, a ``bool`` where it
+#:    renders an ``int``, a ``Path`` where it joins ``str``. They stay
+#:    warn-and-degrade until each law's envelope is widened.
+#:
+#: 2. The TWO ``*_error`` reasons whose law can still raise for an input
+#:    CPython's unbounded ints handle exactly, because the overflowing
+#:    quantity is DERIVED INSIDE the crate — no INPUT gate can bound it
+#:    without re-implementing the law Python-side (which would defeat the
+#:    conversion). A gate-passing value makes the crate raise its declared
+#:    ``ValueError`` on a LEGITIMATE input, so the retained oracle is the
+#:    intended handler and refusing would crash the sweep. Both, with the
+#:    crate line that proves the class:
+#:
+#:    * ``grid_tuple_count_error`` — the axes are individually u64-banded
+#:      but their PRODUCT is not bindable at the gate; the crate returns
+#:      ``Err`` at ``run_core.rs:65`` (``"axis product overflows u128"``)
+#:      and ``run_core.rs:66-67`` (``"axis product exceeds u64"``).
+#:      ``routed_grid_tuple_count``'s own docstring calls the degrade
+#:      intended ("a legitimately astronomical grid is oracle territory,
+#:      never a truncation"). Widening = a ``u128``/bigint return type on
+#:      the crate side, which is a ``python.rs`` signature change.
+#:    * ``quarantine_ordinal_error`` — the u64 ordinal is PARSED out of the
+#:      dirname strings, so no numeric gate exists to bound it; the crate
+#:      returns ``Err`` at ``artifacts.rs:113`` (a ``parse::<u64>()`` that
+#:      does not fit) and ``artifacts.rs:118-119``
+#:      (``checked_add(1)`` past ``u64::MAX``). Widening = a bigint ordinal
+#:      on the crate side, again a ``python.rs`` signature change.
+#:
+#:    HONEST IMPRECISION (named, not hidden): a ``*_error`` token is
+#:    AMBIGUOUS — it ALSO fires for a genuine crate fault on those two
+#:    laws, and holding the token out silences that fault under strict mode
+#:    too. Refusing them instead would crash a legitimate astronomical grid
+#:    (or a lake carrying a >u64 quarantine ordinal), which is strictly
+#:    worse. Retiring the ambiguity needs the crate to surface its
+#:    envelope-overflow as a DISTINCT error type from a genuine fault — a
+#:    ``rust/brutex-sweep-ops/src/python.rs`` change, which this pass is
+#:    coordination-blocked from making. That is the NAMED FOLLOW-UP
+#:    ``DEC-SWEEP-OPS-CRATE-OVERFLOW-TYPED-001``.
+#:
+#:    The sibling follow-up ``DEC-SWEEP-OPS-INT-BAND-GATES-001`` is CLOSED
+#:    by this pass: every law whose overflow was an ARGUMENT-extraction
+#:    ``OverflowError`` (``sla_decision``, ``rank_plan``,
+#:    ``preflight_missing``, ``chain_verify_step``, ``chain_link_state``,
+#:    ``count_violations`` — which bands even its checked
+#:    ``evaluated + in_flight`` sum — ``checkpoint_record``,
+#:    ``checkpoint_adoption``, ``resume_decision`` and the
+#:    ``gate_fragment`` cvar/stage3 legs) now decides the out-of-band value
+#:    at its OWN gate as ``*_input_refused``, so its ``*_error`` token
+#:    means exactly one thing again: the crate ran and misbehaved.
+#:
+#: Every OTHER reason REFUSES — Rust absent (``crate_unavailable``), stale
+#: (``crate_stale``), panicked (``crate_panic``), errored on a law whose
+#: gate DOES bound the domain, structurally wrong (``*_result_refused``),
+#: burn-in-divergent (``burn_in_mismatch_*``) or a junk flag
+#: (``flag_unrecognised``) — those all mean Rust could not or did not serve
+#: correctly, which is exactly what strict mode exists to surface.
+#:
+#: Drift teeth: ``tests/unit/test_engine_sweep_ops_rust.py`` pins this set
+#: EQUAL to the ``*_input_refused`` literals present in this module UNION
+#: the two named ``*_error`` reasons, so a new input gate must be added
+#: here consciously rather than inherited silently.
+_STRICT_HELD_OUT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        # ── family 2: the crate-INTERNAL overflow laws (see the note above)
+        # Reached by an axis PRODUCT past u64 (run_core.rs:65-67) and by a
+        # quarantine dirname whose PARSED ordinal is past u64
+        # (artifacts.rs:113 / :118-119). Both overflow on a value derived
+        # INSIDE Rust, so no Python-side input gate can pre-decide them —
+        # the honest fix is widening the crate's return type (a python.rs
+        # signature change), never refusing a legitimate sweep.
+        "grid_tuple_count_error",
+        "quarantine_ordinal_error",
+        # ── family 1: the input gates ──
+        "apriori_join_input_refused",
+        "audit_entry_hash_input_refused",
+        "chain_link_state_input_refused",
+        "chain_verify_step_input_refused",
+        "checkpoint_adoption_input_refused",
+        "checkpoint_record_input_refused",
+        "count_violations_input_refused",
+        "detach_probe_input_refused",
+        "diffcheck_budget_input_refused",
+        "exit_status_resolution_input_refused",
+        "freshness_stale_input_refused",
+        # The gate-fragment leg gates. The ``max_sl_hit_rate`` leg is the
+        # NAMED RESIDUE of DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001: that
+        # widening RETIRED ``gate_fragment_beyond_crate`` (which fired for
+        # EVERY set ceiling — every supported Door-6 sweep), but
+        # ``SweepGridConfig`` validates the ceiling as finite-and-in-(0,1]
+        # WITHOUT an exact-``float`` gate, so an ``int``/``Decimal`` ceiling
+        # still refuses here rather than splitting the run-identity digest.
+        "gate_fragment_input_refused",
+        "grid_tuple_count_input_refused",
+        "heal_mismatch_input_refused",
+        "liveness_tail_input_refused",
+        "preflight_missing_input_refused",
+        "progress_derived_input_refused",
+        "quarantine_next_ordinal_input_refused",
+        "rank_plan_input_refused",
+        "record_stride_input_refused",
+        "recount_verdict_input_refused",
+        "resume_decision_input_refused",
+        "run_path_input_refused",
+        "schedule_next_fire_input_refused",
+        "sla_decision_input_refused",
+        "stall_timeout_input_refused",
+        "stamp_verdict_input_refused",
+    }
+)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``sweep_ops_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``sweep_ops_rust.fallback`` warn-once.
+
+    One of this facade's TWO fall-back choke points (:func:`_disable` is the
+    other), so :func:`~brutex.config.rust_strict.refuse_if_strict` here plus
+    there is a complete block on the Python oracle for every reason NOT in
+    :data:`_STRICT_HELD_OUT_REASONS` (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    With strict mode OFF the historic behaviour is byte-identical.
+    """
+    if reason not in _STRICT_HELD_OUT_REASONS:
+        refuse_if_strict("brutex.engine.sweep_ops_rust", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -686,12 +857,24 @@ def _warn_once(reason: str, **context: object) -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
 
+    The facade's SECOND fall-back choke point (:func:`_warn_once` is the
+    other). Every reason reaching here means Rust is absent
+    (``crate_unavailable``), stale (``crate_stale``), panicked
+    (``crate_panic``) or answered wrongly (``burn_in_mismatch_*``) — never
+    "this input is outside the crate's envelope" — so under strict mode ALL
+    of them refuse (DEC-RUST-STRICT-NO-FALLBACK-001) and the latch below is
+    unreachable. Refusing BEFORE the latch keeps the refusal repeatable:
+    a latched-then-silent facade would serve Python for the rest of the
+    process off a single early degrade.
+
+    With strict mode OFF the historic behaviour is byte-identical:
     ``error=True`` logs ``sweep_ops_rust.autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``sweep_ops_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
     """
+    refuse_if_strict("brutex.engine.sweep_ops_rust", reason, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
@@ -827,44 +1010,59 @@ def routed_gate_fragment(
     stage3_knobs: tuple[int, int, int],
     *,
     max_sl_hit_rate: float | None = None,
+    cvar_values: tuple[int, int] | None = None,
     python_law: Callable[[], dict[str, Any] | None],
 ) -> dict[str, Any] | None:
     """The routed gate-config fragment law (feeds RUN IDENTITY — see docstring).
 
-    Exact-type input gates: every overfit value must be exact ``float`` and
-    every stage-3 knob exact ``int`` (``bool`` IS an ``int`` subclass whose
-    canonical-JSON render differs — excluded), so the f64/i64 FFI roundtrip
-    is bit-exact by construction; anything else is refused to the oracle.
+    Exact-type input gates: every overfit value and a SET *max_sl_hit_rate*
+    must be exact ``float``, and every stage-3 / *cvar_values* knob exact
+    ``int`` (``bool`` IS an ``int`` subclass whose canonical-JSON render
+    differs — excluded), so the f64/i64 FFI roundtrip is bit-exact by
+    construction; anything else is refused to the oracle.
 
-    Eligibility gate (the train-b tier-2 seam remedy — #1699 knob ×
-    #1665 facade): a SET *max_sl_hit_rate* (the
-    DEC-METRICS-KELLY-GROWTH-001 identity axis) is OUTSIDE the crate
-    fragment law's domain — ``gate_config_fragment`` predates the field,
-    so post-burn-in it would serve a fragment that silently DROPS the
-    ``max_sl_hit_rate`` key: a run-identity-class divergence. The knob
-    never crosses the FFI; when SET the WHOLE computation routes to the
-    Python oracle with the ``gate_fragment_beyond_crate`` warn-once (the
-    house only-provably-oracle-equivalent-inputs-cross idiom). Teaching
-    the crate the knob is the NAMED follow-up "crate-max-sl-hit-rate
-    parity" — never a routing-gate's business.
+    Envelope (DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001 — the widening
+    that RETIRED the ``gate_fragment_beyond_crate`` refusal): the crate's
+    ``gate_config_fragment`` now carries FOUR legs, so BOTH previously
+    beyond-crate knobs — *max_sl_hit_rate*
+    (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B) and *cvar_values*
+    (DEC-RANK-CVAR-TAIL-GATE-001) — are computed IN RUST instead of
+    bouncing the WHOLE computation back to the Python oracle. The previous
+    seam refused them because the crate would otherwise serve a fragment
+    silently DROPPING their keys (a run-identity-class divergence); the
+    honest fix was to teach the crate, not to keep degrading.
+
+    HONEST RESIDUE (named, not closed): ``SweepGridConfig.__post_init__``
+    validates *max_sl_hit_rate* as finite-and-in-``(0.0, 1.0]`` but NOT as
+    an exact ``float``, so a numeric-but-not-float ceiling (an ``int`` 1, a
+    ``Decimal``) is accepted by the constructor. The Python oracle renders
+    such a value VERBATIM (``{"max_sl_hit_rate": 1}`` → JSON ``1``) while an
+    f64 roundtrip would render ``1.0`` — a digest split. Those shapes are
+    therefore refused to the oracle here as ``gate_fragment_input_refused``
+    (leg ``max_sl_hit_rate``), exactly like a non-float overfit knob.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
-        return python_law()
-    if max_sl_hit_rate is not None:
-        _warn_once("gate_fragment_beyond_crate", leg="max_sl_hit_rate")
         return python_law()
     if overfit_values is not None and any(type(value) is not float for value in overfit_values):
         _warn_once("gate_fragment_input_refused", leg="overfit")
         return python_law()
-    if any(type(knob) is not int for knob in stage3_knobs):
+    if max_sl_hit_rate is not None and type(max_sl_hit_rate) is not float:
+        # See the HONEST RESIDUE clause: an int/Decimal ceiling renders
+        # differently through the oracle than through an f64 roundtrip.
+        _warn_once("gate_fragment_input_refused", leg="max_sl_hit_rate")
+        return python_law()
+    if cvar_values is not None and any(_i64_refused(knob) for knob in cvar_values):
+        _warn_once("gate_fragment_input_refused", leg="cvar")
+        return python_law()
+    if any(_i64_refused(knob) for knob in stage3_knobs):
         _warn_once("gate_fragment_input_refused", leg="stage3")
         return python_law()
     crate = _resolve_crate()
     if crate is None:
         return python_law()
     try:
-        overfit_leg, stage3_leg = crate.gate_config_fragment(
-            overfit_values, bool(stage3_enable), *stage3_knobs
+        overfit_leg, max_sl_leg, cvar_leg, stage3_leg = crate.gate_config_fragment(
+            overfit_values, max_sl_hit_rate, cvar_values, bool(stage3_enable), *stage3_knobs
         )
     except _DEGRADE_ERRORS as exc:
         _warn_once("gate_fragment_error", error_detail=repr(exc))
@@ -874,12 +1072,16 @@ def routed_gate_fragment(
     except _panic_belt_errors() as exc:
         _disable("crate_panic", error_detail=repr(exc))
         return python_law()
-    if not _valid_fragment_legs(overfit_leg, stage3_leg):
+    if not _valid_fragment_legs(overfit_leg, max_sl_leg, cvar_leg, stage3_leg):
         _warn_once("gate_fragment_result_refused")
         return python_law()
     fragment: dict[str, Any] = {}
     if overfit_leg is not None:
         fragment["overfit"] = list(overfit_leg)
+    if max_sl_leg is not None:
+        fragment["max_sl_hit_rate"] = max_sl_leg
+    if cvar_leg is not None:
+        fragment["cvar"] = list(cvar_leg)
     if stage3_leg is not None:
         fragment["stage3"] = list(stage3_leg)
     rust_fragment = fragment or None
@@ -891,12 +1093,25 @@ def routed_gate_fragment(
     return rust_fragment
 
 
-def _valid_fragment_legs(overfit_leg: object, stage3_leg: object) -> bool:
-    """Structural OUTPUT gate for the crate's fragment legs (refuse-poison)."""
+def _valid_fragment_legs(
+    overfit_leg: object,
+    max_sl_leg: object,
+    cvar_leg: object,
+    stage3_leg: object,
+) -> bool:
+    """Structural OUTPUT gate for the crate's four fragment legs (refuse-poison)."""
     if overfit_leg is not None and not (
         isinstance(overfit_leg, tuple)
         and len(overfit_leg) == _OVERFIT_LEG_ARITY
         and all(type(value) is float for value in overfit_leg)
+    ):
+        return False
+    if max_sl_leg is not None and type(max_sl_leg) is not float:
+        return False
+    if cvar_leg is not None and not (
+        isinstance(cvar_leg, tuple)
+        and len(cvar_leg) == _CVAR_LEG_ARITY
+        and all(type(knob) is int for knob in cvar_leg)
     ):
         return False
     return stage3_leg is None or (
@@ -1072,16 +1287,15 @@ def routed_sla_decision(
 ) -> tuple[float, str]:
     """The routed SLA projection decision — ``(projected_seconds, token)``.
 
-    Exact-type input gates: *tuple_count* exact ``int`` (``bool``
-    excluded; an out-of-``i64`` count degrades via ``OverflowError`` — the
-    ``int → float`` conversion is round-nearest on BOTH sides for every
-    ``i64``, so no exact-band gate is needed), both seconds exact
-    ``float``. *acknowledge* crosses as its truthiness (the Python law's
-    own ``if acknowledge:`` semantics).
+    Exact-type input gates: *tuple_count* an exact ``int`` INSIDE the
+    :func:`_i64_refused` band (the ``int → float`` conversion is
+    round-nearest on BOTH sides for every ``i64``, so the band is the only
+    gate needed), both seconds exact ``float``. *acknowledge* crosses as
+    its truthiness (the Python law's own ``if acknowledge:`` semantics).
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
-    if type(tuple_count) is not int or any(
+    if _i64_refused(tuple_count) or any(
         type(value) is not float for value in (per_tuple_seconds, envelope_seconds)
     ):
         _warn_once("sla_decision_input_refused")
@@ -1126,14 +1340,14 @@ def routed_rank_plan(
     """The routed rank-memory plan decision — ``(projected_bytes, verdict)``.
 
     Exact-type input gates: *n_masks* / *budget_bytes* exact ``int``
-    (``bool`` excluded; out-of-``i64`` degrades via ``OverflowError``; the
-    crate multiplies in exact ``i128``, so no exact-band gate is needed)
-    and *mode_token* one of :data:`_RANK_MODE_TOKENS`.
+    INSIDE the :func:`_i64_refused` band (the crate multiplies in exact
+    ``i128``, so the band is the only gate needed) and *mode_token* one of
+    :data:`_RANK_MODE_TOKENS`.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
     if (
-        any(type(value) is not int for value in (n_masks, budget_bytes))
+        any(_i64_refused(value) for value in (n_masks, budget_bytes))
         or type(mode_token) is not str
         or mode_token not in _RANK_MODE_TOKENS
     ):
@@ -1176,9 +1390,9 @@ def routed_preflight_missing(
 
     Exact-type input gates (an ``O(pairs)`` sweep — the fold itself is the
     same order, and the seam runs once per launch): every mapping key a
-    2-tuple of exact ``str``, every count exact ``int`` (``bool`` excluded;
-    out-of-``i64`` degrades via ``OverflowError``), every requested symbol/
-    interval exact ``str``.
+    2-tuple of exact ``str``, every count an exact ``int`` INSIDE the
+    :func:`_i64_refused` band, every requested symbol/interval exact
+    ``str``.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
@@ -1188,7 +1402,7 @@ def routed_preflight_missing(
             not (isinstance(key, tuple) and len(key) == _STRING_PAIR_ARITY)
             or type(key[0]) is not str
             or type(key[1]) is not str
-            or type(count) is not int
+            or _i64_refused(count)
         ):
             _warn_once("preflight_missing_input_refused")
             return python_law()
@@ -1352,16 +1566,16 @@ def routed_chain_verify_step(
 ) -> tuple[str, str, str]:
     """The routed per-entry ``verify_chain`` step — ``(token, expected, actual)``.
 
-    Exact-type input gates: both seq operands exact ``int`` (``bool``
-    excluded — ``str(True)`` ≠ Rust ``"true"``; an out-of-``i64`` seq
-    degrades via ``OverflowError``) and the eight field strings exact
+    Exact-type input gates: both seq operands exact ``int`` INSIDE the
+    :func:`_i64_refused` band (``bool`` excluded — ``str(True)`` ≠ Rust
+    ``"true"``) and the eight field strings exact
     ``str``. Python owns the corruption-exception construction + message
     bytes; only the DECISION (which check failed first, with the
     recomputed hash) routes.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
-    if any(type(value) is not int for value in (expected_seq, seq)) or any(
+    if any(_i64_refused(value) for value in (expected_seq, seq)) or any(
         type(field) is not str
         for field in (
             prev_expected,
@@ -1486,7 +1700,7 @@ def routed_chain_link_state(
         return python_law()
     if (
         type(link) is not str
-        or type(idx) is not int
+        or _i64_refused(idx)
         or type(running) is not bool
         or (verdict_token is not None and verdict_token not in _STAMP_VERDICT_TOKENS)
         or (last_stage is not None and last_stage not in _CHAIN_LINKS)
@@ -1532,23 +1746,29 @@ def routed_count_violations(
 ) -> str:
     """The routed D-9 count-reconciliation violations fold (EMPTY = clean).
 
-    Exact-type input gates: the six counters exact ``int`` (``bool``
-    excluded; out-of-``i64`` degrades via ``OverflowError``; the one
-    checked crate arithmetic — ``evaluated + in_flight`` — degrades on an
-    ``i64`` overflow rather than aborting), *prev_evaluated* ``None`` or
-    exact ``int``, *is_done* exact ``bool``. Runs inside the tripwire
-    monitor's fail-soft envelope — every degrade ships the oracle, never a
-    new raise into the sweep.
+    Exact-type input gates: the six counters exact ``int`` INSIDE the
+    :func:`_i64_refused` band, *prev_evaluated* ``None`` or a banded exact
+    ``int``, *is_done* exact ``bool`` — PLUS the crate's ONE checked
+    arithmetic pre-decided here (``evaluated + in_flight`` must itself land
+    inside ``i64``; ``audit_chain.rs:273-275`` returns ``Err`` otherwise,
+    which would surface indistinguishably from a real crate fault). Runs
+    inside the tripwire monitor's fail-soft envelope — every degrade ships
+    the oracle, never a new raise into the sweep.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
     counters = (total, enumerated, evaluated, skipped, survivors, in_flight)
     if (
-        any(type(count) is not int for count in counters)
-        or (prev_evaluated is not None and type(prev_evaluated) is not int)
+        any(_i64_refused(count) for count in counters)
+        or (prev_evaluated is not None and _i64_refused(prev_evaluated))
         or type(is_done) is not bool
     ):
         _warn_once("count_violations_input_refused")
+        return python_law()
+    # The crate's only fallible arithmetic (audit_chain.rs:273-275). Deciding
+    # it HERE keeps ``count_violations_error`` a pure crate-fault token.
+    if _i64_refused(evaluated + in_flight):
+        _warn_once("count_violations_input_refused", leg="issued_sum")
         return python_law()
     return _routed_law_call(
         _LAW_COUNT_VIOLATIONS,
@@ -1678,15 +1898,15 @@ def routed_checkpoint_record_decision(
 ) -> str:
     """The routed checkpoint monotonic-advance decision (slice 3).
 
-    Exact-type input gates: all three indices exact ``int`` (``bool``
-    excluded; out-of-``i64`` degrades via ``OverflowError``). The refusal
-    MESSAGE bytes, the in-memory high-water mutation and the atomic save
-    stay with :meth:`SweepCheckpointStore.record` — only the decision
-    routes, so the never-rewind ordering law is untouched.
+    Exact-type input gates: all three indices exact ``int`` INSIDE the
+    :func:`_i64_refused` band. The refusal MESSAGE bytes, the in-memory
+    high-water mutation and the atomic save stay with
+    :meth:`SweepCheckpointStore.record` — only the decision routes, so the
+    never-rewind ordering law is untouched.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
-    if any(type(value) is not int for value in (completed_index, last_index, total_combos)):
+    if any(_i64_refused(value) for value in (completed_index, last_index, total_combos)):
         _warn_once("checkpoint_record_input_refused")
         return python_law()
     return _routed_law_call(
@@ -1716,15 +1936,15 @@ def routed_checkpoint_adoption_verdict(
     """The routed checkpoint load-tail adoption verdict (slice 3).
 
     Exact-type input gates: the two ids exact ``str``, the two totals exact
-    ``int`` (``bool`` excluded; out-of-``i64`` degrades via
-    ``OverflowError``). The tamper-refusal MESSAGE bytes and the adoption
-    side effect (the in-memory high-water set) stay with
-    :meth:`SweepCheckpointStore.load` — only the verdict routes.
+    ``int`` INSIDE the :func:`_i64_refused` band. The tamper-refusal
+    MESSAGE bytes and the adoption side effect (the in-memory high-water
+    set) stay with :meth:`SweepCheckpointStore.load` — only the verdict
+    routes.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
     if any(type(value) is not str for value in (store_sweep_id, cp_sweep_id)) or any(
-        type(value) is not int for value in (store_total, cp_total)
+        _i64_refused(value) for value in (store_total, cp_total)
     ):
         _warn_once("checkpoint_adoption_input_refused")
         return python_law()
@@ -1924,16 +2144,15 @@ def routed_resume_decision(
     """The routed scheduler resume classification (slice 4).
 
     Exact-type input gates: the two flags exact ``bool``, the two indices
-    exact ``int`` (``bool`` excluded; out-of-``i64`` degrades via
-    ``OverflowError``). Returns the 4-way token + resume index; the
-    human-readable REASON strings — which differ between the two FRESH
-    arms — are rendered Python-side from the token, byte-identical either
-    arm.
+    exact ``int`` INSIDE the :func:`_i64_refused` band. Returns the 4-way
+    token + resume index; the human-readable REASON strings — which differ
+    between the two FRESH arms — are rendered Python-side from the token,
+    byte-identical either arm.
     """
     if not sweep_ops_rust_enabled() or sweep_ops_rust_disabled():
         return python_law()
     if any(type(flag) is not bool for flag in (exists, sweep_id_matches)) or any(
-        type(value) is not int for value in (next_index, total_combos)
+        _i64_refused(value) for value in (next_index, total_combos)
     ):
         _warn_once("resume_decision_input_refused")
         return python_law()
@@ -2004,7 +2223,7 @@ def _apriori_frontier_refused(frontier: Sequence[tuple[int, ...]]) -> bool:
     The crate's contiguous-prefix bucketing and bit-drop subset walk are
     equivalent to the oracle's insertion-ordered dict bucketing and
     index-drop walk ONLY over the constructed frontier shape — uniform-length
-    tuples of strictly-ascending bits in ``[0, 64)``, strictly lex-sorted
+    tuples of strictly-ascending bits in ``[0, 128)``, strictly lex-sorted
     (so equal prefixes are contiguous and no duplicates exist). Anything
     else refuses to the oracle.
     """
@@ -2070,7 +2289,10 @@ def routed_apriori_join_prune(
         _apriori_frontier_refused(frontier)
         or type(drop_conflicts) is not bool
         or type(conflict_masks) is not tuple
-        or any(type(mask) is not int or not 1 <= mask < _U64_CEILING for mask in conflict_masks)
+        or any(
+            type(mask) is not int or not 1 <= mask < _APRIORI_MASK_CEILING
+            for mask in conflict_masks
+        )
         or any(type(value) is not int for value in (n_bars, limit, stride))
         or not 0 <= n_bars < _U64_CEILING
         or not 1 <= limit < _U64_CEILING

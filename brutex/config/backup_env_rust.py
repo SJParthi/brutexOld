@@ -45,6 +45,32 @@ exact-type-checked).
 Fail-closed layers 3-6 live in the shared
 :class:`brutex.config.seam_core.ConfigRustSeam` (one instance per seam —
 the milestone-3 §11 COMMON hoist recorded there).
+
+## Strict mode — DEC-RUST-STRICT-NO-FALLBACK-001
+
+This seam OPTS IN by passing ``strict_facade`` to its
+:class:`~brutex.config.seam_core.ConfigRustSeam`, so every fall-back the
+core ANNOUNCES refuses under ``BRUTEX_RUST_STRICT`` instead of quietly
+serving the Python oracle. Both announcement choke points are the core's
+(:meth:`~brutex.config.seam_core.ConfigRustSeam._warn_once` /
+:meth:`~brutex.config.seam_core.ConfigRustSeam._disable`) — this facade
+adds none of its own, so wiring the constructor argument covers every
+announced fall-back this seam can take.
+
+Reason taxonomy at those choke points:
+
+* **CLASS A** (crate absent / stale / errored) — ``flag_unrecognised``,
+  ``crate_unavailable``, ``crate_stale``, ``crate_panic``,
+  ``verify_subset_error`` → REFUSE.
+* **CLASS B** (the crate ran and the answer was structurally refused) —
+  ``verify_subset_result_refused``, ``burn_in_mismatch_verify_subset`` →
+  REFUSE.
+* **CLASS C** — NONE at these choke points, so this module carries no
+  exemption set. The one input-envelope arm is :func:`_eligible_value`,
+  which returns the Python law WITHOUT announcing: a non-``str`` /
+  non-ASCII / over-long value still reaches Python under strict mode
+  exactly as it does today. Widening the crate's accepted domain is the
+  honest fix if that arm ever needs to announce.
 """
 
 from __future__ import annotations
@@ -77,6 +103,12 @@ _SEAM: Final[ConfigRustSeam] = ConfigRustSeam(
     # DEC-RUST-DEFAULT-ON-WAVE-001 (operator directive 2026-07-23): the
     # seam default is ON; explicit falsy stays the kill switch.
     default_on=True,
+    # DEC-RUST-STRICT-NO-FALLBACK-001: opt this seam into strict mode. The
+    # core's two announcement choke points (_warn_once / _disable) then
+    # refuse instead of degrading; this facade announces nothing of its own,
+    # so the one argument covers every fall-back the seam can take. CLASS C
+    # is empty here (see the module docstring).
+    strict_facade="brutex.config.backup_env_rust",
 )
 
 

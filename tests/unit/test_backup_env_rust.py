@@ -15,13 +15,18 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from brutex.config import backup_env, backup_env_rust, seam_core
+from brutex.config import backup_env, backup_env_rust, rust_strict, seam_core
 
 # ── Harness ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
 def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ships ON; this module
+    # exercises the DEGRADE lattice, so it opts OUT explicitly rather than
+    # weakening an assertion. TestStrictRefusal opts back IN per test on THIS
+    # SAME monkeypatch object (never a second MonkeyPatch layered on top).
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     monkeypatch.delenv(backup_env_rust.BACKUPENV_RUST_ENV, raising=False)
     backup_env_rust.reset_backupenv_rust_for_tests()
     yield
@@ -317,3 +322,79 @@ class TestWorkflowWiring:
         assert "tests/unit/test_backup_env_rust.py" in text, (
             "core-rust-parity.yml no longer runs the backupenv facade suite"
         )
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict mode turns every ANNOUNCED fall-back into a refusal.
+
+    This seam owns NO choke point of its own — both announcement points are
+    :class:`~brutex.config.seam_core.ConfigRustSeam`'s ``_warn_once`` /
+    ``_disable``, reached because the facade passes ``strict_facade``. The
+    tests below drive the real routed law so the wiring (not the core in
+    isolation) is what is proven.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Re-arm strict mode on the SHARED monkeypatch the autouse fixture uses.
+
+        Deliberately NOT a nested ``MonkeyPatch.context()``: layering a second
+        MonkeyPatch object on top of the fixture's own would teardown LIFO
+        across two objects and leak ``BRUTEX_RUST_STRICT`` past this module.
+        """
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_crate_unavailable_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — an absent wheel refuses instead of serving the oracle."""
+        monkeypatch.setenv(backup_env_rust.BACKUPENV_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_core", None)  # import raises
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="crate_unavailable"):
+            backup_env._valid_verify_subset("2%")  # pyright: ignore[reportPrivateUsage]
+        # The refusal fires BEFORE the latch write, so the latch stays clear.
+        assert backup_env_rust.backupenv_rust_disabled() is False
+
+    def test_same_path_serves_the_oracle_strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The SAME class-A path degrades normally with the kill switch on."""
+        monkeypatch.setenv(backup_env_rust.BACKUPENV_RUST_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_core", None)
+        # The autouse fixture already set BRUTEX_RUST_STRICT=0.
+        assert rust_strict.strict_mode() is False
+        assert backup_env._valid_verify_subset("2%") is _oracle("2%")  # pyright: ignore[reportPrivateUsage]
+        assert backup_env_rust.backupenv_rust_disabled() is True
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — an operator typo refuses rather than silently disarming."""
+        monkeypatch.setenv(backup_env_rust.BACKUPENV_RUST_ENV, "ture")
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="flag_unrecognised"):
+            backup_env_rust.backupenv_rust_enabled()
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS B — the crate ran and its answer failed the shape gate."""
+        _arm(monkeypatch, _fake_crate(backupenv_verify_subset_valid=lambda _v: 1))
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="verify_subset_result_refused"):
+            backup_env._valid_verify_subset("2%")  # pyright: ignore[reportPrivateUsage]
+
+    def test_class_c_out_of_envelope_input_does_not_refuse(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No class-C reason exists here — the envelope gate NEVER announces.
+
+        A non-ASCII / over-long value is outside the crate's proven domain
+        and :func:`~brutex.config.backup_env_rust._eligible_value` routes it
+        to Python WITHOUT reaching either choke point, so it still answers
+        under strict mode exactly as it does today (a bomb crate proves the
+        crate is never consulted). Refusing here would crash a legitimate
+        operator value; widening the crate is the honest fix.
+        """
+        _arm(monkeypatch, _bomb_crate())
+        self._strict_on(monkeypatch)
+        assert backup_env._valid_verify_subset("٢%") is False  # pyright: ignore[reportPrivateUsage]
+        assert backup_env._valid_verify_subset("1" * 5000) is False  # pyright: ignore[reportPrivateUsage]
+        assert backup_env_rust.backupenv_rust_disabled() is False

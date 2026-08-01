@@ -211,13 +211,20 @@ class TestSweepOpsRouting:
         finally:
             self._reset_facade()
 
-    def test_flag_on_set_cvar_gate_routes_to_oracle(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def test_flag_on_set_cvar_gate_matches_the_oracle_value(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """DEC-RANK-CVAR-TAIL-GATE-001 × DEC-RUST-SWEEP-OPS-001: a SET
-        ``cvar_gate`` is OUTSIDE the crate fragment law's domain, so flag-ON the
-        WHOLE computation routes to the Python oracle VALUE — the ``cvar``
-        identity key intact, never silently dropped by the cvar-blind crate
-        fragment (the ``max_sl_hit_rate`` beyond-crate seam remedy, mirrored;
-        this drives the sweep_identity.py:132 early-return arm)."""
+        ``cvar_gate`` yields the Python oracle VALUE — the ``cvar`` identity key
+        intact, never silently dropped.
+
+        DOCSTRING RECONCILE (DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001): this
+        used to drive a CALLER-SIDE early return in ``sweep_identity`` that
+        bounced the whole computation to the oracle WITHOUT emitting any reason
+        token — an UNANNOUNCED fall-back the facade's warn-once choke point
+        could never see. The crate now carries the ``cvar`` leg itself, so the
+        early return is GONE and this value equality is served by the crate.
+        Every assertion below is unchanged and still true; only the mechanism
+        narrative moved. ``TestGateFragmentAlwaysRouted`` pins the absence of
+        the early return directly."""
         from brutex.engine.sweep_identity import _gate_config_fragment_python
 
         self._arm_fake_crate(monkeypatch)
@@ -258,3 +265,102 @@ class TestGateProvenanceToken:
         """Both legs serialise sort_keys + compact — byte-deterministic."""
         token = gate_provenance_token(gate_config={"stage3": [10, 2, 1]}, selection={"min_hits": 0})
         assert token == '{"gate_config":{"stage3":[10,2,1]},"selection":{"min_hits":0}}'
+
+
+class TestGateFragmentAlwaysRouted:
+    """No gate-active shape takes an UN-ANNOUNCED caller-side Python return.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 × DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001.
+
+    THE DEFECT CLASS this pins shut: the pre-widening
+    ``_gate_config_fragment`` early-returned the Python oracle whenever
+    ``cvar_gate`` was SET. That return lived in the CALLER, not in
+    ``sweep_ops_rust``, so the facade's warn-once choke point never saw it —
+    it emitted NO reason token, which made it invisible to BOTH the facade
+    census (``brutex.observability.rust_census``, whose degrading-seam and
+    strict-enrolment signals only inspect modules that import a crate — and
+    ``sweep_identity`` imports only the facade) AND the degrade sentinel. That
+    is the same invisibility class as ``engine/combo_mask``.
+
+    The taxonomy-blessed remedy for a CLASS-C "input outside the crate's
+    envelope" fall-back is to WIDEN THE CRATE until the refusal is
+    unreachable — which is what happened. This class is the mechanical guard
+    that it stays that way: every gate-active shape must reach the crate with
+    ZERO announcements, and the ``engaged`` count proves it is not vacuous.
+
+    HONEST RESIDUE (deliberately NOT asserted zero here): a numeric-but-not-
+    ``float`` ``max_sl_hit_rate`` ceiling still announces
+    ``gate_fragment_input_refused`` — see
+    :meth:`test_int_max_sl_hit_rate_still_announces_the_known_residue`.
+    """
+
+    _CVAR = CvarGateConfig(threshold_paisa=50_000, alpha_bps=250)
+
+    def _routed(self, grid: SweepGridConfig) -> tuple[object, list[str], int]:
+        from tests.fakes.sweep_ops_crate import routed_fallback_reasons
+
+        return routed_fallback_reasons(lambda: _gate_config_fragment(grid))
+
+    def test_cvar_active_reaches_the_crate(self) -> None:
+        """The retired early-return arm: a SET cvar gate now routes silently."""
+        fragment, reasons, engaged = self._routed(_grid(cvar_gate=self._CVAR))
+        assert reasons == []
+        assert engaged == 1
+        assert fragment == {"cvar": [250, 50_000]}
+
+    def test_every_gate_active_shape_reaches_the_crate(self) -> None:
+        """All four legs, singly and combined, route with ZERO announcements."""
+        shapes = (
+            _grid(overfit=OverfitGateConfig(dsr_min=0.90)),
+            _grid(cvar_gate=self._CVAR),
+            _grid(max_sl_hit_rate=0.5),
+            _grid(stage3_enable=True),
+            _grid(
+                overfit=OverfitGateConfig(dsr_min=0.90),
+                cvar_gate=self._CVAR,
+                max_sl_hit_rate=0.5,
+                stage3_enable=True,
+            ),
+        )
+        for grid in shapes:
+            fragment, reasons, engaged = self._routed(grid)
+            assert reasons == [], fragment
+            assert engaged == 1, fragment
+
+    def test_routed_values_equal_the_python_oracle(self) -> None:
+        """Widening the crate changed no VALUE — the oracle is the arbiter."""
+        from brutex.engine.sweep_identity import _gate_config_fragment_python
+
+        grid = _grid(
+            overfit=OverfitGateConfig(dsr_min=0.90),
+            cvar_gate=self._CVAR,
+            max_sl_hit_rate=0.5,
+            stage3_enable=True,
+        )
+        fragment, _reasons, _engaged = self._routed(grid)
+        assert fragment == _gate_config_fragment_python(grid)
+
+    def test_int_max_sl_hit_rate_still_announces_the_known_residue(self) -> None:
+        """TEETH + honesty: the ONE surviving CLASS-C shape is still ANNOUNCED.
+
+        This is the STOP-AND-REPORT finding, pinned rather than silently
+        normalised: ``SweepGridConfig`` accepts a numeric-but-not-``float``
+        ceiling, the Python oracle renders it VERBATIM (canonical JSON ``1``,
+        not ``1.0``), and an f64 round-trip would render ``1.0`` — so
+        normalising it WOULD MOVE A MINTED DIGEST. Closing it needs either an
+        exact-``float`` refusal in ``SweepGridConfig.__post_init__`` or a
+        deliberate re-key DEC; until then it must stay VISIBLE.
+
+        It doubles as the anti-vacuity teeth for this whole class: it proves
+        the helper genuinely observes announcements, so the ``reasons == []``
+        assertions above are meaningful.
+
+        ``engaged == 0`` here is the refusal's own signature, not a weakened
+        assertion: the exact-type gate returns the oracle BEFORE the crate is
+        ever called, and ``sweep_ops_rust.engaged`` is emitted only on a
+        SUCCESSFUL crate call. Zero-engaged + one-reason IS the fall-back.
+        """
+        fragment, reasons, engaged = self._routed(_grid(max_sl_hit_rate=1))
+        assert reasons == ["gate_fragment_input_refused"]
+        assert engaged == 0
+        assert fragment == {"max_sl_hit_rate": 1}

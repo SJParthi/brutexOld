@@ -347,7 +347,12 @@ def test_main_dispatch_sweep_all_threads_grid_defaults() -> None:
     assert rc == 7
     _, kwargs = sweep_all.call_args
     assert kwargs["symbols"] == "NIFTY,BANKNIFTY"
-    assert kwargs["intervals"] == "1minute,5minute,15minute"
+    # DEC-SWEEP-TF-SCOPE-5-001: threading pin — the scope VALUE is pinned once, in
+    # ``test_sweep_timeframe_scope.py``. Referencing the constant here keeps this
+    # test about "the CLI threads its default through", never about the scope.
+    from brutex.data.timeframes import DEFAULT_SWEEP_INTERVALS
+
+    assert kwargs["intervals"] == DEFAULT_SWEEP_INTERVALS
     assert kwargs["start"] == "2024-01-01"
     assert kwargs["end"] == "2024-01-02"
     # LANE W1 (DEC-RANK-QUOTA-PERSIST-1000-001): the persist default is the

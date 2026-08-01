@@ -22,6 +22,7 @@ from brutex.backup.schedule_render import (
     render_deadman_plist,
     render_drill_plist,
 )
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 
 RENDERERS: dict[str, tuple[Callable[[], str], Callable[[], str]]] = {
     "render_backup_plist": (render_backup_plist, schedule_render._render_backup_plist_python),
@@ -36,6 +37,28 @@ def _fresh_seam() -> Iterator[None]:
     backup_rust.reset_backup_rust_for_tests()
     yield
     backup_rust.reset_backup_rust_for_tests()
+
+
+@pytest.fixture
+def strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the degrade-to-oracle contract to the mode that still HAS one.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` default-ON,
+    where a Class-A (crate absent/stale/errored) or Class-B (crate answered
+    but the RESULT is structurally refused — here a drifted render or a
+    non-``str`` render) fall-back RAISES :class:`RustFallbackRefused` at the
+    seam's choke point instead of serving the Python oracle.  The degrade
+    machinery is not deleted — it stays reachable through the documented
+    ``BRUTEX_RUST_STRICT=0`` kill switch, and THAT is the mode the tests
+    requesting this fixture describe.  The strict-ON refusal for the SAME
+    induced faults is pinned positively by
+    :class:`TestStrictModeRefusesTheFallback`, so no coverage is traded away.
+
+    Uses the SHARED ``monkeypatch`` (never a module-scoped
+    ``MonkeyPatch.context()``) so set/unset ordering with the sibling
+    ``BACKUP_RUST_ENV`` pins in this file stays deterministic.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _install_fake(monkeypatch: pytest.MonkeyPatch, render: Callable[[], object]) -> None:
@@ -72,14 +95,16 @@ class TestFakeCrate:
         assert backup_rust.disabled_reason() is None
 
     def test_drifted_fake_render_autoreverts_to_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, strict_off: None
     ) -> None:
         monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "1")
         _install_fake(monkeypatch, lambda: "drifted bytes")
         assert render_cron_lines() == schedule_render._render_cron_lines_python()
         assert backup_rust.disabled_reason() == "burn_in_mismatch"
 
-    def test_non_str_fake_render_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_non_str_fake_render_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, strict_off: None
+    ) -> None:
         monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "1")
         _install_fake(monkeypatch, lambda: b"bytes, not str")
         assert render_backup_plist() == schedule_render._render_backup_plist_python()
@@ -114,3 +139,32 @@ class TestRealWheelParity:
         backup_rust.reset_backup_rust_for_tests(remaining=0)
         public, oracle = RENDERERS[law]
         assert public() == oracle()
+
+
+class TestStrictModeRefusesTheFallback:
+    """The no-fallback guarantee, pinned POSITIVELY on this facade.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001.  Each test induces the SAME fault its
+    ``strict_off`` twin in :class:`TestFakeCrate` induces, but leaves
+    ``BRUTEX_RUST_STRICT`` at its shipped default (ON) and asserts the seam
+    RAISES rather than quietly serving the Python oracle.  Without these the
+    ``strict_off`` pins above would be a coverage trade, not a relocation.
+    """
+
+    def test_drifted_render_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "1")
+        _install_fake(monkeypatch, lambda: "drifted bytes")
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch"):
+            render_cron_lines()
+
+    def test_non_str_render_raises_instead_of_serving_the_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)  # shipped default = ON
+        monkeypatch.setenv(backup_rust.BACKUP_RUST_ENV, "1")
+        _install_fake(monkeypatch, lambda: b"bytes, not str")
+        with pytest.raises(RustFallbackRefused, match="result_refused"):
+            render_backup_plist()

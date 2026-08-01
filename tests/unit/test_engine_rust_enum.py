@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -27,7 +28,7 @@ from brutex.vocabulary import CONFLICT_PAIRS, has_conflict
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Generator, Iterable, Iterator, Sequence
 
 #: The REAL compiled classes, captured BEFORE any monkeypatching so poison
 #: wrappers can delegate to the genuine kernel.
@@ -72,6 +73,31 @@ def _call(
         count_hits=_count_hits,
         digest_path=digest_path,
     )
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    CLASS-A (crate absent / stale / errored) and CLASS-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle. The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion. Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+
+    The patch runs in its OWN :class:`pytest.MonkeyPatch` context, not the
+    shared ``monkeypatch`` fixture, so ``TestStrictRefusal``'s nested
+    ``delenv`` can never record ``"0"`` as a value to restore across fixture
+    teardown (the shipped ``test_rust_stats`` shape).
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -1183,3 +1209,115 @@ exit 0
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "TWIN-RUN PASS" in proc.stdout
+
+
+# ────── strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ──────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the tuple to the Python enumeration.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Generator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        This owns its OWN :class:`pytest.MonkeyPatch` context rather than
+        using the shared ``monkeypatch`` fixture, and the difference is
+        load-bearing. ``_strict_off_degrade_lattice`` (the module autouse
+        fixture) sets ``BRUTEX_RUST_STRICT=0`` inside a *separate* context;
+        pytest tears fixtures down LIFO **across fixture objects**, so a
+        shared-``monkeypatch`` ``delenv`` here would record ``"0"`` as the
+        value to restore, the autouse context would exit FIRST (restoring the
+        true original — unset), and the shared undo would then RE-SET ``"0"``,
+        leaking the kill switch into every later test file in the process.
+        Nesting the context inside the test body makes the delenv provably
+        undone before the module fixture's context exits.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    def test_class_a_warn_choke_point_refuses(self) -> None:
+        """CLASS A — an absent wheel is never a legitimate input shape."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="wheel_missing"):
+            rust_enum.warn_fallback_once("wheel_missing")
+
+    def test_class_b_disable_choke_point_refuses_before_the_latch(self) -> None:
+        """CLASS B — a burn-in mismatch means Rust ran and answered wrongly.
+
+        Also pins the placement law: the refusal fires BEFORE the latch is
+        written, so the latched ``kernel_disabled`` early-return can never be
+        reached under strict mode.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="self_check_mismatch"):
+            rust_enum.disable_kernel("u64", "self_check_mismatch")
+        assert rust_enum.kernel_disabled("u64") is False
+
+    def test_class_b_kernel_result_refused_refuses(self) -> None:
+        """CLASS B via the REAL driver: a domain-invalid kernel range."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        class _BadRange:
+            def __init__(self, bar_bits: Sequence[int], *_args: object, **_kwargs: object) -> None:
+                self._n = len(bar_bits)
+
+            def n_bars(self) -> int:
+                return self._n
+
+            def enumerate_prefilter(self, *_args: object, **_kwargs: object) -> object:
+                # Arity-correct but domain-invalid (``kept`` claims a mask the
+                # range never enumerated) — the ``_valid_range_result`` refusal.
+                return (1, 0, 1, True, 0, [0b11, 0b101])
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(fno_math, "ResidentSweepEnum", _BadRange)
+            mp.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+            with (
+                self._strict_on(),
+                pytest.raises(RustFallbackRefused, match="kernel_result_refused"),
+            ):
+                _call(bits=[0, 1, 2], k=2)
+
+    @pytest.mark.parametrize("reason", sorted(rust_enum._STRICT_EXEMPT_REASONS))
+    def test_class_c_exempt_reasons_do_not_refuse(self, reason: str) -> None:
+        """CLASS C — the INPUT is outside the crate's envelope.
+
+        ``legacy_dedup_path`` (the caller is on the pure-Python legacy dedup
+        arm by contract) and ``count_overflow`` (``C(n, k)`` past the kernel's
+        u64 RANK domain) are legitimate Python-serves; refusing would crash a
+        legal call. Parametrised over the frozenset itself so a future
+        addition cannot escape the pin.
+        """
+        with self._strict_on():
+            rust_enum.warn_fallback_once(reason)
+
+    def test_class_c_legacy_dedup_path_serves_the_oracle_end_to_end(self) -> None:
+        """The CLASS-C arm still returns the seam's Python-serves sentinel."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv(rust_enum.SWEEP_RUST_ENUM_ENV, "1")
+            with self._strict_on():
+                assert _call(bits=[0, 1, 2], k=2, digest_path=False) is None
+
+    def test_strict_off_still_serves_the_oracle(self) -> None:
+        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
+        with pytest.MonkeyPatch.context() as mp:
+            from brutex.config import rust_strict
+
+            mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+            rust_enum.warn_fallback_once("wheel_missing")
+            rust_enum.disable_kernel("u64", "self_check_mismatch")
+        assert rust_enum.kernel_disabled("u64") is True

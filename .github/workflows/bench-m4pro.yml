@@ -79,6 +79,48 @@ on:
       - ".github/workflows/bench-m4pro.yml"
       - "brutex/vocabulary/**"
       - "rust/fno-math/**"
+      # DEC-O1-ENFORCEMENT-REACH-001 / ADR-0027 §D2 — layer 0 of gate → trigger.
+      # Every row below is DERIVED, not curated: tests/unit/test_m4pro_trigger_
+      # derivation.py walks this job's `run:` shell for the bench files it
+      # invokes, ast-parses each one's `brutex.*` / crate imports, and fails
+      # naming any source this filter does not cover. Deleting a row re-fails
+      # that test with the row's own name, so the list cannot silently rot.
+      #
+      # (a) EXECUTED by a step above but previously unlisted — editing any of
+      #     these skipped the very gate that grades it.
+      - "tests/bench/test_full_sweep_extrapolation.py"
+      - "tests/bench/test_store_o1.py"
+      - "tests/bench/test_option_dedup_o1.py"
+      - "tests/bench/test_lmdb_membership_o1.py"
+      - "tests/bench/test_rate_limiter_o1.py"
+      # (b) MEASURED by those benches but previously unlisted — a regression in
+      #     the measured code landed without re-running the measurement. Note
+      #     rust/trading-core: the indicator kernels the strict tier times.
+      - "rust/trading-core/**"
+      - "brutex/calendars/nse.py"
+      - "brutex/dashboard/db_view.py"
+      - "brutex/dashboard/movers_cache.py"
+      - "brutex/dashboard/summary_cache.py"
+      - "brutex/data/__init__.py"
+      - "brutex/data/lmdb_membership.py"
+      - "brutex/data/models.py"
+      - "brutex/data/option_dedup.py"
+      - "brutex/data/option_parquet_writer.py"
+      - "brutex/data/parquet_writer.py"
+      - "brutex/data/timeframes.py"
+      - "brutex/engine/results_store.py"
+      - "brutex/engine/sweep_cache.py"
+      - "brutex/engine/sweep_orchestrator.py"
+      - "brutex/engine/sweep_run.py"
+      - "brutex/feed/lookahead.py"
+      - "brutex/indicators/fib_levels.py"
+      - "brutex/indicators/pivots.py"
+      - "brutex/orchestrator/audit.py"
+      - "brutex/orchestrator/bloom.py"
+      - "brutex/orchestrator/rate_limiter.py"
+      - "brutex/orchestrator/state.py"
+      - "brutex/orchestrator/store.py"
+      - "brutex/strategies/types.py"
   # NOTE (DEC-M4PRO-PR-TRIGGER-001): intentionally NO `pull_request` trigger.
   # This job runs on the self-hosted M4-Pro runner, which queues indefinitely
   # while offline — a PR trigger would hang every bench-touching PR's mergeable
@@ -158,7 +200,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Show runner identity
         run: |
@@ -170,7 +212,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 

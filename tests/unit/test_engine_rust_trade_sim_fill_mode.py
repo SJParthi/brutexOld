@@ -20,6 +20,7 @@ at ``tf_minutes == 1`` the same sequence serves both streams (design §6).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -34,6 +35,25 @@ from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 
 from tests.unit.test_engine_trade_sim_fill_mode import _bar
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """Pin ``BRUTEX_RUST_STRICT=0`` — this file drives a DEGRADE arm.
+
+    The STALE-WHEEL demotion (``fill_law_kernel_stale``) is CLASS A under
+    DEC-RUST-STRICT-NO-FALLBACK-001, so with strict mode at its shipped ON
+    default the construction would RAISE instead of demoting to the
+    worst-case Python oracle this file pins. The mode is DECLARED here rather
+    than by weakening the demotion assertion; the strict-ON refusal of the
+    SAME reason is pinned in ``test_engine_rust_trade_sim.py``'s
+    ``TestStrictRefusal``.
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 def _window() -> tuple[list[Any], list[int]]:

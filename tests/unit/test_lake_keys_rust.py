@@ -133,6 +133,29 @@ def _install_crate(monkeypatch: pytest.MonkeyPatch, crate: object) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+
+    Uses the SAME shared ``monkeypatch`` object as the sibling autouse fixtures
+    (never its own ``MonkeyPatch.context()``): one object means one LIFO undo
+    stack, so a ``TestStrictRefusal`` ``delenv`` on that same object cannot be
+    restored out of order and leak the value past this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("BRUTEX_DATA_RUST", raising=False)
     lake_keys_rust.reset_lake_keys_rust_for_tests()
@@ -818,7 +841,18 @@ class TestWiringPins:
 
     def test_facade_is_a_leaf_import_wise(self) -> None:
         """The facade imports NO lake_keys and no sibling data modules
-        beyond the sanctioned flag/panic-belt sources."""
+        beyond the sanctioned flag/panic-belt sources.
+
+        ONE narrow, enumerated exemption (DEC-RUST-STRICT-NO-FALLBACK-001):
+        ``brutex.config.rust_strict`` — the strict-mode gate — is a LEAF
+        (stdlib + ``brutex.config.env_flags`` + ``brutex.models``; none of
+        them imports ``brutex.data``), and the facade imports it
+        FUNCTION-LOCALLY inside ``_refuse_if_strict``, so it can never form
+        the import-time edge this pin exists to prevent.  The exemption is
+        held STRICTLY NARROWER than a bare allowlist entry by the companion
+        assertion below: a module-scope ``rust_strict`` import still fails
+        here.  The load-bearing ``lake_keys`` cycle guard is untouched.
+        """
         tree = ast.parse(FACADE_PATH.read_text(encoding="utf-8"))
         brutex_imports: set[str] = set()
         for node in ast.walk(tree):
@@ -832,11 +866,20 @@ class TestWiringPins:
         allowed = {
             "brutex.data.fno_symbol_rust",
             "brutex.data.lake_rust_render",
+            "brutex.config.rust_strict",
         }
         assert brutex_imports <= allowed
         assert not any(
             "lake_keys" in m and m != "brutex.data.lake_keys_rust" for m in brutex_imports
         )
+        # The strict-gate exemption is DEFERRED-ONLY: never module scope.
+        module_scope: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module_scope.add(node.module)
+            elif isinstance(node, ast.Import):
+                module_scope.update(alias.name for alias in node.names)
+        assert "brutex.config.rust_strict" not in module_scope
 
     def test_seam_oracles_match_public_defaults(self) -> None:
         """§5.2 surgery-faithfulness: the seam oracles equal the public
@@ -1171,3 +1214,73 @@ class TestMutationWorkflowWiring:
         assert '"brutex/data/lake_keys_rust.py:tests/unit/test_lake_keys_rust.py:"' in text, (
             "lake_keys_rust.py is not wired into mutation.yml's per-module mutmut loop"
         )
+
+
+# ---------------------------------------------------------------------------
+# DEC-RUST-STRICT-NO-FALLBACK-001 — strict-ON refusal pins
+# ---------------------------------------------------------------------------
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice).  These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+
+    This facade has NO class-C reason (an input the crate was never meant
+    to handle) at either choke point, so it carries no exemption set —
+    every reason it emits is class A (crate absent / stale / errored) or
+    class B (the crate ran and returned a structurally refused result).
+
+    ``_strict_on`` uses the SAME shared ``monkeypatch`` object the autouse
+    fixture used, so both live on one LIFO undo stack and the value cannot
+    leak past this module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_absent_crate_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _enable(monkeypatch)
+
+        def _raise_import(name: str, *a: object, **k: object) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(lake_keys_rust.importlib, "import_module", _raise_import)
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lake_keys.stock_drift_fold("NIFTY")
+
+    def test_same_path_serves_the_oracle_under_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The autouse fixture already pinned BRUTEX_RUST_STRICT=0.
+        _enable(monkeypatch)
+
+        def _raise_import(name: str, *a: object, **k: object) -> object:
+            raise ImportError("no wheel")
+
+        monkeypatch.setattr(lake_keys_rust.importlib, "import_module", _raise_import)
+        assert lake_keys.stock_drift_fold("NIFTY") == "NIFTY"
+
+    def test_class_a_stale_wheel_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lake_keys_rust._warn_once("crate_stale")
+
+    def test_class_b_result_refused_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            lake_keys_rust._disable("result_refused_fold")

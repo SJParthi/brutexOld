@@ -54,9 +54,11 @@ pure-Python oracle (tristate via the COMMON
 :func:`brutex.engine.sweep_lookahead.env_flag_tristate`, imported LAZILY —
 ranking is imported BY the engine, so a module-scope ranking→engine import
 would cycle; the :mod:`brutex.metrics.rust_stats` precedent). Wheel
-absent/stale, a kernel fault (``ValueError``/``TypeError``/
-``OverflowError``), or a shape-invalid result each degrade to the oracle
-with one warn-once ``cvar_gate.fallback`` per reason; the first
+absent/stale, a kernel error (``ValueError``/``TypeError``/
+``OverflowError`` — SPLIT by the crate's own ``INPUT_REFUSED_MARKER`` into
+the CLASS-C ``kernel_input_refused`` and the CLASS-A/B ``kernel_error``, see
+:func:`_kernel_degrade_reason`), or a shape-invalid result each degrade to
+the oracle with one warn-once ``cvar_gate.fallback`` per reason; the first
 :data:`CVAR_SELF_CHECK_SAMPLES` kernel-served folds per process are
 bit-compared against the oracle and a mismatch SHIPS THE ORACLE TRIPLE +
 latches the kernel OFF for the process (``cvar_gate.kernel_autoreverted``
@@ -71,11 +73,12 @@ re-raises BARE (OOM is a global stop, never swallowed into a fallback).
   (bench-pinned), neither is O(1)-total.
 * The parity claim is scoped to int-element inputs (the production
   ``ClosedTrade.pnl_paisa`` contract). A non-int element makes the kernel's
-  ``Vec<i64>`` extraction raise ``TypeError`` → the oracle serves the call
-  with Python's own semantics — results never depend on wheel state.
-* An int element past i64 range likewise degrades (``OverflowError`` →
-  oracle, whose Python ints are unbounded); unreachable from the engine
-  spine (trade P&L magnitudes sit far inside i64).
+  ``Vec<i64>`` extraction raise a MARKED ``TypeError`` → the oracle serves
+  the call with Python's own semantics — results never depend on wheel
+  state, and strict mode keeps degrading (``kernel_input_refused``).
+* An int element past i64 range likewise degrades (a MARKED
+  ``OverflowError`` → oracle, whose Python ints are unbounded); unreachable
+  from the engine spine (trade P&L magnitudes sit far inside i64).
 * The gate judges the SIGNAL-ONLY per-trade P&L stream (Track 1 — gross of
   the structurally-absent costs; CLAUDE.md §2 Rule 3), exactly the stream
   every ranked metric already folds.
@@ -131,6 +134,79 @@ _FOLD_RESULT_ARITY: Final[int] = 3
 
 #: Memo key suffix for the engaged-once INFO (namespaced apart from reasons).
 _ENGAGED_KEY: Final[str] = "__engaged__"
+
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.ranking.cvar_gate"
+
+#: CLASS-C fall-back reasons — the Rust arm still SERVES, or the INPUT was
+#: outside the crate's envelope and the Python oracle was always the intended
+#: handler, so refusing would crash a legitimate path
+#: (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note"):
+#:
+#: * ``flag_engine_unavailable`` — the engine package (whose ``__init__``
+#:   pulls the ``trading_core`` wheel) is unimportable, so the flag
+#:   CLASSIFIER is unavailable. The resolver then returns
+#:   :data:`CVAR_RUST_DEFAULT` = ``True``: the RUST arm still serves. This is
+#:   an advisory, not a fall-back — the exact
+#:   :mod:`brutex.metrics.rust_stats` precedent, whose
+#:   ``_STRICT_EXEMPT_REASONS`` carries the same token.
+#: * ``kernel_input_refused`` — the crate DECLINED the input at its FFI
+#:   edge and SAID SO (:data:`_INPUT_REFUSED_MARKER`): a non-int P&L element
+#:   (``TypeError``), an int past i64 range (``OverflowError`` — the oracle's
+#:   ints are unbounded), a non-sequence ``pnls``, or a non-int *alpha_bps*
+#:   the Python ``1 <= alpha_bps <= 10_000`` gate nonetheless admits (the
+#:   float ``500.0``). This module's honest envelope documents exactly these
+#:   as the intended Python-serves path, and each is a legitimate,
+#:   test-pinned, byte-equal call — refusing it would crash a legal path.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {"flag_engine_unavailable", "kernel_input_refused"}
+)
+
+#: EMPTY — nothing is held out of the taxonomy any more.
+#:
+#: ``kernel_error`` used to live here because ONE
+#: ``except (ValueError, TypeError, OverflowError)`` around
+#: ``kernel(list(pnls), alpha_bps)`` bundled a genuine "Rust ran and refused"
+#: population together with a test-pinned CLASS-C one (the PyO3 extraction
+#: failures), indistinguishable at the choke point — every class arrives from
+#: both. That is resolved: the crate now MARKS every input-envelope refusal
+#: it raises (:data:`_INPUT_REFUSED_MARKER`,
+#: ``rust/fno-math/src/input_refused.rs``, applied at the explicit
+#: ``Vec<i64>`` / ``u32`` extractions in ``src/stats/cvar.rs``), those cases
+#: route to the ``kernel_input_refused`` member of
+#: :data:`_STRICT_EXEMPT_REASONS` above, and ``kernel_error`` retains exactly
+#: the UNMARKED remainder — a stale wheel whose call shape drifted (a PyO3
+#: arity/keyword ``TypeError``), a foreign or byzantine module bound to the
+#: symbol, broken internals — which is CLASS A/B and DOES refuse.
+#:
+#: The crate's two structural ``Err`` arms (empty ``pnls`` /
+#: ``alpha_bps`` outside ``[1, 10_000]``) are deliberately left UNMARKED, so
+#: they too refuse. They are NOT the "Python was the intended handler"
+#: shape: :func:`cvar_tail_fold` raises ``ValueError`` on the identical two
+#: conditions BEFORE the FFI, so the oracle refuses them as well and no
+#: legitimate call can reach them — refusing a Rust-side "I ran and said no"
+#: crashes nothing.
+#:
+#: The set is kept (empty) rather than deleted so a future "held pending a
+#: ruling" reason has a named, reviewable home instead of being quietly
+#: folded into the ruled exemption.
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset()
+
+#: The reasons strict mode does NOT refuse — the ruled CLASS-C exemption
+#: plus the (currently empty) unresolved-pending-ruling set, unioned at ONE
+#: point so the two provenances stay separately reviewable above.
+_STRICT_NOT_REFUSED: Final[frozenset[str]] = _STRICT_EXEMPT_REASONS | _STRICT_UNRESOLVED_REASONS
+
+#: The crate's input-envelope refusal marker — the stable fragment
+#: ``rust/fno-math/src/input_refused.rs::INPUT_REFUSED_MARKER`` stamps on
+#: every deliberate out-of-envelope input rejection (byte-identical to the
+#: ``rust/brutex-strategies`` constant of the same name — ONE doctrine
+#: repo-wide, DEC-RUST-STRICT-NO-FALLBACK-001). Its presence is what
+#: separates CLASS C (keep degrading, even under strict mode) from CLASS A/B
+#: (refuse) inside the shared ``(ValueError, TypeError, OverflowError)``
+#: degrade classes; a crate FAULT is deliberately left UNMARKED.
+#: Cross-language drift is pinned by the unit suite against the real wheel.
+_INPUT_REFUSED_MARKER: Final[str] = "input outside the crate envelope"
 
 #: Once-per-process-per-reason fallback memo + the engaged-once latch.
 #: LOG-VOLUME state ONLY — results never depend on it (the documented
@@ -279,6 +355,20 @@ def reset_cvar_observability_for_tests() -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a Python fall-back under strict mode, honouring the two sets.
+
+    Function-local import: :mod:`brutex.ranking` is imported BY the engine, so
+    a module-scope ``brutex.config`` import here would risk the same cycle
+    class the flag resolver already dodges (module docstring).
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    if reason in _STRICT_NOT_REFUSED:
+        return
+    refuse_if_strict(_STRICT_FACADE, reason, fn=_FN, **context)
+
+
 def _warn_fallback_once(reason: str, **context: object) -> None:
     """Log ``cvar_gate.fallback`` (WARNING) once per process per *reason*.
 
@@ -286,7 +376,12 @@ def _warn_fallback_once(reason: str, **context: object) -> None:
     reason (a stale wheel, a latched kernel) would flood the logs; repeats
     fall back silently. The fallback itself is bit-exact regardless — the
     Python oracle serves the call.
+
+    Choke point #1 of two. Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001)
+    refuses BEFORE the memo write, so an already-warned sticky reason cannot
+    slip through the early return.
     """
+    _refuse_if_strict(reason, **context)
     key = f"{_FN}:{reason}"
     if key in _OBSERVABILITY_MEMO:
         return
@@ -295,7 +390,14 @@ def _warn_fallback_once(reason: str, **context: object) -> None:
 
 
 def _disable_kernel(reason: str, **context: object) -> None:
-    """Latch the kernel OFF for the process (burn-in mismatch autorevert)."""
+    """Latch the kernel OFF for the process (burn-in mismatch autorevert).
+
+    Choke point #2 of two. Strict mode refuses BEFORE the latch write, which
+    makes the latched ``kernel_disabled`` early-return in
+    :func:`_cvar_tail_fold_rust` structurally unreachable — the wiring is
+    complete by construction, not by sampling.
+    """
+    _refuse_if_strict(reason, **context)
     if _FN not in _KERNEL_DISABLED_REASON:
         _KERNEL_DISABLED_REASON[_FN] = reason
         _LOG.error("cvar_gate.kernel_autoreverted", fn=_FN, reason=reason, **context)
@@ -327,6 +429,29 @@ def _resolve_kernel() -> Callable[..., object] | None:
         _warn_fallback_once("wheel_stale", attr="stats_cvar_tail_fold")
         return None
     return kernel
+
+
+def _kernel_degrade_reason(exc: BaseException) -> str:
+    """Classify a kernel-FFI degrade as CLASS C (input) or CLASS A/B (fault).
+
+    Reads the EVIDENCE THE CRATE SUPPLIED — never a guess from the exception
+    class, which is shared across both populations (``TypeError`` arrives
+    from a non-int element AND from a stale wheel's arity mismatch;
+    ``ValueError`` from a byzantine module AND from the crate's structural
+    arms):
+
+    * :data:`_INPUT_REFUSED_MARKER` present → ``kernel_input_refused``, the
+      crate's own "this INPUT is outside my envelope, serve the oracle"
+      stamp (non-int P&L element, int past i64, non-sequence ``pnls``,
+      non-int *alpha_bps*) — strict mode does NOT refuse it;
+    * absent → ``kernel_error``, the genuine-fault remainder (a stale wheel
+      whose call shape drifted, a foreign module bound to the symbol, broken
+      internals, and the crate's two deliberately-unmarked structural arms
+      the Python pre-gate makes unreachable) — strict mode REFUSES it.
+    """
+    if _INPUT_REFUSED_MARKER in str(exc):
+        return "kernel_input_refused"
+    return "kernel_error"
 
 
 def _cvar_tail_fold_python(pnls: Sequence[int], alpha_bps: int) -> CvarTailFold:
@@ -370,12 +495,14 @@ def _fold_via_kernel(pnls: Sequence[int], alpha_bps: int) -> CvarTailFold | None
     """Run the Rust fold; ``None`` ⇒ the caller serves the Python oracle.
 
     Degrade ladder (each arm warn-once, results bit-identical either way):
-    latched kernel → wheel missing/stale → a kernel fault (``ValueError`` /
-    ``TypeError`` / ``OverflowError`` — the kernel's structural arms + PyO3
-    conversion failures; any OTHER exception type propagates and
-    ``MemoryError`` re-raises bare) → a shape-invalid result (refused
-    LOUDLY, ``cvar_gate.kernel_result_refused`` ERROR). During burn-in a
-    compare mismatch ships the ORACLE triple and latches the kernel.
+    latched kernel → wheel missing/stale → a kernel error (``ValueError`` /
+    ``TypeError`` / ``OverflowError``, SPLIT by
+    :func:`_kernel_degrade_reason` into the crate-MARKED
+    ``kernel_input_refused`` and the unmarked-fault ``kernel_error``; any
+    OTHER exception type propagates and ``MemoryError`` re-raises bare) → a
+    shape-invalid result (refused LOUDLY,
+    ``cvar_gate.kernel_result_refused`` ERROR). During burn-in a compare
+    mismatch ships the ORACLE triple and latches the kernel.
     """
     if cvar_kernel_disabled():
         _warn_fallback_once("kernel_disabled")
@@ -386,9 +513,13 @@ def _fold_via_kernel(pnls: Sequence[int], alpha_bps: int) -> CvarTailFold | None
     try:
         result = kernel(list(pnls), alpha_bps)
     except (ValueError, TypeError, OverflowError) as exc:
-        _warn_fallback_once("kernel_error", error=repr(exc)[:200])
+        _warn_fallback_once(_kernel_degrade_reason(exc), error=repr(exc)[:200])
         return None
     if not _valid_fold_result(result, len(pnls)):
+        # CLASS B under strict mode — Rust RAN and returned a structurally
+        # refused shape; the Python re-run must not paper over it. Refuse
+        # BEFORE the memo write so a repeat cannot slip past.
+        _refuse_if_strict("kernel_result_refused", result=repr(result)[:200])
         key = f"{_FN}:kernel_result_refused"
         if key not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add(key)

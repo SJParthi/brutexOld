@@ -15,6 +15,7 @@ engages when installed.
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -40,7 +41,37 @@ from brutex.engine.baseline import BaselineSeries
 from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """Run this module's DEGRADE lattice with the strict gate switched OFF.
+
+    Under DEC-RUST-STRICT-NO-FALLBACK-001 the shipped default is strict-ON, so
+    every CLASS-A/CLASS-B degrade this suite exercises (``wheel_missing``,
+    ``symbol_missing``, ``kernel_raised``, ``result_not_float``,
+    ``alpha_cross_check_failed``) would RAISE instead of serving the oracle
+    triple. The mode is DECLARED here rather than by weakening a single
+    assertion; the strict-ON refusals of the SAME reasons are pinned in
+    :class:`TestStrictRefusal` below.
+
+    Owns its OWN :class:`pytest.MonkeyPatch` context (never the shared
+    ``monkeypatch``) so its teardown cannot interleave with the per-test
+    ``delenv`` in :meth:`TestStrictRefusal._strict_on` — the
+    ``test_ranking_cvar_gate`` precedent.
+
+    FUNCTION-scoped deliberately (the same precedent): ``conftest.py``'s
+    ``pytest_runtest_teardown`` hook runs ``trylast=True`` and restores the
+    process-wide strict baseline after EVERY test, so a ``scope="module"``
+    ``setenv`` would be wiped after the first test in the file and every later
+    degrade case would run strict-ON.
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -320,3 +351,164 @@ class TestConftestBelt:
         import os
 
         assert os.environ.get(ALPHA_GATE_ENV, "0") in {"0", "off", "false", "no"}
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Every OTHER test in this module runs with ``BRUTEX_RUST_STRICT=0``. These
+    DELETE the kill switch so strict mode takes its shipped default (ON) and
+    pin that this facade's ONE choke point (:func:`_refuse_if_strict`, reached
+    from both ``_kernel`` arms and from ``_disable_kernel``) REFUSES instead of
+    quietly serving the Python oracle.
+
+    Both classes are covered:
+
+    * **CLASS A — Rust absent or broke** — ``wheel_missing``,
+      ``symbol_missing``, ``kernel_raised``.
+    * **CLASS B — Rust answered wrongly** — ``result_not_float``,
+      ``alpha_cross_check_failed``.
+
+    There is deliberately no CLASS-C case: this facade's exempt set is EMPTY
+    and provably so (:data:`alpha_metric._STRICT_EXEMPT_REASONS`), because
+    ``_validate_inputs`` runs BEFORE the kernel is consulted, so an input that
+    reaches the crate is one the crate is defined on.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Generator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
+        shared ``monkeypatch`` fixture: ``_strict_off_degrade_lattice`` sets
+        ``BRUTEX_RUST_STRICT=0`` in a *separate* context and pytest tears
+        fixtures down LIFO across fixture objects — a shared-``monkeypatch``
+        ``delenv`` here would record ``"0"`` as the value to restore and leak
+        the kill switch into every later test file in the process.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    # ── CLASS A — Rust absent or broke ─────────────────────────────────────
+
+    def test_class_a_wheel_missing_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.setitem(sys.modules, "fno_math", None)  # import raises
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="wheel_missing"):
+            alpha_vs_buyhold_pct(10_000_000, 100_000_000, 2_500_000, 2_600_000)
+
+    def test_class_a_symbol_missing_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _fake_fno_math(monkeypatch, kernel=None)  # module present, symbol absent
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="symbol_missing"):
+            alpha_vs_buyhold_pct(10_000_000, 100_000_000, 2_500_000, 2_600_000)
+
+    def test_class_a_kernel_raise_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        def _boom(*_args: int) -> float:
+            raise RuntimeError("crate fault")
+
+        _fake_fno_math(monkeypatch, _boom)
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="kernel_raised"):
+            alpha_vs_buyhold_pct(10_000_000, 100_000_000, 2_500_000, 2_600_000)
+
+    # ── CLASS B — Rust answered wrongly ────────────────────────────────────
+
+    @pytest.mark.parametrize("poison", [6, True, None, "6.0"])
+    def test_class_b_non_float_result_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, poison: object
+    ) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        _fake_fno_math(monkeypatch, lambda *_args: poison)
+        with self._strict_on(), pytest.raises(RustFallbackRefused, match="result_not_float"):
+            alpha_vs_buyhold_pct(10_000_000, 100_000_000, 2_500_000, 2_600_000)
+
+    def test_class_b_cross_check_failure_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        # A well-shaped float that is simply WRONG — the refuse-poison belt.
+        _fake_fno_math(monkeypatch, lambda *_args: 123.456)
+        baseline = AlphaBaseline(anchor_open_paisa=2_500_000, last_close_paisa=2_600_000)
+        with (
+            self._strict_on(),
+            pytest.raises(RustFallbackRefused, match="alpha_cross_check_failed"),
+        ):
+            compute_alpha_values(10_000_000, 100_000_000, baseline)
+
+    # ── MemoryError keeps its RAW escape ───────────────────────────────────
+
+    def test_memory_error_still_reraises_raw_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Strict mode must not convert an OOM into a refusal.
+
+        ``MemoryError`` is re-raised BEFORE the choke point, so the operator
+        still sees the real fault rather than a fall-back verdict.
+        """
+
+        def _oom(*_args: int) -> float:
+            raise MemoryError
+
+        _fake_fno_math(monkeypatch, _oom)
+        with self._strict_on(), pytest.raises(MemoryError):
+            alpha_vs_buyhold_pct(10_000_000, 100_000_000, 2_500_000, 2_600_000)
+
+
+class TestCensusFlagDeclaration:
+    """The facade DISOWNS its ranking gate so the census reads it correctly.
+
+    ``BRUTEX_ALPHA_GATE`` is the operator RANKING gate, not a Rust kill
+    switch — the Rust arm here is unconditionally attempted. Without the
+    declaration the census's shape heuristics read the gate as the flag and
+    reported this facade ``OFF``.
+    """
+
+    def test_declaration_names_both_halves_of_the_shape(self) -> None:
+        declared = alpha_metric.RUST_CENSUS_NON_RUST_FLAGS
+        # The VALUE (what the env-value scan matches) …
+        assert ALPHA_GATE_ENV in declared
+        # … the CONSTANT name, and the PREDICATE name (what the *_enabled
+        # scan matches). Missing either half leaves the census mis-reading.
+        assert {"ALPHA_GATE_ENV", "resolve_alpha_gate_enabled"} <= declared
+
+    def test_declaration_is_exported_in_dunder_all(self) -> None:
+        """The name is READ REFLECTIVELY, so it must be exported deliberately.
+
+        ``rust_census.census`` reads it with
+        ``getattr(module, "RUST_CENSUS_NON_RUST_FLAGS", None)`` — a consumer
+        no intra-module analysis can see, which is exactly why CodeQL's
+        ``py/unused-global-variable`` flagged it. The export is the honest
+        fix (it IS part of this module's public contract with the census),
+        and this pin stops a future ``__all__`` tidy-up from silently
+        reopening the alert.
+        """
+        assert "RUST_CENSUS_NON_RUST_FLAGS" in alpha_metric.__all__
+        # Every exported name must resolve — a stale entry is its own defect.
+        for name in alpha_metric.__all__:
+            assert hasattr(alpha_metric, name), name
+
+    def test_census_reports_the_facade_engaged_not_off(self) -> None:
+        """The census-visible effect, pinned end to end.
+
+        Fails LOUDLY if the declaration is deleted, if the census stops
+        honouring it, or if the gate's default flips — any of which would
+        silently restore the ``OFF`` misreading.
+        """
+        pytest.importorskip("fno_math")
+        from brutex.observability.rust_census import census
+
+        rows = {row.module: row for row in census(["brutex.engine.alpha_metric"])}
+        row = rows["brutex.engine.alpha_metric"]
+        assert row.env_var is None, "the ranking gate must not be read as the Rust flag"
+        assert row.flag_on is None, "the ranking gate must not be read as the Rust flag"
+        assert row.crate == "fno_math"
+        assert row.verdict == "ENGAGED"

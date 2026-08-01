@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -178,7 +178,7 @@ jobs:
         run: cargo test --release --locked
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -197,6 +197,27 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/brutex-ops failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+
+      - name: Install brutex_core Rust extension (strict-mode hardware-envelope dep)
+        # DEC-RUST-STRICT-NO-FALLBACK-001: with BRUTEX_RUST_STRICT ON by
+        # default, `brutex/config/hardware_envelope_rust.py` REFUSES
+        # (`crate_unavailable` / ModuleNotFoundError "No module named
+        # 'brutex_core'") instead of serving its Python oracle when the crate
+        # is absent, so any leg that resolves a CPU/RAM budget dies at that
+        # refusal without this wheel. Installed for the whole job so a future
+        # leg widening its imports is covered. Same maturin/abi3 build +
+        # crates.io flake-retry idiom as the brutex-ops step above.
+        run: |
+          n=0
+          until pip install ./rust/brutex-core; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-core failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
 

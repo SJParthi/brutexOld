@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import fno_math
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV
 from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import (
     count_supermasks,
@@ -551,6 +552,22 @@ def _assert_metrics_bit_identical(a: object, b: object) -> None:
             assert x == y, (f.name, x, y)
 
 
+@pytest.fixture
+def _strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable strict mode for tests that exercise the metrics-tail DEGRADE
+    contract (DEC-RUST-STRICT-NO-FALLBACK-001).
+
+    ``BRUTEX_RUST_STRICT`` ships ON, so an exceeded exactness envelope, a
+    poisoned kernel return and a burn-in mismatch now RAISE instead of
+    handing the mask to the Python oracle. Warn-and-degrade stays a
+    supported, kill-switched mode — these tests pin THAT mode and opt in by
+    name; no assertion is weakened, and the fixture is deliberately NOT
+    autouse. The ``exit_indices_demoted`` tests need no opt-in: Rust still
+    serves that path, so it is excluded from the gate.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
+
 class TestRustMetricsTail:
     """metrics_from_trades: flag OFF == flag ON, bit-for-bit, on every path."""
 
@@ -732,6 +749,7 @@ class TestRustMetricsTail:
         off, on = self._both_arms(monkeypatch, bars, [trade], tf_minutes=5)
         _assert_metrics_bit_identical(off, on)
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_envelope_exceeded_falls_back_bit_identical_with_one_warning(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -800,6 +818,7 @@ class TestRustMetricsTail:
         assert on.max_drawdown_duration_bars == 2
         assert on.ulcer_index == 3.5
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_domain_invalid_poison_is_refused_and_equals_python(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1134,6 +1153,7 @@ class TestKernelSelfCheck:
         )
         assert self_check_pending() is False  # budget exhausted — steady state
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_mismatch_ships_the_oracle_value_and_autoreverts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1173,6 +1193,7 @@ class TestKernelSelfCheck:
         # The burn-in budget was NOT consumed by the failed compare.
         assert self_check_pending() is True
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_signed_zero_divergence_is_caught_by_the_bit_compare(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

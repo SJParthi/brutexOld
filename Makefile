@@ -123,6 +123,69 @@ run-raw: preflight
 		$(VPIP) install maturin; \
 		cd rust/brutex-pull-state && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; \
 	}
+	@# The nine DEFAULT-ON facade crates (DEC-RUST-DEFAULT-ON-WAVE-001) that no
+	@# turnkey path built until now — without them every one of their seams
+	@# resolved ON and then silently degraded to its retained Python oracle
+	@# (the flag said Rust, the code ran Python).  ALL OPTIONAL / warn-only —
+	@# the brutex_feed precedent: each facade RETAINS its verbatim Python
+	@# oracle, so a build failure must never block `brutex run`.  Contrast
+	@# brutex_lake above, whose Python cores were DELETED (W-6a) and which is
+	@# therefore REQUIRED.  Written as explicit per-crate blocks (never a
+	@# shell loop) so the box_update.WHEEL_SET drift pin can parse them.
+	@$(VPY) -c "import brutex_core" 2>/dev/null || { \
+		echo "==> brutex_core kernel not importable — building it (OPTIONAL; DEC-CONFIG-RUST-LEAVES-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-core && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_core build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_data" 2>/dev/null || { \
+		echo "==> brutex_data kernel not importable — building it (OPTIONAL; DEC-DATA-RUST-PURELAW-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-data && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_data build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_calendar" 2>/dev/null || { \
+		echo "==> brutex_calendar kernel not importable — building it (OPTIONAL; DEC-RUST-CALENDAR-LEAVES-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-calendar && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_calendar build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_strategies" 2>/dev/null || { \
+		echo "==> brutex_strategies kernel not importable — building it (OPTIONAL; DEC-STRATEGIES-RUST-COMBO-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-strategies && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_strategies build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_notify" 2>/dev/null || { \
+		echo "==> brutex_notify kernel not importable — building it (OPTIONAL; DEC-NOTIFY-RUST-CORE-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-notify && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_notify build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_meta" 2>/dev/null || { \
+		echo "==> brutex_meta kernel not importable — building it (OPTIONAL; DEC-META-LABEL-ANNOTATE-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-meta && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_meta build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_observability" 2>/dev/null || { \
+		echo "==> brutex_observability kernel not importable — building it (OPTIONAL; DEC-RUST-OBSERVABILITY-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-observability && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_observability build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_ops" 2>/dev/null || { \
+		echo "==> brutex_ops kernel not importable — building it (OPTIONAL; backup/crossverify/nightly decision kernels)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-ops && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_ops build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
+	@$(VPY) -c "import brutex_sweep_ops" 2>/dev/null || { \
+		echo "==> brutex_sweep_ops kernel not importable — building it (OPTIONAL; DEC-RUST-SWEEP-OPS-001)"; \
+		$(VPIP) install maturin; \
+		{ cd rust/brutex-sweep-ops && PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/$(VENV)" "$(CURDIR)/$(VENV)/bin/maturin" develop --release; } \
+			|| echo "==> brutex_sweep_ops build failed — OPTIONAL kernel; its seams degrade to the retained Python oracle"; \
+	}
 	$(VPY) -m brutex run
 
 fmt:

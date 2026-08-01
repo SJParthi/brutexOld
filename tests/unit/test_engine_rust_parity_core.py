@@ -156,6 +156,75 @@ def _counter_value(family: str) -> float:
 # ── env_flag_enabled ────────────────────────────────────────────────────
 
 
+class TestStrictOptIn:
+    """The OPT-IN strict gate + its CLASS-C exemption allowlist.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. This core is FACADE-AGNOSTIC: it never
+    hardcodes a caller's reason vocabulary — a family refuses every reason it
+    announces unless the OWNING facade listed that reason in
+    ``strict_exempt_reasons`` (its CLASS-C input-envelope arms).
+
+    Every test takes the SAME ``monkeypatch`` object pytest injects; this
+    module has NO autouse strict fixture, so there is no second
+    ``MonkeyPatch`` object to tear down against (the leak the ranking suite's
+    ``TestStrictRefusal`` docstring warns about).
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_opted_in_family_refuses_a_class_a_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        fam = ParityFamily("test.strict", policy=POLICY_BURN_IN, strict_facade="test.facade")
+        with pytest.raises(RustFallbackRefused, match="kernel_error"):
+            fam.warn_fallback_once("kernel_error")
+
+    def test_exempt_class_c_reason_serves_instead_of_refusing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A facade-declared CLASS-C reason degrades, exactly as strict-OFF."""
+        self._strict_on(monkeypatch)
+        fam = ParityFamily(
+            "test.exempt",
+            policy=POLICY_BURN_IN,
+            strict_facade="test.facade",
+            strict_exempt_reasons=frozenset({"beyond_crate"}),
+        )
+        with capture_logs() as logs:
+            fam.warn_fallback_once("beyond_crate", detail="x")
+        events = [e for e in logs if e["event"] == "rust_parity.fallback"]
+        assert [(e["family"], e["reason"]) for e in events] == [("test.exempt", "beyond_crate")]
+
+    def test_exemption_is_per_reason_not_a_blanket_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SAME family still refuses every reason outside its allowlist."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        fam = ParityFamily(
+            "test.mixed",
+            policy=POLICY_BURN_IN,
+            strict_facade="test.facade",
+            strict_exempt_reasons=frozenset({"beyond_crate"}),
+        )
+        with pytest.raises(RustFallbackRefused):
+            fam.warn_fallback_once("wheel_stale")
+
+    def test_default_family_has_an_empty_allowlist(self) -> None:
+        # An un-opted-in family carries no exemptions — the empty default is
+        # what keeps every unclassified family byte-identical.
+        assert _family().strict_exempt_reasons == frozenset()
+
+
 class TestEnvFlagEnabled:
     @pytest.mark.parametrize("value", ["1", "true", "YES", " on "])
     def test_truthy_forces_on(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:

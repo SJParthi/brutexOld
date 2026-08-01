@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from brutex import money, money_rust
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -32,6 +33,23 @@ def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     money_rust.reset_money_rust_for_tests()
     yield
     money_rust.reset_money_rust_for_tests()
+
+
+@pytest.fixture
+def _strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable strict mode for tests that exercise the DEGRADE contract.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` ON by
+    default, so every fall-back this facade can announce (junk flag, absent
+    / stale / panicking crate, a degrade-set raise, a poisoned crate return,
+    a burn-in mismatch) now RAISES instead of degrading. Warn-and-degrade
+    remains a fully supported, kill-switched mode — these tests pin THAT
+    mode, so they opt into it explicitly rather than having their assertions
+    weakened. Tests of the CLASS-C eligibility gate need no such opt-in: an
+    ineligible input never reaches a choke point, so it degrades under
+    strict mode too (:class:`TestStrictMode` pins exactly that).
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _fake_crate(**overrides: object) -> types.ModuleType:
@@ -122,6 +140,7 @@ class TestFlagParsing:
         monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "   ")
         assert money_rust.money_rust_enabled() is True
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_junk_fails_loud_off_and_warns_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "onn")
         events: list[str] = []
@@ -141,22 +160,62 @@ class TestFlagParsing:
 
     def test_leaf_import_discipline_ast_pin(self) -> None:
         # money_rust must stay a ROOT-leaf module: stdlib + structlog ONLY
-        # at module scope (brutex.data / brutex.engine would cycle or drag
+        # at MODULE scope (brutex.data / brutex.engine would cycle or drag
         # the fno_math wheel under every brutex.money importer). AST pin —
         # the feed_rust precedent.
+        #
+        # The pin now distinguishes module-scope from function-scope imports
+        # instead of walking the whole tree: the DEC-RUST-STRICT-NO-FALLBACK-001
+        # gate MUST be imported inside `_refuse_if_strict`, because
+        # `brutex.config.rust_strict` -> `brutex.config` -> `brutex.data` ->
+        # `brutex.money` is an executed-and-confirmed cycle (see the
+        # `_refuse_if_strict` docstring for the reproduced ImportError). The
+        # module-scope surface is asserted UNCHANGED (still stdlib + structlog),
+        # and the deferred surface is pinned to EXACTLY that one gate import so
+        # this cannot become a general escape hatch.
         import ast
         from pathlib import Path
 
         source = Path(money_rust.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
         allowed = {"importlib", "os", "decimal", "typing", "structlog", "__future__"}
         allowed_from = allowed | {"collections.abc", "types"}
-        for node in ast.walk(ast.parse(source)):
+
+        def module_scope_nodes(body: list[ast.stmt]) -> list[ast.stmt]:
+            # Everything except function bodies (a nested `if TYPE_CHECKING:`
+            # still executes at import, so it stays module scope).
+            out: list[ast.stmt] = []
+            for stmt in body:
+                if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                out.append(stmt)
+                for field in ("body", "orelse", "finalbody"):
+                    nested = getattr(stmt, field, None)
+                    if isinstance(nested, list):
+                        out.extend(module_scope_nodes(nested))
+            return out
+
+        module_level = module_scope_nodes(tree.body)
+        for node in module_level:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     assert alias.name.split(".")[0] in allowed, alias.name
             elif isinstance(node, ast.ImportFrom):
                 assert node.module is not None
                 assert node.module in allowed_from, node.module
+
+        # Deferred (function-scope) imports: exactly the one strict gate.
+        module_level_ids = {id(node) for node in module_level}
+        deferred: list[str] = []
+        for node in ast.walk(tree):
+            if id(node) in module_level_ids:
+                continue
+            if isinstance(node, ast.Import):
+                deferred.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                assert node.module is not None
+                deferred.append(node.module)
+        assert deferred == ["brutex.config.rust_strict"], deferred
 
     def test_truthy_falsy_mirror_sweep_lookahead(self) -> None:
         # The leaf may not IMPORT env_flag_tristate (money is a ROOT leaf —
@@ -173,6 +232,7 @@ class TestFlagParsing:
 
 
 class TestResetSeamAndLatch:
+    @pytest.mark.usefixtures("_strict_off")
     def test_reset_restores_fresh_process_view(self) -> None:
         money_rust._disable("some_reason")  # pyright: ignore[reportPrivateUsage]
         assert money_rust.money_rust_disabled() is True
@@ -187,6 +247,7 @@ class TestResetSeamAndLatch:
         budgets = set(money_rust._BURN_IN_REMAINING.values())  # pyright: ignore[reportPrivateUsage]
         assert budgets == {0}
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_warn_once_suppresses_repeats(self, monkeypatch: pytest.MonkeyPatch) -> None:
         events: list[str] = []
         monkeypatch.setattr(
@@ -199,6 +260,7 @@ class TestResetSeamAndLatch:
         money_rust._warn_once("r2")  # pyright: ignore[reportPrivateUsage]
         assert events == ["r1", "r2"]
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_disable_latches_once_and_repeat_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         warned: list[str] = []
         monkeypatch.setattr(
@@ -211,6 +273,7 @@ class TestResetSeamAndLatch:
         assert money_rust.money_rust_disabled() is True
         assert warned == ["first"]
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_disable_error_logs_autoreverted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         errors: list[str] = []
         monkeypatch.setattr(
@@ -261,18 +324,21 @@ class TestFlagOffNeverTouchesCrate:
 
 
 class TestImportGuard:
+    @pytest.mark.usefixtures("_strict_off")
     def test_absent_crate_latches_and_serves_python(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _arm(monkeypatch, None)  # sys.modules[name] = None → ImportError
         assert str(money.round_money(Decimal("1.005"))) == "1.01"
         assert money_rust.money_rust_disabled() is True
         assert money_rust._DISABLED_REASON[0] == "crate_unavailable"  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_module_missing_api_latches_crate_stale(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "1")
         monkeypatch.setitem(sys.modules, "brutex_core", types.ModuleType("brutex_core"))
         assert money.rupees_to_paisa(Decimal("1.00")) == 100
         assert money_rust._DISABLED_REASON[0] == "crate_stale"  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_non_callable_api_attr_latches_crate_stale(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -280,6 +346,7 @@ class TestImportGuard:
         assert str(money.paisa_to_rupees(5)) == "0.05"
         assert money_rust._DISABLED_REASON[0] == "crate_stale"  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_latched_process_serves_python_without_resolving(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -373,6 +440,103 @@ class TestEligibilityGate:
     def test_eligible_paisa_and_rupees_true_paths(self) -> None:
         assert money_rust._eligible_rupees(Decimal("1.005")) is True  # pyright: ignore[reportPrivateUsage]
         assert money_rust._eligible_paisa(123456) is True  # pyright: ignore[reportPrivateUsage]
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictMode:
+    """Class A/B fall-backs REFUSE; the Class-C eligibility gate does not.
+
+    The split is structural, not a per-reason allowlist: the eligibility gate
+    returns the oracle *before* either choke point (``_warn_once`` /
+    ``_disable``), so an ineligible input has no reason token to refuse.
+    """
+
+    def test_absent_crate_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Strict is ON by default — the fixture never sets the env at all.
+        _arm(monkeypatch, None)  # sys.modules[name] = None → ImportError
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            money.round_money(Decimal("1.005"))
+        message = str(excinfo.value)
+        assert "brutex.money_rust" in message
+        assert "crate_unavailable" in message
+        assert RUST_STRICT_ENV in message
+        # Refused BEFORE the latch — no silently-degraded steady state.
+        assert money_rust.money_rust_disabled() is False
+
+    def test_junk_flag_refuses_under_strict_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "onn")
+        with pytest.raises(RustFallbackRefused, match="flag_unrecognised"):
+            money_rust.money_rust_enabled()
+
+    def test_degrade_set_raise_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(_s: str) -> str:
+            raise ValueError("boom")
+
+        _arm(monkeypatch, _fake_crate(round_money_str=_boom))
+        with pytest.raises(RustFallbackRefused, match="round_money_error"):
+            money.round_money(Decimal("1.005"))
+
+    def test_poisoned_result_refuses_under_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _arm(monkeypatch, _fake_crate(round_money_str=lambda _s: "not-a-number"))
+        with pytest.raises(RustFallbackRefused, match="round_money_result_refused"):
+            money.round_money(Decimal("1.005"))
+
+    @pytest.mark.parametrize(
+        "rupees",
+        [
+            Decimal("1E+21"),  # adjusted > 20 — outside the crate's envelope
+            Decimal("1E-61"),  # exponent < -60
+        ],
+    )
+    def test_ineligible_input_still_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch, rupees: Decimal
+    ) -> None:
+        # CLASS C: the crate deliberately cannot represent these, Python was
+        # always the intended handler. Refusing would crash a legitimate
+        # input — the bomb crate proves the crate is never even consulted.
+        _arm(monkeypatch, _bomb_crate())
+        assert str(money.round_money(rupees)) == str(
+            money._round_money_python(rupees)  # pyright: ignore[reportPrivateUsage]
+        )
+        assert money_rust.money_rust_disabled() is False
+
+    def test_decimal_subclass_still_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class MyDecimal(Decimal):
+            pass
+
+        _arm(monkeypatch, _bomb_crate())
+        assert str(money.round_money(MyDecimal("1.005"))) == "1.01"
+
+    def test_armed_trap_still_serves_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _arm(monkeypatch, _bomb_crate())
+        with localcontext() as ctx:
+            ctx.traps[Inexact] = True
+            assert str(money.round_money(Decimal("1.50"))) == "1.50"
+
+    def test_kill_switch_restores_the_degrade_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+        _arm(monkeypatch, None)
+        assert str(money.round_money(Decimal("1.005"))) == "1.01"
+        assert money_rust.money_rust_disabled() is True
+
+    def test_engaged_success_arm_is_untouched_by_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _arm(monkeypatch, _fake_crate())
+        assert str(money.round_money(Decimal("1.005"))) == "1.01"
+        assert money_rust.money_rust_disabled() is False
 
 
 class TestNarrowedContextGate:
@@ -494,6 +658,7 @@ class TestDegradePaths:
             AttributeError("a"),
         ],
     )
+    @pytest.mark.usefixtures("_strict_off")
     def test_crate_errors_degrade_with_one_warn(
         self, monkeypatch: pytest.MonkeyPatch, exc: Exception
     ) -> None:
@@ -523,6 +688,7 @@ class TestDegradePaths:
         with pytest.raises(exc_type):
             money.format_inr(5)
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_out_of_degrade_set_exception_latches_crate_panic(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -533,6 +699,7 @@ class TestDegradePaths:
         assert money.rupees_to_paisa(Decimal("1.005")) == 101
         assert money_rust._DISABLED_REASON[0] == "crate_panic"  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_panic_exception_class_latches_via_the_belt(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -586,6 +753,7 @@ class TestPanicBelt:
 
 
 class TestRefusePoison:
+    @pytest.mark.usefixtures("_strict_off")
     def test_non_str_result_refused_loudly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _arm(monkeypatch, _fake_crate(round_money_str=lambda _s: 1.01))
         warned: list[str] = []
@@ -601,11 +769,13 @@ class TestRefusePoison:
         "poison",
         ["1.0", "1", "1.005", "", "-", "a.bc", "1.٢٣", "1_0.00", "+1.00", " 1.00"],
     )
+    @pytest.mark.usefixtures("_strict_off")
     def test_malformed_fixed2_refused(self, monkeypatch: pytest.MonkeyPatch, poison: str) -> None:
         _arm(monkeypatch, _fake_crate(round_money_str=lambda _s: poison))
         assert str(money.round_money(Decimal("1.005"))) == "1.01"
 
     @pytest.mark.parametrize("poison", ["", "-", "1.0", "1_0", "١٢", "+1", "0x10"])
+    @pytest.mark.usefixtures("_strict_off")
     def test_malformed_int_refused(self, monkeypatch: pytest.MonkeyPatch, poison: str) -> None:
         _arm(monkeypatch, _fake_crate(rupees_to_paisa_str=lambda _s: poison))
         assert money.rupees_to_paisa(Decimal("1.00")) == 100
@@ -625,6 +795,7 @@ class TestRefusePoison:
             "₹--1.00",
         ],
     )
+    @pytest.mark.usefixtures("_strict_off")
     def test_malformed_inr_refused(self, monkeypatch: pytest.MonkeyPatch, poison: str) -> None:
         _arm(monkeypatch, _fake_crate(format_inr_str=lambda _s: poison))
         assert money.format_inr(123456) == "₹1,234.56"
@@ -667,6 +838,7 @@ class TestBurnIn:
         assert budgets["round_money"] == 0
         assert budgets["format_inr"] == 1  # untouched sibling budget
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_burn_in_mismatch_autoreverts_and_ships_oracle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -686,6 +858,7 @@ class TestBurnIn:
         monkeypatch.setitem(sys.modules, "brutex_core", _bomb_crate())
         assert str(money.round_money(Decimal("1.005"))) == "1.01"
 
+    @pytest.mark.usefixtures("_strict_off")
     def test_post_burn_in_poison_is_caught_by_shape_not_burn_in(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

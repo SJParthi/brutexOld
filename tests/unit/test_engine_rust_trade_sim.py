@@ -21,6 +21,8 @@ carry over verbatim.
 from __future__ import annotations
 
 import sys
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import ModuleType
@@ -58,6 +60,33 @@ from brutex.engine.trade_sim import (
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
+
+
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice() -> Iterator[None]:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    CLASS-A reason (``wheel_missing``, ``exec_grid_kernel_stale``,
+    ``fill_law_kernel_stale``, ``wheel_missing_u128``,
+    ``wheel_missing_exit_counts``) now RAISES ``RustFallbackRefused`` instead
+    of quietly serving the pure-Python dual-feed oracle. This module exists to
+    exercise that oracle arm — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion. Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+
+    The patch runs in its OWN :class:`pytest.MonkeyPatch` context, not the
+    shared ``monkeypatch`` fixture, so ``TestStrictRefusal``'s nested
+    ``delenv`` can never record ``"0"`` as a value to restore across fixture
+    teardown (the shipped ``test_rust_stats`` shape).
+    """
+    from brutex.config import rust_strict
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        yield
+
 
 _DAY = date(2024, 1, 2)  # a regular NSE trading Tuesday
 
@@ -2352,3 +2381,121 @@ class TestSessionTailHoleWarn:
         # LOW-2): the behavioral assertion — the VALUES — is main's, unchanged.
         assert list(session_days) == [_DAY.toordinal()] * 2  # ONE IST session (2024-01-02)
         assert self._tail_hole_events(logs) == []
+
+
+# ────── strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ──────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that BOTH inline warn sites REFUSE
+    instead of quietly handing the window/batch to the Python oracle.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _strict_on() -> Generator[None]:
+        """Delete the kill switch for the DURATION OF THE TEST BODY ONLY.
+
+        Owns its OWN :class:`pytest.MonkeyPatch` context rather than the
+        shared ``monkeypatch`` fixture: ``_strict_off_degrade_lattice`` sets
+        ``BRUTEX_RUST_STRICT=0`` in a *separate* context, and pytest tears
+        fixtures down LIFO across fixture objects — a shared-``monkeypatch``
+        ``delenv`` here would record ``"0"`` as the value to restore and leak
+        the kill switch into every later test file in the process.
+        """
+        from brutex.config import rust_strict
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+            assert rust_strict.strict_mode() is True
+            yield
+
+    def test_class_a_wheel_missing_refuses_at_construction(self) -> None:
+        """CLASS A — **the u64 production degrade**.
+
+        Today's 69-bit vocabulary keeps every real batch on the u64 kernel, so
+        ``wheel_missing`` is the arm that actually fires in production. An
+        absent wheel is a deployment fault, never a legitimate input shape.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setitem(sys.modules, "fno_math", ModuleType("fno_math"))
+            with self._strict_on(), pytest.raises(RustFallbackRefused, match="wheel_missing"):
+                _sim(bars, bits)
+
+    def test_class_a_wheel_missing_exit_counts_refuses_per_call(self) -> None:
+        """CLASS A on the PER-CALL choke point (the second inline warn site)."""
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        bars = _feed()
+        sim = _sim(bars, build_bar_bits(bars))
+        assert sim.rust_active is True  # the wheel is built in CI
+
+        class _NoCounts:
+            """A kernel object lacking the counted twin (stale-wheel shape)."""
+
+        sim._rust = _NoCounts()
+        with (
+            self._strict_on(),
+            pytest.raises(RustFallbackRefused, match="wheel_missing_exit_counts"),
+        ):
+            sim.simulate_masks([0b1], direction=Side.BUY, stop_loss_paisa=300)
+
+    @pytest.mark.parametrize("reason", sorted(_rts_module._STRICT_EXEMPT_REASONS))
+    def test_class_c_exempt_reasons_do_not_refuse(self, reason: str) -> None:
+        """CLASS C — the INPUT is past BOTH kernels' FFI envelope.
+
+        Every one is decided by ``_construction_fallback_reason`` /
+        ``_call_fallback_reason`` BEFORE any kernel is reached, so the crate
+        never ran and Python was always the intended handler. Parametrised
+        over the frozenset itself so a future addition cannot escape the pin.
+        """
+        with self._strict_on():
+            _rts_module._refuse_if_strict(reason, n_masks=1)
+
+    def test_class_c_bar_bits_beyond_u128_serves_the_oracle_end_to_end(self) -> None:
+        """A beyond-u128 ``bar_bits`` word still builds + serves the oracle."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        bits[0] |= 1 << 130
+        masks = [0, 1]
+        with self._strict_on():
+            sim = _sim(bars, bits)
+            assert sim.rust_active is False
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
+        assert got == expected
+
+    def test_class_c_mask_beyond_u128_serves_the_oracle_end_to_end(self) -> None:
+        """The per-call CLASS-C twin: a beyond-u128 batch mask."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        masks = [1 << 130]
+        with self._strict_on():
+            sim = _sim(bars, bits)
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
+        assert got == expected
+
+    def test_strict_off_still_serves_the_oracle(self) -> None:
+        """Kill switch ON (``0``): the SAME CLASS-A path degrades, no raise."""
+        bars = _feed()
+        bits = build_bar_bits(bars)
+        masks = [0, 1]
+        with pytest.MonkeyPatch.context() as mp:
+            from brutex.config import rust_strict
+
+            mp.setenv(rust_strict.RUST_STRICT_ENV, "0")
+            mp.setitem(sys.modules, "fno_math", ModuleType("fno_math"))
+            sim = _sim(bars, bits)
+            assert sim.rust_active is False
+            got = sim.simulate_masks(masks, direction=Side.BUY, stop_loss_paisa=300)
+        expected = [_oracle(bars, bits, m, direction=Side.BUY, stop_loss_paisa=300) for m in masks]
+        assert got == expected

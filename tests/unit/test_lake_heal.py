@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from brutex.data import lake_heal
+from brutex.data import lake_heal, spot_daily_resample
 from brutex.data.catalog import Catalog
 from brutex.data.errors import LakeWriteHalt
 from brutex.data.lake_heal import (
@@ -5327,3 +5327,247 @@ class TestPriceFindingsObserveOnly:
         # No observe_only detail fires for an EMPTY post-filter batch.
         assert _events(logs, "lake_heal.observe_only") == []
         assert len(_events(logs, "lake_heal.price_findings_observe_only")) == 1
+
+
+# ── strict-mode refusal escapes (DEC-RUST-STRICT-NO-FALLBACK-001) ─────────────
+
+
+class TestStrictRefusalEscapes:
+    """``RustFallbackRefused`` is NEVER absorbed by the healer's broad guards.
+
+    Three guards in this module absorb by design — the best-effort stats
+    sidecar, the per-symbol TF-rebuild isolation, and (via
+    ``spot_daily_resample``) the per-target recall isolation. Each also
+    ABSORBED a strict-mode refusal, so the heal reported SUCCESS over work the
+    Rust arm could not do and Python was forbidden to do. Each now carries the
+    same narrow escape the existing ``except LakeWriteHalt: raise`` uses; every
+    other exception keeps its absorbing behaviour byte-identically, and a
+    non-strict process never mints a refusal at all (the escape is inert).
+    """
+
+    @staticmethod
+    def _refuse(*_args: Any, **_kwargs: Any) -> None:
+        """Stand in for a wired facade hitting its fall-back choke point."""
+        from brutex.config.rust_strict import refuse_if_strict
+
+        refuse_if_strict("brutex.data.lake_rust_locks", "crate_unavailable")
+
+    # ── site 1: _bump_stats (the best-effort stats sidecar) ───────────────────
+
+    def test_bump_stats_strict_refusal_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAIL-BEFORE: absorbed as ``lake_heal.stats_write_failed``, sidecar
+        silently unwritten, caller reports success."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        monkeypatch.setattr(lake_heal, "atomic_write_simple", self._refuse)
+        with pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+            lake_heal._bump_stats(tmp_path, healed=1, quarantined=1, now_fn=_now)
+
+    def test_bump_stats_strict_off_serves_the_python_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The kill switch keeps TODAY's behaviour at the REAL choke point: the
+        facade degrades, so the sidecar is written normally."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+        real = lake_heal.atomic_write_simple
+
+        def _degrade(*args: Any, **kwargs: Any) -> Any:
+            self._refuse()  # raises NOTHING under strict-OFF
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(lake_heal, "atomic_write_simple", _degrade)
+        lake_heal._bump_stats(tmp_path, healed=1, quarantined=1, now_fn=_now)
+        assert load_heal_stats(tmp_path)["healed_partitions_total"] == 1
+
+    def test_bump_stats_other_errors_still_absorb_under_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The escape is NARROW — a real OSError keeps the best-effort degrade."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+
+        def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise OSError("simulated stats write failure")
+
+        monkeypatch.setattr(lake_heal, "atomic_write_simple", _boom)
+        with capture_logs() as logs:
+            lake_heal._bump_stats(tmp_path, healed=1, quarantined=1, now_fn=_now)
+        assert len(_events(logs, "lake_heal.stats_write_failed")) == 1
+        assert load_heal_stats(tmp_path) == {}
+
+    # ── site 2: _rebuild_tf_months (per-symbol recall isolation) ──────────────
+
+    def _poisoned_tf_lake(self, tmp_path: Path) -> tuple[Path, LakeScanReport]:
+        """A lake with a materialised 5m TF and a dup-poisoned 1minute."""
+        lake = tmp_path / "lake"
+        _write_spot(lake, [_bar(_ts(0)), _bar(_ts(1))])
+        materialize_lake_timeframes(
+            lake_root=lake,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            tfs=["5m"],
+        )
+        _replant_with_dup(_dest(lake))
+        return lake, scan_lake_invariants(lake)
+
+    def test_rebuild_tf_months_strict_refusal_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FAIL-BEFORE: absorbed as ``lake_heal.tf_rebuild_failed``; the TF
+        months stayed quarantine-DELETED while the batch reported success."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        lake, scan = self._poisoned_tf_lake(tmp_path)
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", self._refuse)
+        with pytest.raises(RustFallbackRefused, match="crate_unavailable"):
+            heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=True,
+                now=_now,
+            )
+
+    def test_rebuild_tf_months_other_errors_still_absorb_under_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The escape is NARROW — a ValueError keeps the per-symbol isolation."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        lake, scan = self._poisoned_tf_lake(tmp_path)
+
+        def _boom(**_kwargs: Any) -> Any:
+            raise ValueError("simulated rebuild failure")
+
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", _boom)
+        with capture_logs() as logs:
+            report = heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=True,
+                now=_now,
+            )
+        assert report.recall is not None
+        assert report.recall.tf_failed == 1
+        assert len(_events(logs, "lake_heal.tf_rebuild_failed")) == 1
+
+    def test_rebuild_tf_months_lake_write_halt_escape_survives(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The PRE-EXISTING ``except LakeWriteHalt: raise`` escape is untouched
+        by the new sibling clause."""
+        from brutex.data.errors import LakeWriteHalt
+
+        lake, scan = self._poisoned_tf_lake(tmp_path)
+
+        def _halt(**_kwargs: Any) -> Any:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr(lake_heal, "materialize_lake_timeframes", _halt)
+        with pytest.raises(LakeWriteHalt):
+            heal_findings(
+                scan.findings,
+                lake_root=lake,
+                files_scanned=scan.files_scanned,
+                mode="auto",
+                recall=True,
+                now=_now,
+            )
+
+    # ── site 3, THE SHARPEST EDGE: the boot sweep no longer claims success ────
+
+    def _recall_lake(self, tmp_path: Path) -> Path:
+        """A lake whose 1minute is dup-poisoned, so the heal triggers a recall."""
+        lake = tmp_path / "lake"
+        _poison(_dest(lake), [(_ts(0), 100.0, 10), (_ts(0), 999.0, 11)])
+        return lake
+
+    def test_startup_sweep_refusal_never_stamps_the_sentinel_or_claims_healed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE pin that proves the fix matters.
+
+        Pre-fix, a refusal inside the daily recall was absorbed per-target, so
+        ``run_startup_sweep`` completed: ``lake_heal.sweep_complete`` reported
+        ``healed=1`` and the swept sentinel was STAMPED — and because the next
+        boot skips on a sentinel token match, the lake stayed silently
+        under-derived FOREVER. Now the refusal propagates out of the sweep
+        BEFORE either happens, so the next boot re-attempts.
+        """
+        from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        lake = self._recall_lake(tmp_path)
+        monkeypatch.setattr(spot_daily_resample, "fill_daily_from_minute", self._refuse)
+        with capture_logs() as logs, pytest.raises(RustFallbackRefused):
+            run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert load_last_sweep(lake) is None  # NEVER stamped
+        assert _events(logs, "lake_heal.sweep_complete") == []  # NEVER claimed
+
+    def test_startup_sweep_strict_off_stamps_and_completes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The kill-switch mirror over the SAME facade call: strict OFF mints no
+        refusal, so the sweep completes and stamps exactly as before."""
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+        lake = self._recall_lake(tmp_path)
+        real = spot_daily_resample.fill_daily_from_minute
+
+        def _degrade(*args: Any, **kwargs: Any) -> Any:
+            self._refuse()  # raises NOTHING under strict-OFF
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(spot_daily_resample, "fill_daily_from_minute", _degrade)
+        with capture_logs() as logs:
+            result = run_startup_sweep(lake, per_file_pause=lambda: None, now=_now)
+        assert result.report is not None
+        assert result.report.healed == 1
+        assert load_last_sweep(lake) is not None  # stamped, exactly as today
+        assert len(_events(logs, "lake_heal.sweep_complete")) == 1
+
+    # ── site 4: run_sync — the documented, PINNED honest terminal ─────────────
+
+    def test_run_sync_blanket_reports_the_refusal_as_an_honest_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``StartupSweeper.run_sync``'s "boot never crashes" blanket is
+        REACHABLE un-shadowed under strict mode (proven twice: transitively via
+        the three inner escapes above, and directly — ``run_startup_sweep``
+        contains ZERO try blocks, so its own sentinel ``atomic_write_simple``
+        is un-guarded). It is DELIBERATELY left absorbing, because unlike the
+        three inner sites it absorbs into an HONEST FAILURE, not into a success
+        claim: nothing is stamped, no ``sweep_complete`` is logged, ``None`` is
+        returned, and the refusal's full message — facade, reason and kill
+        switch — is carried on a structured ``lake_heal.sweep_failed`` WARNING.
+        This pins that terminal so it can never silently become a success.
+        """
+        from brutex.config.rust_strict import RUST_STRICT_ENV
+
+        monkeypatch.setenv(RUST_STRICT_ENV, "1")
+        lake = self._recall_lake(tmp_path)
+        monkeypatch.setattr(spot_daily_resample, "fill_daily_from_minute", self._refuse)
+        with capture_logs() as logs:
+            assert StartupSweeper(lake).run_sync() is None
+        failures = _events(logs, "lake_heal.sweep_failed")
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        # The operator gets the refusal verbatim, not a generic degrade line.
+        assert "crate_unavailable" in str(failures[0]["error"])
+        assert "BRUTEX_RUST_STRICT" in str(failures[0]["error"])
+        assert load_last_sweep(lake) is None  # still never stamped
+        assert _events(logs, "lake_heal.sweep_complete") == []

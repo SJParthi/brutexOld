@@ -16,6 +16,7 @@ import sys
 
 import fno_math
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.engine.rust_metrics import (
     FLAT_DRAWDOWN_STATS,
     MAX_EXACT_EQUITY_PAISA,
@@ -48,6 +49,26 @@ def _fresh_memo() -> None:
     fresh burn-in budget / unlatched kernel (self-check isolation)."""
     reset_observability_memo_for_tests()
     reset_self_check_for_tests()
+
+
+@pytest.fixture
+def _strict_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable strict mode for tests that exercise the DEGRADE contract.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships ``BRUTEX_RUST_STRICT`` ON by
+    default, so every fall-back this facade announces (junk flag, absent /
+    stale wheel, a degrade-set raise, a poisoned kernel return, a burn-in
+    mismatch) now RAISES instead of degrading. Warn-and-degrade remains a
+    fully supported, kill-switched mode — these tests pin THAT mode, so they
+    opt into it explicitly by name rather than having their assertions
+    weakened. Deliberately NOT autouse: a test that does not name this
+    fixture runs under production strict mode.
+
+    Tests of ``exit_indices_demoted`` need no opt-in — it is excluded from
+    the gate because Rust still serves it (``rust_metrics._NOT_A_FALLBACK``),
+    and :class:`TestStrictMode` pins exactly that.
+    """
+    monkeypatch.setenv(RUST_STRICT_ENV, "0")
 
 
 def _bits(x: float) -> bytes:
@@ -87,6 +108,7 @@ def test_flag_empty_follows_the_default(monkeypatch: pytest.MonkeyPatch, value: 
 
 
 @pytest.mark.parametrize("value", ["flase", "0ff", "disable", "garbage", "2"])
+@pytest.mark.usefixtures("_strict_off")
 def test_flag_unrecognised_fails_safe_off_with_one_warning(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
@@ -144,6 +166,7 @@ def test_reset_restores_the_full_burn_in_budget() -> None:
     assert SELF_CHECK_SAMPLES > 0
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_disable_kernel_latches_and_logs_error_once() -> None:
     assert kernel_disabled() is False
     with capture_logs() as logs:
@@ -156,6 +179,7 @@ def test_disable_kernel_latches_and_logs_error_once() -> None:
     assert events[0]["n_bars"] == 5
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_latched_kernel_short_circuits_with_warn_once() -> None:
     """Once autoreverted, the seam never touches the kernel again this process."""
     disable_kernel("self_check_mismatch")
@@ -225,6 +249,7 @@ def test_envelope_uses_absolute_pnl() -> None:
 # ── warn-once memo ──────────────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_warn_fallback_once_logs_first_then_silent() -> None:
     with capture_logs() as logs:
         warn_fallback_once("some_reason", n_trades=3)
@@ -235,6 +260,7 @@ def test_warn_fallback_once_logs_first_then_silent() -> None:
     assert events[0]["n_trades"] == 3
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_warn_fallback_once_new_reason_warns_again() -> None:
     with capture_logs() as logs:
         warn_fallback_once("reason_a")
@@ -245,6 +271,7 @@ def test_warn_fallback_once_new_reason_warns_again() -> None:
     ]
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_reset_restores_first_occurrence_logging() -> None:
     with capture_logs() as logs:
         warn_fallback_once("reason_a")
@@ -321,6 +348,7 @@ def test_kernel_success_logs_engaged_once() -> None:
     assert engaged[0]["n_bars"] == 2
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_kernel_error_falls_back_with_one_warning() -> None:
     """A real kernel ValueError (index out of range) degrades to the oracle."""
     with capture_logs() as logs:
@@ -343,6 +371,7 @@ def test_kernel_memory_error_reraises_bare(monkeypatch: pytest.MonkeyPatch) -> N
         drawdown_stats_via_kernel(2, 1_000, [(0, 10)])
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_wheel_stale_falls_back_with_one_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     """A wheel that imports but lacks the Phase-B symbol degrades loudly."""
     monkeypatch.delattr(fno_math, "sweep_drawdown_stats")
@@ -353,6 +382,7 @@ def test_wheel_stale_falls_back_with_one_warning(monkeypatch: pytest.MonkeyPatch
     assert [e["reason"] for e in events] == ["wheel_stale"]
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_wheel_missing_falls_back_with_one_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     """A truly absent wheel (ImportError arm) degrades loudly.
 
@@ -367,6 +397,7 @@ def test_wheel_missing_falls_back_with_one_warning(monkeypatch: pytest.MonkeyPat
     assert [e["reason"] for e in events] == ["wheel_missing"]
 
 
+@pytest.mark.usefixtures("_strict_off")
 def test_poisoned_result_is_refused_loudly_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A domain-invalid kernel return is REFUSED (ERROR log), never adopted."""
 
@@ -418,3 +449,106 @@ def test_metrics_kernel_source_has_no_rayon() -> None:
     assert "use rayon" not in src
     assert "rayon::" not in src
     assert ".mul_add(" not in src  # an explicit FMA would fuse where CPython rounds twice
+
+
+# ── strict mode: no silent Python fall-back ─────────────────────────────
+
+
+class TestStrictMode:
+    """DEC-RUST-STRICT-NO-FALLBACK-001 at this facade's three choke points.
+
+    Every path that hands a mask to the Python oracle must REFUSE under
+    ``BRUTEX_RUST_STRICT`` — and the ONE reason that is *not* a fall-back
+    (``exit_indices_demoted``, where Rust still serves) must NOT.
+    """
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "flag_unrecognised",
+            "wheel_missing",
+            "wheel_stale",
+            "kernel_disabled",
+            "kernel_error",
+            "equity_envelope_exceeded",
+        ],
+    )
+    def test_every_genuine_fallback_reason_refuses(self, reason: str) -> None:
+        """Each reason that routes a mask to Python raises, naming itself."""
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            warn_fallback_once(reason, n_trades=3)
+        message = str(excinfo.value)
+        assert "brutex.engine.rust_metrics" in message
+        assert reason in message
+        assert RUST_STRICT_ENV in message
+
+    def test_exit_indices_demoted_does_not_refuse(self) -> None:
+        """The ONE non-fall-back reason stays a plain warn-once.
+
+        ``_exit_pairs`` demotes to the bisect fold and hands the IDENTICAL
+        pairs to the SAME Rust kernel — Rust serves, so refusing would crash
+        a correct mask (``rust_metrics._NOT_A_FALLBACK``). It must still be
+        ANNOUNCED, so the degrade sentinel keeps seeing the site.
+        """
+        with capture_logs() as logs:
+            warn_fallback_once("exit_indices_demoted", n_trades=2)
+        events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+        assert len(events) == 1
+        assert events[0]["reason"] == "exit_indices_demoted"
+
+    def test_disable_kernel_refuses_before_latching(self) -> None:
+        """A burn-in mismatch raises, and does NOT leave a latched process.
+
+        Refusing BEFORE the latch matters: a refused process must not be left
+        in a silently-degraded steady state where every later mask is served
+        by Python.
+        """
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            disable_kernel("self_check_mismatch", n_bars=5)
+        assert "self_check_mismatch" in str(excinfo.value)
+        assert kernel_disabled() is False
+
+    def test_poisoned_kernel_result_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ``kernel_result_refused`` arm is gated too.
+
+        It announces through its OWN ``_LOG.error`` rather than
+        ``warn_fallback_once``, so without its own gate call it would be the
+        one unrefused Python path left.
+        """
+
+        def _poison(n_bars: int, start: int, exits: list[tuple[int, int]]) -> object:
+            return ("not", "a", "drawdown", "tuple")
+
+        monkeypatch.setattr(fno_math, "sweep_drawdown_stats", _poison)
+        with pytest.raises(RustFallbackRefused) as excinfo:
+            drawdown_stats_via_kernel(2, 1_000, [(0, 10)])
+        assert "kernel_result_refused" in str(excinfo.value)
+
+    def test_healthy_kernel_call_is_untouched_by_strict_mode(self) -> None:
+        """Strict mode changes NOTHING on the path Rust serves.
+
+        The whole point: with the wheel present and the input inside the
+        envelope there is no fall-back to refuse, so the kernel answers
+        exactly as it does with strict mode off.
+        """
+        assert drawdown_stats_via_kernel(4, 1_000, [(1, -100), (3, 200)]) == (
+            100,
+            10.0,
+            2,
+            _ulcer(),
+        )
+
+    @pytest.mark.usefixtures("_strict_off")
+    def test_strict_off_restores_the_degrade_contract(self) -> None:
+        """The kill switch is the ONE lever back to warn-and-degrade."""
+        with capture_logs() as logs:
+            warn_fallback_once("wheel_missing")
+        events = [e for e in logs if e["event"] == "sweep_rust_metrics.fallback"]
+        assert len(events) == 1
+        assert events[0]["reason"] == "wheel_missing"
+
+
+def _ulcer() -> float:
+    """Ulcer index of equity [1000, 900, 900, 1100] — the known-values curve."""
+    dd_pct = 100.0 / 1000.0
+    return math.sqrt((dd_pct * dd_pct + dd_pct * dd_pct) / 4.0) * 100.0

@@ -1184,10 +1184,23 @@ class TestExecRustDispatch:
         AND this executor's broad catch), and a 20-slot wire was silently
         truncated-adopted. Every malformed shape now lands on the
         byte-identical Python arm with ONE loud seam-side
-        ``exec_rust.kernel_fallback`` (``KernelWireFault``)."""
+        ``exec_rust.kernel_fallback`` (``KernelWireFault``).
+
+        DEC-RUST-STRICT-NO-FALLBACK-001: this pins the DEGRADE, which is
+        exactly what strict mode forbids — a malformed kernel wire is CLASS B
+        (the Rust arm answered wrongly), so refusing is the correct SHIPPED
+        behaviour. The mode is therefore DECLARED here rather than by
+        weakening any assertion, and the strict-ON refusal is pinned
+        POSITIVELY by
+        ``test_malformed_kernel_wire_refuses_under_the_strict_default``
+        below. The declaration is scoped to THIS test — not the whole class —
+        so the other dispatch tests keep their strict teeth live.
+        """
         import fno_math
         from brutex import exec_rust
+        from brutex.config import rust_strict
 
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
         window = _window()
         off = self._off(monkeypatch, window)
         exec_rust.reset_warn_memo_for_tests()
@@ -1213,4 +1226,40 @@ class TestExecRustDispatch:
         assert len(events) == 1
         assert events[0]["site"] == "materialize_futures_tail"
         assert events[0]["error_type"] == "KernelWireFault"
+        exec_rust.reset_warn_memo_for_tests()
+
+    def test_malformed_kernel_wire_refuses_under_the_strict_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The POSITIVE companion to the degrade pin above.
+
+        DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON, so a malformed
+        kernel wire (CLASS B — the Rust arm answered wrongly) must RAISE
+        ``RustFallbackRefused`` out of the seam instead of quietly handing the
+        call to the Python tail. Deleting the kill switch takes the shipped
+        default, which is asserted rather than assumed.
+        """
+        import fno_math
+        from brutex import exec_rust
+        from brutex.config import rust_strict
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+        window = _window()
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        fake = SimpleNamespace(
+            exec_futures_materialize=lambda *_a: ("trade", list(range(17))),
+            **{
+                n: getattr(fno_math, n)
+                for n in ("exec_futures_charge_stack", "exec_apply_futures_fill")
+            },
+        )
+        monkeypatch.setattr(exec_rust, "_rust", fake)
+        with pytest.raises(RustFallbackRefused):
+            materialize_futures_trade(
+                _signal(), resolver=_Resolver(), source=_Source(window=window)
+            )
         exec_rust.reset_warn_memo_for_tests()

@@ -78,6 +78,58 @@ oracle with the ``"non-exact str"`` marker → ``nonexact_key_refused``.
   difference ships the ORACLE value and autoreverts the Rust path for the
   process (``combo_rust.autoreverted`` ERROR — the #1531/#1532 pattern).
 
+## Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001)
+
+Every fall-back funnels through exactly TWO choke points —
+:func:`_warn_once` and :func:`_disable` — so
+:func:`~brutex.config.rust_strict.refuse_if_strict` at those two points is
+a *complete* block on the Python arm. The choke points are SHARED across
+reason classes, so the exemption is an explicit, reviewable module-level
+allowlist (:data:`_STRICT_EXEMPT_REASONS`) rather than a buried ``if``:
+
+* REFUSED (CLASS A — Rust absent / latched / broke) — ``flag_unrecognised``,
+  ``crate_unavailable``, ``crate_stale``, ``crate_panic``;
+* REFUSED (CLASS B — Rust ran and answered wrongly) —
+  ``canonical_result_refused``, ``scan_result_refused``,
+  ``burn_in_mismatch_canonical``, ``burn_in_mismatch_scan``, plus
+  ``canonical_json_error`` / ``scan_error`` — which now mean EXACTLY "the
+  crate raised an UNMARKED error", i.e. a caught render panic surfacing as
+  ``RuntimeError`` or broken wheel internals surfacing as
+  ``AttributeError``. Every deliberate INPUT refusal the crate raises is
+  marked (below), so what is left in these two tokens is a genuine fault;
+* EXEMPT, ruled (CLASS C — the input is outside the crate's envelope and the
+  Python oracle was ALWAYS the intended handler) — ``nonexact_key_refused``,
+  ``canonical_json_input_refused``, ``scan_input_refused``. Refusing any of
+  these would turn a legitimate, byte-equal, pinned call into a crash.
+
+The CLASS-B/CLASS-C split inside the two shared degrade sets is minted in
+the CRATE, not sniffed here (DEC-RUST-STRICT-NO-FALLBACK-001, task #8 — the
+``nonexact_key_refused`` treatment generalised): ``python.rs`` stamps every
+input-envelope refusal it raises with the stable
+``INPUT_REFUSED_MARKER`` fragment (:data:`_INPUT_REFUSED_MARKER`) and leaves
+a fault UNMARKED, so the choke point classifies on evidence the crate
+itself supplied. The marked population, per crate site:
+
+* ``canonical_json_input_refused`` — an int beyond ``i128``
+  (``combo._canonicalise_value`` passes ints through unbounded); a
+  lone-surrogate ``str`` VALUE; a lone-surrogate EXACT-``str`` KEY (the
+  second fail-closed key path); a non-``str`` dict key; an unsupported node
+  type (a bare float on a hostile DIRECT call); the defensive walk-depth
+  cap. All pinned byte-equal by
+  ``tests/property/test_combo_rust_differential.py``.
+* ``scan_input_refused`` — the crate's ``Vec<String>`` extraction (a
+  non-``str`` element, a lone-surrogate ``str``, a non-sequence argument)
+  AND, minted PYTHON-side one step earlier, the ON-arm materialization
+  unpack of a malformed ``(name, value)`` pair, whose degrade is pinned to
+  RETURN A CORRECT ANSWER (not raise) by
+  ``test_offender_before_malformed_pair_returns_name``.
+
+:data:`_STRICT_UNRESOLVED_REASONS` is consequently EMPTY — no reason is
+held out of the taxonomy any more.
+
+Because :func:`_disable` refuses before it latches, the
+``rust_combo_disabled()`` short-circuit is unreachable under strict mode.
+
 ## Local twins (NOT engine / data imports — verified cycle + import-minimalism)
 
 ``env_flag_tristate`` is a LOCAL twin of
@@ -90,7 +142,15 @@ module scope — and combo.py imports THIS module at module scope.
 combo.py sits on a very-early hot import path and must not grow a
 strategies→data package edge for two tiny helpers (the ``lake_rust_stats``
 local-twin precedent). BOTH twins are equality-PINNED by tests, which import
-the originals freely. Import surface of this module: stdlib + structlog ONLY.
+the originals freely. Import surface of this module: stdlib + structlog +
+the ONE strict-mode gate ``brutex.config.rust_strict``
+(DEC-RUST-STRICT-NO-FALLBACK-001) — a stdlib-only leaf itself
+(``config.env_flags`` + ``models``) that this module ALREADY drags
+transitively: importing ``brutex.strategies.combo_rust`` runs
+``brutex/strategies/__init__``, which hard-imports ``combo.py``, so
+``brutex.config``/``brutex.data`` are already resident. MEASURED: adding the
+module-scope import changes ``len(sys.modules)`` by 0 (394 → 394) and pulls
+in no ``polars``, so the import-minimalism law above is untouched.
 
 ## Honesty (ADR-0020 banner; CLAUDE.md Golden Rule #10)
 
@@ -113,6 +173,8 @@ import os
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
+
+from brutex.config.rust_strict import refuse_if_strict
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -176,12 +238,77 @@ _DEGRADE_ERRORS: Final[tuple[type[Exception], ...]] = (
     AttributeError,
 )
 
+#: Fall-back reasons strict mode must NOT refuse — the CLASS-C exemption
+#: (DEC-RUST-STRICT-NO-FALLBACK-001; module docstring's strict-mode section
+#: for the full three-way class split). The two choke points below are
+#: SHARED by all reason classes, so the exemption is enumerated HERE, once,
+#: rather than hidden in an ``if`` at a call site.
+#:
+#: Every member is an input the CRATE ITSELF declines (each one marked at
+#: the raise site — :data:`_NONEXACT_KEY_MARKER` /
+#: :data:`_INPUT_REFUSED_MARKER`) or, for the scan's materialization unpack,
+#: a malformed pair the crate never sees. In all three the Python oracle is
+#: the intended handler and serves the call CORRECTLY and byte-equally, so
+#: refusing would crash a legitimate call:
+#:
+#: * ``nonexact_key_refused`` — a ``str``-SUBCLASS dict key, declined by the
+#:   crate's exact-type gate because a subclass may sort differently under
+#:   ``sort_keys``.
+#: * ``canonical_json_input_refused`` — an out-of-``i128`` int, a
+#:   lone-surrogate ``str`` value or exact-``str`` key, a non-``str`` key,
+#:   an unsupported node type (a bare float on a hostile direct call), or
+#:   the defensive walk-depth cap.
+#: * ``scan_input_refused`` — the crate's ``Vec<String>`` extraction
+#:   (non-``str`` element / lone surrogate / non-sequence) and the ON-arm
+#:   materialization unpack of a malformed ``(name, value)`` pair.
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "nonexact_key_refused",
+        "canonical_json_input_refused",
+        "scan_input_refused",
+    }
+)
+
+#: EMPTY — nothing is held out of the taxonomy any more.
+#:
+#: ``canonical_json_error`` and ``scan_error`` used to live here because each
+#: bundled genuine "Rust broke" cases together with a test-pinned CLASS-C
+#: population, indistinguishable at the choke point. That is resolved: the
+#: crate now MARKS every input-envelope refusal it raises
+#: (:data:`_INPUT_REFUSED_MARKER`, ``rust/brutex-strategies/src/python.rs``),
+#: those cases route to the ``*_input_refused`` members of
+#: :data:`_STRICT_EXEMPT_REASONS` above, and the two original tokens retain
+#: exactly the UNMARKED remainder — a caught render panic (``RuntimeError``)
+#: or broken wheel internals (``AttributeError``) — which is CLASS B/A and
+#: DOES refuse.
+#:
+#: The set is kept (empty) rather than deleted so a future "held pending a
+#: ruling" reason has a named, reviewable home instead of being quietly
+#: folded into the ruled exemption.
+_STRICT_UNRESOLVED_REASONS: Final[frozenset[str]] = frozenset()
+
+#: The reasons strict mode does NOT refuse — the ruled CLASS-C exemption
+#: plus the (currently empty) unresolved-pending-ruling set, unioned at ONE
+#: point so the two provenances stay separately reviewable above.
+_STRICT_NOT_REFUSED: Final[frozenset[str]] = _STRICT_EXEMPT_REASONS | _STRICT_UNRESOLVED_REASONS
+
 #: The crate's str-SUBCLASS-key refusal marker (the STABLE fragment inside
 #: the ``TypeError`` message ``canonical_json: dict key is a str subclass
 #: (non-exact str) — refused to the oracle``) — distinguishes the
-#: ``nonexact_key_refused`` reason from a generic ``canonical_json_error``
-#: degrade inside the shared ``TypeError`` class.
+#: ``nonexact_key_refused`` reason from the other CLASS-C refusals and from
+#: a genuine fault inside the shared ``TypeError`` class.
 _NONEXACT_KEY_MARKER: Final[str] = "non-exact str"
+
+#: The crate's GENERIC input-envelope refusal marker — the stable fragment
+#: ``python.rs::INPUT_REFUSED_MARKER`` stamps on every deliberate
+#: out-of-envelope input rejection of BOTH laws (the ``nonexact_key``
+#: treatment generalised, DEC-RUST-STRICT-NO-FALLBACK-001 task #8). Its
+#: presence is what separates CLASS C (keep degrading, even under strict
+#: mode) from CLASS A/B (refuse) inside the shared :data:`_DEGRADE_ERRORS`
+#: classes; a crate FAULT — a caught render panic, broken internals — is
+#: deliberately left UNMARKED. Cross-language drift is pinned by the unit
+#: suite against the real wheel.
+_INPUT_REFUSED_MARKER: Final[str] = "input outside the crate envelope"
 
 
 class CanonicalJsonLaw(Protocol):
@@ -286,8 +413,37 @@ def _panic_belt_errors() -> tuple[type[BaseException], ...]:
     return tuple(belt)
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Raise :class:`~brutex.config.rust_strict.RustFallbackRefused` if strict.
+
+    The ONE strict-mode adapter for this facade, shared by both choke points
+    (:func:`_warn_once`, :func:`_disable`) — DEC-RUST-STRICT-NO-FALLBACK-001.
+    A reason in :data:`_STRICT_NOT_REFUSED` returns instead, so it keeps
+    degrading to the oracle exactly as before — that set is the RULED
+    CLASS-C exemption (:data:`_STRICT_EXEMPT_REASONS`) unioned with the
+    pair held pending an operator ruling
+    (:data:`_STRICT_UNRESOLVED_REASONS`).
+
+    The gate is imported at MODULE scope (the ``rust_stage1a`` reference
+    pattern): probed, it closes no cycle here and adds no modules (module
+    docstring's import-surface note) — unlike ``brutex.money_rust``, whose
+    module-scope import is a proven ``brutex.money`` ⇄ ``brutex.data``
+    cycle and is therefore deferred there.
+    """
+    if reason in _STRICT_NOT_REFUSED:
+        return
+    refuse_if_strict("brutex.strategies.combo_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``combo_rust.fallback`` WARN once per process per *reason*."""
+    """Refuse under strict mode; else log ``combo_rust.fallback`` warn-once.
+
+    One of the TWO choke points every Python fall-back funnels through
+    (:func:`_disable` is the other), so refusing here is a *complete* block —
+    except for the enumerated :data:`_STRICT_EXEMPT_REASONS`. With strict
+    mode OFF the historic warn-once behaviour is byte-identical.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -300,7 +456,14 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``combo_rust.autoreverted`` at ERROR (the burn-in
     autorevert — a genuine wrongness signal); guard latches log
     ``combo_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    Under strict mode this REFUSES before latching (the second choke point —
+    DEC-RUST-STRICT-NO-FALLBACK-001); no reason routed here is CLASS-C, so
+    none is exempt. That is why the latched state is unreachable under
+    strict mode: every later call re-attempts and re-refuses rather than
+    degrading silently behind ``rust_combo_disabled()``.
     """
+    _refuse_if_strict(reason, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason
@@ -308,6 +471,45 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
         _LOG.error("combo_rust.autoreverted", reason=reason, **context)
     else:
         _LOG.warning("combo_rust.rust_path_disabled", reason=reason, **context)
+
+
+def _canonical_degrade_reason(exc: BaseException) -> str:
+    """Classify a canonical-render degrade as CLASS C (input) or CLASS B (fault).
+
+    The classification reads a marker the CRATE minted at its own raise site
+    (module docstring's strict-mode section) — never a guess from the
+    exception class, which is shared across both populations:
+
+    * :data:`_NONEXACT_KEY_MARKER` → ``nonexact_key_refused`` (the ruled
+      str-SUBCLASS dict key, checked FIRST so it keeps its own reason);
+    * :data:`_INPUT_REFUSED_MARKER` → ``canonical_json_input_refused``
+      (out-of-``i128`` int, lone surrogate, non-``str`` key, unsupported
+      node type, depth cap);
+    * neither → ``canonical_json_error``, the genuine-fault remainder (a
+      caught render panic ``RuntimeError``, broken wheel internals) which
+      strict mode REFUSES.
+    """
+    detail = str(exc)
+    if isinstance(exc, TypeError) and _NONEXACT_KEY_MARKER in detail:
+        return "nonexact_key_refused"
+    if _INPUT_REFUSED_MARKER in detail:
+        return "canonical_json_input_refused"
+    return "canonical_json_error"
+
+
+def _scan_degrade_reason(exc: BaseException) -> str:
+    """Classify a scan-FFI degrade as CLASS C (input) or CLASS B (fault).
+
+    :data:`_INPUT_REFUSED_MARKER` → ``scan_input_refused`` (the crate's
+    ``Vec<String>`` extraction declining a non-``str`` element, a
+    lone-surrogate ``str`` or a non-sequence argument); anything UNMARKED is
+    the genuine-fault remainder ``scan_error``, which strict mode REFUSES.
+    The scan core itself is infallible, so the marked population is the only
+    non-fault way this call can fail.
+    """
+    if _INPUT_REFUSED_MARKER in str(exc):
+        return "scan_input_refused"
+    return "scan_error"
 
 
 def _resolve_crate() -> ModuleType | None:
@@ -374,15 +576,11 @@ def routed_canonical_json(
     try:
         rust_value = crate.canonical_json(lowered)
     except _DEGRADE_ERRORS as exc:
-        if isinstance(exc, TypeError) and _NONEXACT_KEY_MARKER in str(exc):
-            # The crate's exact-str KEY gate (module docstring): a str
-            # SUBCLASS key could sort differently under CPython's
-            # sort_keys, so the crate REFUSES it with the stable marker —
-            # surfaced under its own reason, distinct from a generic
-            # degrade inside the shared TypeError class.
-            _warn_once("nonexact_key_refused", error_detail=repr(exc))
-        else:
-            _warn_once("canonical_json_error", error_detail=repr(exc))
+        # CLASS C (a crate-marked input refusal — its own reason, keeps
+        # degrading under strict mode) vs CLASS B (an UNMARKED crate fault —
+        # refuses). The split is minted in the crate; see
+        # :func:`_canonical_degrade_reason`.
+        _warn_once(_canonical_degrade_reason(exc), error_detail=repr(exc))
         return python_law(lowered)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         # The escape set (the errors.py doctrine): operator interrupt /
@@ -448,13 +646,24 @@ def routed_first_offending_field(
     pairs = list(fields)
     try:
         values = [field_value for _field_name, field_value in pairs]
+    except _DEGRADE_ERRORS as exc:
+        # CLASS C, minted PYTHON-side: a malformed (name, value) pair is an
+        # input shape the crate never sees, and the LAZY oracle is the
+        # intended handler — it may still return a correct answer before
+        # ever reaching the bad pair (pinned by
+        # test_offender_before_malformed_pair_returns_name), or re-raise its
+        # own error with today's class + message bytes. Split into its own
+        # try so it is never conflated with an FFI failure.
+        _warn_once("scan_input_refused", error_detail=repr(exc))
+        return python_law(pairs)
+    try:
         idx = crate.first_unit_separator(values)
     except _DEGRADE_ERRORS as exc:
-        # Covers BOTH the local unpack/type failures (a malformed pair's
-        # ValueError/TypeError) and the crate's extraction failures (a
-        # non-str / lone-surrogate value) — the oracle re-runs over the
-        # materialized pairs and raises ITS OWN error with today's bytes.
-        _warn_once("scan_error", error_detail=repr(exc))
+        # CLASS C (a crate-marked ``Vec<String>`` extraction refusal) vs
+        # CLASS B (an UNMARKED crate fault — refuses); the oracle re-runs
+        # over the materialized pairs and raises ITS OWN error with today's
+        # bytes. See :func:`_scan_degrade_reason`.
+        _warn_once(_scan_degrade_reason(exc), error_detail=repr(exc))
         return python_law(pairs)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise

@@ -14,6 +14,7 @@ import types
 from typing import TYPE_CHECKING
 
 import pytest
+from brutex.config.rust_strict import RUST_STRICT_ENV, RustFallbackRefused
 from brutex.nightly import nightly_rust
 from brutex.nightly.chain import (
     LinkOutcome,
@@ -206,6 +207,19 @@ class TestFlagOnParity:
 
 
 class TestFlagOnRefuseAndDegrade:
+    """The legacy warn-and-degrade arms, pinned under the kill switch.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON, so every arm in
+    this class would now raise instead of degrading. The degrade law is
+    still the behaviour ``BRUTEX_RUST_STRICT=0`` restores, so it is pinned
+    here with the switch explicitly off; :class:`TestStrictRefusesTheSameArms`
+    pins that the *same* three arms refuse when it is not.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(RUST_STRICT_ENV, "0")
+
     def test_poisoned_summary_shape_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _flag_on(
             monkeypatch,
@@ -235,3 +249,84 @@ class TestFlagOnRefuseAndDegrade:
             assert summary_lines(_FULL_OK) == _summary_lines_python(_FULL_OK)
         assert nightly_rust.nightly_rust_disabled() is True
         assert any(entry["event"] == "nightly_rust.kernel_autoreverted" for entry in logs)
+
+
+class TestStrictRefusesTheSameArms:
+    """Strict mode (the shipped default) turns each degrade above into a raise.
+
+    Same three fake-crate poisonings, no kill switch — each must raise
+    :class:`RustFallbackRefused` naming the facade and the one way back.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUST_STRICT_ENV, raising=False)
+
+    @staticmethod
+    def _assert_names_facade_and_switch(excinfo: pytest.ExceptionInfo[RustFallbackRefused]) -> None:
+        text = str(excinfo.value)
+        assert "brutex.nightly.nightly_rust" in text
+        assert f"{RUST_STRICT_ENV}=0" in text
+
+    def test_poisoned_summary_shape_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_summary_lines=lambda *args: ["lines", "OK"]),
+        )
+        with pytest.raises(RustFallbackRefused, match="summary_lines_result_refused") as excinfo:
+            summary_lines(_FULL_OK)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_crate_fault_refuses_now_that_the_token_is_split(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``summary_lines_error`` REFUSES — it is now the fault-only remainder.
+
+        This token used to be HELD UNRESOLVED because one ``ValueError``
+        class carried both a genuine crate fault and the core's
+        out-of-envelope duration refusal. The crate now stamps the latter
+        (``INPUT_REFUSED_MARKER``), so this UNMARKED ``TypeError`` — a
+        stale-wheel argument-type fault — is unambiguously CLASS A and
+        strict mode refuses it. The marked sibling below proves the other
+        half still degrades.
+        """
+
+        def _boom(*args: object) -> tuple[list[str], str]:
+            raise TypeError("junk count value")
+
+        _flag_on(monkeypatch, build_fake_crate(nightly_summary_lines=_boom))
+        with pytest.raises(RustFallbackRefused, match="summary_lines_error") as excinfo:
+            summary_lines(_FULL_OK)
+        self._assert_names_facade_and_switch(excinfo)
+
+    def test_marked_input_refusal_still_degrades_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLASS C: the core's own out-of-envelope duration refusal.
+
+        ``summary_lines_impl`` Errs only when the elapsed duration is
+        non-finite or ``>= MAX_EXACT_DURATION`` (2**53) — an input the f64
+        mirror cannot represent exactly and the Python oracle has always
+        served. The FFI face marks it, so strict mode keeps degrading.
+        """
+
+        def _refuse(*args: object) -> tuple[list[str], str]:
+            raise ValueError(
+                "input outside the crate envelope: duration inf outside the "
+                "faithful mirror domain — python oracle decides"
+            )
+
+        _flag_on(monkeypatch, build_fake_crate(nightly_summary_lines=_refuse))
+        with capture_logs() as logs:
+            assert summary_lines(_FULL_OK) == _summary_lines_python(_FULL_OK)
+        warns = [entry for entry in logs if entry["event"] == "nightly_rust.fallback"]
+        assert warns and warns[0]["reason"] == "summary_lines_input_refused"
+
+    def test_wrong_lines_refuse_at_the_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _flag_on(
+            monkeypatch,
+            build_fake_crate(nightly_summary_lines=lambda *args: (["wrong"], "OK")),
+        )
+        with pytest.raises(RustFallbackRefused, match="burn_in_mismatch") as excinfo:
+            summary_lines(_FULL_OK)
+        self._assert_names_facade_and_switch(excinfo)

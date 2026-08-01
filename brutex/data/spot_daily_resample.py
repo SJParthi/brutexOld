@@ -92,6 +92,7 @@ from brutex.calendars.nse import (
     is_known_irregular_session,
     known_irregular_reason,
 )
+from brutex.config.rust_strict import RustFallbackRefused
 from brutex.data.fetch_coverage import WindowKey
 
 # `frame_to_candle_bars` MOVED to the dedicated import-graph leaf
@@ -811,6 +812,19 @@ def derive_daily_for_targets(
                 before=before,
                 resample_fn=resample_fn,
             )
+        # DEC-RUST-STRICT-NO-FALLBACK-001: a strict-mode refusal is NEVER
+        # absorbed. TRADE-OFF, stated plainly: this trades the per-target
+        # isolation (one bad symbol never stops the derive of the rest) for a
+        # crash that aborts the whole derive — accepted, because this is the
+        # SHARPEST edge of the absorption class: absorbed, the recall derives
+        # ZERO bars while the enclosing `lake_heal.sweep_complete` still reports
+        # `healed=N` and STAMPS the swept sentinel, so the next boot skips the
+        # re-scan over a lake that was never derived. Propagating aborts BEFORE
+        # that stamp, so the failure is recorded and the next boot re-attempts.
+        # Inert unless strict mode is on (BRUTEX_RUST_STRICT=0 keeps today's
+        # per-target degrade byte-identically).
+        except RustFallbackRefused:
+            raise
         except Exception as exc:
             errored += 1
             _LOG.warning(

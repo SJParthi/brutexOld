@@ -7,13 +7,14 @@ import sys
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import pytest
 import structlog
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+from brutex.config.rust_strict import RUST_STRICT_ENV
 from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV
 from brutex.data.today_completeness import (
     TODAY_COMPLETENESS_GATE_ENV,
@@ -600,6 +601,84 @@ def _isolate_sweep_apriori_env() -> Iterator[None]:
             os.environ.pop(env_name, None)
         else:
             os.environ[env_name] = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_rust_strict_env() -> Iterator[None]:
+    """Snapshot-restore ``BRUTEX_RUST_STRICT`` around EVERY test.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: ``strict_mode()`` reads the env on every
+    call and never memoises, so the shipped default (ON when the var is unset)
+    is a *process-wide ambient* — and a test that writes the kill switch
+    ``"0"`` with a RAW ``os.environ`` assignment instead of ``monkeypatch``
+    leaks it into every later test in the same pytest process. The failure is
+    SILENT-GREEN in the wrong direction: a strict-refusal test degrades to
+    ``Failed: DID NOT RAISE RustFallbackRefused`` while its facade quietly
+    served the Python oracle — exactly the fall-back this DEC exists to
+    forbid. It only ever reproduces on the shard/order that pairs a leaking
+    writer with a ``TestStrictMode`` class, so it is invisible to a
+    single-file run.
+
+    This is the ``_isolate_sweep_apriori_env`` law one env var over: the
+    snapshot is taken at autouse SETUP (before the test body can leak) and
+    restored at teardown, so a leak can never outlive the test that caused it.
+    It never fights a test's deliberate ``monkeypatch.setenv``/``delenv`` of
+    the same var — autouse setup precedes the test's own ``monkeypatch``, so
+    the snapshot IS the true pre-test value and both restore to it.
+
+    The seam-owning facades' own fixtures deliberately do NOT delenv this var
+    (``TestStrictMode`` classes rely on the shipped ambient default being ON),
+    which is precisely why the belt has to live here, at the suite boundary,
+    rather than in any one seam's ``autouse`` fixture.
+
+    HONEST LIMIT (why the ``trylast`` hook below exists): a fixture restores
+    at ITS finaliser, and pytest tears finalisers down LIFO **by setup order**.
+    A ``monkeypatch`` object that pytest happened to instantiate BEFORE this
+    fixture (it is a dependency of a module's own autouse fixture, so its
+    position is not this file's to control) is therefore undone AFTER this
+    restore — and if that ``monkeypatch`` recorded ``"0"`` as the value to put
+    back, the kill switch survives the belt. That is not hypothetical: it is
+    the exact shape that turned two CI shards red (a ``DID NOT RAISE
+    RustFallbackRefused`` in ``test_money_rust`` and this belt's own
+    parent-process pin). The fixture stays because it is the cheap common
+    case; the hook is the ordering-immune backstop.
+    """
+    original = os.environ.get(RUST_STRICT_ENV)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop(RUST_STRICT_ENV, None)
+        else:
+            os.environ[RUST_STRICT_ENV] = original
+
+
+#: The kill switch as the pytest PROCESS found it, captured once at conftest
+#: import — before any fixture, any collection, any test body. This is the
+#: value every test is entitled to see, and the one the backstop restores.
+_RUST_STRICT_BASELINE: Final[str | None] = os.environ.get(RUST_STRICT_ENV)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """Ordering-immune backstop for the ``BRUTEX_RUST_STRICT`` belt.
+
+    ``trylast`` puts this AFTER pytest's own ``pytest_runtest_teardown`` — the
+    impl that runs every fixture finaliser — so it is the last code to touch
+    the environment before the next test is set up. Whatever finaliser order
+    produced, the kill switch is back at :data:`_RUST_STRICT_BASELINE` here.
+
+    This is deliberately a repair, not an assertion: a shard that reds on the
+    *victim* of a leak names the wrong file (the ``DID NOT RAISE`` shard-4
+    failure blamed ``test_money_rust``; the writer was three hundred files
+    upstream). The writer is fixed at its source when found — this guarantees
+    the blast radius is one test either way.
+    """
+    del item, nextitem  # the repair is unconditional; the args are the hook's
+    if _RUST_STRICT_BASELINE is None:
+        os.environ.pop(RUST_STRICT_ENV, None)
+    else:
+        os.environ[RUST_STRICT_ENV] = _RUST_STRICT_BASELINE
 
 
 @pytest.fixture(autouse=True)

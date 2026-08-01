@@ -183,8 +183,38 @@ def reset_lake_keys_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Strict-mode gate for the two announcement choke points.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Imported FUNCTION-LOCALLY on purpose:
+    this facade's module-scope ``brutex.*`` import set is AST-pinned to the
+    two sanctioned flag/panic-belt sources by
+    ``tests/unit/test_lake_keys_rust.py::test_facade_is_a_leaf_import_wise``
+    (the leaf-import law), and widening that pin to admit a new module-scope
+    import would WEAKEN it. The function-local import keeps the pin intact
+    and matches the ``observability_rust`` precedent.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict("brutex.data.lake_keys_rust", reason, **context)
+
+
 def _warn_once(reason: str, **context: object) -> None:
-    """Log ``lake_keys_rust.fallback`` WARN once per process per *reason*."""
+    """Log ``lake_keys_rust.fallback`` WARN once per process per *reason*.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Every reason funnelled here is CLASS A (``fold_error`` /
+    ``candidates_error`` / ``recovery_error`` — the crate raised) or CLASS B
+    (``result_refused_fold`` / ``result_refused_candidates`` /
+    ``result_refused_recovery`` — refuse-poison rejected the crate's return
+    shape). There is NO class-C reason at this choke point, so no exemption
+    set: the seams take plain ``str`` symbols/exchanges plus an optional
+    drift mapping, and the ONE input the crate cannot serve — a non-ASCII
+    symbol — is filtered by the sibling ``fno_symbol_rust`` ASCII pre-gate
+    BEFORE this facade is reached, so it never announces here. Strict-OFF is
+    byte-identical to the prior behaviour.
+    """
+    _refuse_if_strict(reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -197,7 +227,17 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``error=True`` logs ``lake_keys_rust.autoreverted`` at ERROR (the
     burn-in autorevert — a genuine wrongness signal); guard latches log
     ``lake_keys_rust.rust_path_disabled`` at WARN. Repeats are no-ops.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Reasons here are CLASS A (``crate_unavailable`` / ``crate_stale`` /
+    ``crate_panic``) or CLASS B (``burn_in_mismatch_<law>`` — the crate
+    disagreed with the oracle); none is class C, so none is exempt. The
+    refusal fires BEFORE the latch is written, so under strict mode the
+    latch is never set and every ``_DISABLED_REASON[0] is not None``
+    early-return is structurally unreachable. Strict-OFF is byte-identical
+    to the prior behaviour.
     """
+    _refuse_if_strict(reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

@@ -113,6 +113,24 @@ _ALL_SHIPPED_TABLES: Final[tuple[tuple[str, tuple[RegimeRow, ...]], ...]] = (
 
 
 @pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _fresh_facade(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Every test starts flag-unset with a fresh facade process view."""
     monkeypatch.delenv(ocr.OPTCOST_TAILS_RUST_ENV, raising=False)
@@ -458,6 +476,66 @@ class TestHonestEnvelopeDisclosure:
             assert _history_value() == 75  # the oracle serves every time
         assert calls["kernel"] == 5  # the crossing is re-paid per call — no memo
         assert not ocr.optcost_rust_disabled()  # and no latch ever forms
+
+
+class TestPanicBeltHonesty:
+    """DEC-OPTCOST-PANIC-BELT-HONESTY-001 — the ``kernel_panic`` arm's REACH
+    must stay honestly scoped (CLAUDE.md Golden Rule #10).
+
+    The shipped ``fno_math`` wheel is built ``panic = "abort"``, so a real
+    Rust panic aborts the process before the belt's ``except`` can run: the
+    arm is a DEV-BUILD (unwind ``cargo test``) + defence-in-depth path, NOT
+    a shipped-wheel rail. Two doc-pins keep the prose honest and two
+    TRIGGER-FACT pins fail loudly if the underlying crate facts change, so
+    the disclosure is mechanically verified rather than merely asserted.
+    """
+
+    def test_docstring_scopes_the_panic_belt_to_dev_builds(self) -> None:
+        doc = ocr.__doc__
+        assert doc is not None
+        section = " ".join(doc[doc.index("## Panic-belt honesty") :].split())
+        assert 'panic = "abort"' in section
+        assert "ABORTS the host process" in section
+        assert "DEV-BUILD" in section
+        assert "defence-in-depth" in section
+        assert "NOT a shipped-wheel rail" in section
+        # The retained-not-removed rationale must survive a reflow too.
+        assert "retained, not removed" in section
+
+    def test_layer_four_defers_to_the_honesty_section(self) -> None:
+        """Layer 4 must not re-assert unqualified reach on its own."""
+        doc = ocr.__doc__
+        assert doc is not None
+        layers = " ".join(
+            doc[doc.index("## Fail-closed layers") : doc.index("## Panic-belt honesty")].split()
+        )
+        assert "NOT a shipped-wheel rail" in layers
+        assert '"Panic-belt honesty" below' in layers
+
+    def test_fno_math_release_profile_still_aborts_on_panic(self) -> None:
+        """TRIGGER-FACT pin: if the crate ever leaves ``panic = "abort"`` the
+        honesty section above becomes over-cautious and must be re-read.
+
+        Deliberately NOT a licence to flip the profile — the finance-safety
+        choice is DEC-RUST-CRATES-HARDEN-001 (#965); this only forces the
+        prose and the profile to move together.
+        """
+        manifest = (_REPO_ROOT / "rust" / "fno-math" / "Cargo.toml").read_text(encoding="utf-8")
+        release = manifest[manifest.index("[profile.release]") :]
+        release = (
+            release[: release.index("[profile.", 1)] if "[profile." in release[1:] else release
+        )
+        assert 'panic = "abort"' in release
+
+    def test_fno_math_carries_no_catch_unwind_wrapper(self) -> None:
+        """TRIGGER-FACT pin: the docstring claims fno-math has no
+        ``catch_unwind`` FFI wrapper of its own (unlike ``brutex-lake``)."""
+        hits = [
+            path.name
+            for path in (_REPO_ROOT / "rust" / "fno-math" / "src").rglob("*.rs")
+            if "catch_unwind" in path.read_text(encoding="utf-8")
+        ]
+        assert hits == []
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1028,17 +1106,223 @@ class TestStrikeSeams:
     def test_round_atm_burn_in_compares_raise_outcomes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A kernel int vs an oracle RAISE is a burn-in mismatch → autorevert."""
+        """A kernel int vs an oracle RAISE is a burn-in mismatch → autorevert.
 
-        def _inf_python() -> int:
-            raise OverflowError("cannot convert float infinity to integer")
+        Driven by an IN-ENVELOPE spot on purpose. The historical shape used
+        ``inf`` to force the mismatch, but ``inf`` is now classified pre-FFI as
+        an input the kernel never claimed (see
+        :class:`TestRoundAtmBeyondCrate`), so it can no longer reach the
+        burn-in at all — and it should not: a legitimate oracle-only input
+        must never latch the WHOLE facade off. The law under test is unchanged;
+        only the vehicle is.
+        """
+
+        def _raising_python() -> int:
+            raise OverflowError("oracle refuses this combo")
 
         _install(monkeypatch, _fake_kernel(optcost_round_to_atm=lambda p, s: 0))
         _flag_on(monkeypatch)  # burn-in ARMED
         with capture_logs() as logs, pytest.raises(OverflowError):
-            ocr.round_atm(float("inf"), 50, python=_inf_python)
+            ocr.round_atm(24_025.0, 50, python=_raising_python)
         assert ocr.optcost_rust_disabled()
         assert [e for e in logs if e["event"] == "optcost_rust.autoreverted"]
+
+
+class TestRoundAtmBeyondCrate:
+    """CLASS C — the ``round_to_atm`` inputs the kernel never claimed.
+
+    ``round_atm`` is this facade's ONE seam whose out-of-envelope class is
+    ANNOUNCED rather than silently routed: the other class-C arms return
+    ``python()`` before ``_route`` is ever reached, so nothing is logged. Here
+    the crate WOULD be called, so a pre-FFI gate names the offending field, the
+    oracle serves, and the facade is NOT latched off — the crate is healthy, the
+    input simply was not its business. The reason is in
+    ``_STRICT_EXEMPT_REASONS``, so this arm survives ``BRUTEX_RUST_STRICT`` —
+    proven POSITIVELY by
+    ``TestStrictRefusal::test_class_c_beyond_crate_reasons_survive_strict``
+    (this module itself declares ``BRUTEX_RUST_STRICT=0``, so a green run
+    here is NOT that proof).
+    """
+
+    @staticmethod
+    def _bomb(p: float, s: int) -> int:
+        raise AssertionError("the crate was called for an out-of-envelope input")
+
+    @pytest.mark.parametrize(
+        ("spot", "field"),
+        [
+            (float("nan"), "spot_price"),
+            (float("inf"), "spot_price"),
+            (float("-inf"), "spot_price"),
+            (1e300, "quotient"),
+            (-1e300, "quotient"),
+        ],
+    )
+    def test_out_of_envelope_spot_routes_to_the_oracle_pre_ffi(
+        self, monkeypatch: pytest.MonkeyPatch, spot: float, field: str
+    ) -> None:
+        _install(monkeypatch, _fake_kernel(optcost_round_to_atm=self._bomb))
+        _flag_on(monkeypatch, steady=True)
+        with capture_logs() as logs:
+            assert ocr.round_atm(spot, 50, python=lambda: -1) == -1
+        warns = [e for e in logs if e["event"] == "optcost_rust.fallback"]
+        assert warns[0]["reason"] == "round_to_atm_input_beyond_crate"
+        assert warns[0]["field"] == field
+        assert ocr.optcost_rust_disabled() is False
+
+    def test_unprobeable_step_is_not_claimed_out_of_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``step == 0`` makes the PROBE itself raise. That is not a claim about
+        # the crate's envelope, so the gate abstains and the call takes today's
+        # routed path verbatim — the kernel IS consulted.
+        _install(monkeypatch, _fake_kernel(optcost_round_to_atm=lambda p, s: 7))
+        _flag_on(monkeypatch, steady=True)
+        assert ocr.round_atm(24_025.0, 0, python=lambda: -1) == 7
+
+    def test_flag_off_stays_log_identical(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A flag-OFF call must not gain a WARN it never had: the announcement is
+        # gated on the seam actually being routed. The kill switch is the
+        # EXPLICIT falsy value — under DEC-RUST-DEFAULT-ON-WAVE-001 an unset
+        # flag means ON, so deleting the env var would leave the seam routed.
+        _install(monkeypatch, _fake_kernel(optcost_round_to_atm=self._bomb))
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "0")
+        with capture_logs() as logs:
+            assert ocr.round_atm(float("nan"), 50, python=lambda: -1) == -1
+        assert [e for e in logs if e["event"] == "optcost_rust.fallback"] == []
+
+
+class TestIntArgBeyondCrate:
+    """CLASS C — an ARGUMENT past the ``i64`` FFI wire width.
+
+    Python ``int`` is unbounded; the kernel's parameters are Rust ``i64``, so
+    pyo3 raises ``OverflowError`` at EXTRACTION — before the kernel body runs.
+    That is a domain signal, not a fault, and the crate says so verbatim
+    ("Python's arbitrary-precision int handles those inputs — the seam
+    degrades to the oracle"). ``_int_arg_beyond_crate`` classifies it PRE-FFI
+    so ``kernel_error`` keeps its honest "the crate ran and broke" meaning and
+    the oracle's unbounded answer serves under strict mode too.
+
+    The bomb kernel is the teeth: if the gate ever stopped firing, the FFI
+    would be entered and the call would fail loudly rather than pass quietly.
+    """
+
+    @staticmethod
+    def _bomb(*_args: object) -> object:
+        raise AssertionError("the crate was called for an out-of-envelope argument")
+
+    @pytest.mark.parametrize("value", [2**63, -(2**63) - 1, 2**64, -(2**64)])
+    def test_probe_names_a_value_past_either_i64_bound(self, value: int) -> None:
+        assert ocr._int_arg_beyond_crate(only=value) == "only"
+
+    def test_probe_abstains_on_the_exact_i64_bounds(self) -> None:
+        # The bounds themselves DO fit the wire — the gate must not steal them
+        # from the crate (an off-by-one here would silently un-route the seam).
+        assert ocr._int_arg_beyond_crate(lo=-(2**63), hi=2**63 - 1) is None
+
+    def test_probe_reports_the_first_declared_offender(self) -> None:
+        # ``**kwargs`` keeps CPython's insertion order, so the reported field
+        # is deterministic rather than "whichever dict iteration surfaced".
+        assert ocr._int_arg_beyond_crate(first=2**64, second=2**65) == "first"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "field"),
+        [
+            ({"atm_strike": 2**64, "step_count": 1, "strike_step_value": 50}, "atm_strike"),
+            ({"atm_strike": 24_000, "step_count": 2**64, "strike_step_value": 50}, "step_count"),
+            (
+                {"atm_strike": 24_000, "step_count": 1, "strike_step_value": -(2**64)},
+                "strike_step_value",
+            ),
+        ],
+    )
+    def test_offset_strike_routes_to_the_oracle_pre_ffi(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, int], field: str
+    ) -> None:
+        _install(monkeypatch, _fake_kernel(optcost_offset_strike=self._bomb))
+        _flag_on(monkeypatch, steady=True)
+        with capture_logs() as logs:
+            assert ocr.offset_strike(**kwargs, is_bull=True, python=lambda: -1) == -1
+        warns = [e for e in logs if e["event"] == "optcost_rust.fallback"]
+        assert warns[0]["reason"] == "offset_strike_input_beyond_crate"
+        assert warns[0]["field"] == field
+        assert warns[0]["seam"] == "offset_strike"
+        assert ocr.optcost_rust_disabled() is False
+
+    def test_grid_offset_routes_to_the_oracle_pre_ffi(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, _fake_kernel(optcost_strike_offset_from_atm=self._bomb))
+        _flag_on(monkeypatch, steady=True)
+        with capture_logs() as logs:
+            assert ocr.strike_offset(2**64, 3, 50, python=lambda: -1) == -1
+        warns = [e for e in logs if e["event"] == "optcost_rust.fallback"]
+        assert warns[0]["reason"] == "grid_offset_input_beyond_crate"
+        assert warns[0]["field"] == "atm_strike"
+        assert ocr.optcost_rust_disabled() is False
+
+    def test_grid_around_routes_to_the_oracle_pre_ffi(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install(monkeypatch, _fake_kernel(optcost_grid_around_atm=self._bomb))
+        _flag_on(monkeypatch, steady=True)
+        with capture_logs() as logs:
+            assert ocr.grid_around(24_000, 50, 2**64, python=lambda: [-1]) == [-1]
+        warns = [e for e in logs if e["event"] == "optcost_rust.fallback"]
+        assert warns[0]["reason"] == "grid_around_input_beyond_crate"
+        assert warns[0]["field"] == "half_width"
+        assert ocr.optcost_rust_disabled() is False
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            (lambda: ocr.offset_strike(24_000, 1, 50, is_bull=True, python=lambda: -1), 7),
+            (lambda: ocr.strike_offset(24_000, 3, 50, python=lambda: -1), 7),
+            (lambda: ocr.grid_around(24_000, 50, 1, python=lambda: [-1]), [7, 7, 7]),
+        ],
+    )
+    def test_in_envelope_arguments_still_reach_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch, call: Callable[[], object], expected: object
+    ) -> None:
+        # The gate must be a NARROW pre-filter, not a bypass: an ordinary strike
+        # still takes the routed path and the kernel's answer ships.
+        _install(
+            monkeypatch,
+            _fake_kernel(
+                optcost_offset_strike=lambda *a: 7,
+                optcost_strike_offset_from_atm=lambda *a: 7,
+                optcost_grid_around_atm=lambda *a: [7, 7, 7],
+            ),
+        )
+        _flag_on(monkeypatch, steady=True)
+        assert call() == expected
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            (lambda: ocr.offset_strike(2**64, 1, 50, is_bull=True, python=lambda: -1), -1),
+            (lambda: ocr.strike_offset(2**64, 3, 50, python=lambda: -1), -1),
+            (lambda: ocr.grid_around(24_000, 50, 2**64, python=lambda: [-1]), [-1]),
+        ],
+    )
+    def test_flag_off_stays_log_identical(
+        self, monkeypatch: pytest.MonkeyPatch, call: Callable[[], object], expected: object
+    ) -> None:
+        # A flag-OFF call must not gain a WARN it never had. The kill switch is
+        # the EXPLICIT falsy value — under DEC-RUST-DEFAULT-ON-WAVE-001 an unset
+        # flag means ON, so deleting the env var would leave the seam routed.
+        _install(
+            monkeypatch,
+            _fake_kernel(
+                optcost_offset_strike=self._bomb,
+                optcost_strike_offset_from_atm=self._bomb,
+                optcost_grid_around_atm=self._bomb,
+            ),
+        )
+        monkeypatch.setenv(ocr.OPTCOST_TAILS_RUST_ENV, "0")
+        with capture_logs() as logs:
+            assert call() == expected
+        assert [e for e in logs if e["event"] == "optcost_rust.fallback"] == []
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1506,3 +1790,85 @@ class TestWiringPins:
     def test_ci_carries_the_facade_coverage_gate(self) -> None:
         text = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         assert "--cov=brutex.optcost_rust" in text
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_warn_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            ocr._warn_once("crate_stale")
+
+    def test_class_a_disable_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            ocr._disable("crate_unavailable")
+
+    @pytest.mark.parametrize("reason", sorted(ocr._STRICT_EXEMPT_REASONS))
+    def test_class_c_beyond_crate_reasons_survive_strict(
+        self, monkeypatch: pytest.MonkeyPatch, reason: str
+    ) -> None:
+        # The POSITIVE half of the CLASS-C contract: an input the crate never
+        # claimed is the oracle's business by design, so the exempt reasons must
+        # warn-and-serve even at the shipped strict default. Parametrising over
+        # the frozenset itself means a future entry cannot be added without a
+        # matching pin.
+        self._strict_on(monkeypatch)
+        with capture_logs() as logs:
+            ocr._warn_once(reason, seam="probe")
+        warns = [e for e in logs if e["event"] == "optcost_rust.fallback"]
+        assert [e["reason"] for e in warns] == [reason]
+
+    def test_class_c_int_seams_serve_the_oracle_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # End-to-end at the shipped default: an out-of-i64 strike takes the
+        # oracle's unbounded-int answer rather than raising. The bomb kernel
+        # proves the FFI is never entered.
+        self._strict_on(monkeypatch)
+        _install(
+            monkeypatch,
+            _fake_kernel(optcost_offset_strike=TestIntArgBeyondCrate._bomb),
+        )
+        _flag_on(monkeypatch, steady=True)
+        assert (
+            ocr.offset_strike(2**64, 1, 50, is_bull=True, python=lambda: 2**64 + 50) == 2**64 + 50
+        )
+
+    def test_class_a_int_seam_still_refuses_under_strict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ANTI-VACUOUS: the gate is a NARROW class-C pre-filter, not a blanket
+        # exemption for the seam. An IN-envelope argument whose kernel breaks is
+        # still CLASS A and still refuses.
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        def _broken(*_args: object) -> object:
+            raise RuntimeError("kernel exploded")
+
+        self._strict_on(monkeypatch)
+        _install(monkeypatch, _fake_kernel(optcost_offset_strike=_broken))
+        _flag_on(monkeypatch, steady=True)
+        with pytest.raises(RustFallbackRefused):
+            ocr.offset_strike(24_000, 1, 50, is_bull=True, python=lambda: -1)

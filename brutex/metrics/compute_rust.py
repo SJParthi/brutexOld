@@ -120,6 +120,13 @@ from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
+# The strict-Rust gate (DEC-RUST-STRICT-NO-FALLBACK-001). LEAF-SAFE: it pulls
+# only ``brutex.config.env_flags`` (stdlib) + ``brutex.models`` (the root
+# taxonomy/exception leaf) — no ``brutex.engine`` edge, no wheel import, and
+# nothing that reaches back into ``brutex.metrics.compute``, so the module
+# docstring's LEAF DISCIPLINE claim holds verbatim.
+from brutex.config.rust_strict import refuse_if_strict
+
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
 
@@ -250,9 +257,36 @@ def metrics_rust_fold_enabled() -> bool:
 
 
 def warn_fallback_once(reason: str, **context: object) -> None:
-    """Log ``metrics_rust_fold.fallback`` ONCE per process per *reason*.
+    """Refuse under strict mode; else log ``metrics_rust_fold.fallback`` once.
 
-    A SYMBOL-carrying reason dedupes per ``(reason, symbol)`` — a wheel
+    This is the PRIMARY of this facade's four fall-back choke points, so
+    :func:`~brutex.config.rust_strict.refuse_if_strict` here is a *complete*
+    block on the Python oracle for every reason the facade REPORTS — there is
+    no unannounced path around it (DEC-RUST-STRICT-NO-FALLBACK-001). The
+    siblings are :func:`disable_kernel` (the burn-in autorevert, which ships
+    the ORACLE value) and the two inline ``*kernel_result_refused`` ERROR
+    branches in :func:`fold_wire_via_kernel` /
+    :func:`recency_wire_via_kernel`; all four are wired, and together they are
+    every ``return None`` / ``return oracle`` exit this module has.
+
+    Reason classes covered (all of them "Rust is absent, latched, or answered
+    wrongly" — NEVER "this input is outside the crate's envelope", so refusing
+    them all turns no legitimate input into a crash):
+
+    * ``flag_unrecognised`` — a typo'd ``BRUTEX_METRICS_RUST_FOLD`` value;
+    * ``wheel_missing`` / ``wheel_stale`` — no wheel, or one lacking the
+      ``metrics_fold_trades`` / ``metrics_fold_recency`` face;
+    * ``kernel_error`` — any kernel-call fault (the autorevert-fence taxonomy);
+    * ``kernel_disabled`` — the process is latched after a burn-in mismatch.
+
+    Honest scope note: the CONSUMER's naive-``trailing_anchor`` guard
+    (``brutex.metrics.compute._resolve_recency_folds``) routes to Python
+    BEFORE calling this facade at all, so it is untouched by strict mode —
+    correctly, since a naive anchor is an input the crate deliberately does
+    not cover, not a Rust failure.
+
+    With strict mode OFF the historic behaviour is byte-identical:
+    a SYMBOL-carrying reason dedupes per ``(reason, symbol)`` — a wheel
     stale on BOTH kernel faces (``metrics_fold_trades`` +
     ``metrics_fold_recency``) names EACH missing face once instead of
     muting the second behind the first (review-round fix); the logged
@@ -262,6 +296,7 @@ def warn_fallback_once(reason: str, **context: object) -> None:
     fall back silently. The fallback itself is bit-exact regardless (the
     Python oracle serves the row).
     """
+    refuse_if_strict("brutex.metrics.compute_rust", reason, **context)
     key = f"{reason}:{context['symbol']}" if "symbol" in context else reason
     if key in _OBSERVABILITY_MEMO:
         return
@@ -275,9 +310,23 @@ def kernel_disabled() -> bool:
 
 
 def disable_kernel(reason: str, **context: object) -> None:
-    """Latch the kernel OFF for the remainder of the process (the autorevert).
+    """Refuse under strict mode; else latch the kernel OFF for this process.
 
-    Called on a burn-in bit-compare MISMATCH — a kernel numerical bug the
+    The SECOND fall-back choke point (DEC-RUST-STRICT-NO-FALLBACK-001): both
+    call sites ship the ORACLE value on the very row that mismatched, so this
+    is a Python-served call and strict mode must block it — not merely the
+    ``kernel_disabled`` refusals of every LATER row. The reasons it covers
+    (``burn_in_mismatch`` / ``recency_burn_in_mismatch``) are the
+    "Rust answered wrongly" class: a wrong Rust answer must not be papered
+    over by a quiet Python re-run, so refusing is exactly the intent and no
+    legitimate input is turned into a crash.
+
+    The refusal fires BEFORE the latch is written, so under strict mode this
+    function mutates nothing — the process dies on the mismatching row rather
+    than continuing on a silently-degraded kernel.
+
+    With strict mode OFF the historic behaviour is byte-identical:
+    called on a burn-in bit-compare MISMATCH — a kernel numerical bug the
     structural validation cannot see. The first call logs
     ``metrics_rust_fold.kernel_autoreverted`` (ERROR — a genuine
     kernel-wrongness signal, never throttled); repeat calls are no-ops.
@@ -285,6 +334,7 @@ def disable_kernel(reason: str, **context: object) -> None:
     the Python oracle, so a wrong kernel can poison at most the ONE
     mismatching row — and even that row ships the ORACLE folds.
     """
+    refuse_if_strict("brutex.metrics.compute_rust", reason, **context)
     if _KERNEL_DISABLED_REASON[0] is None:
         _KERNEL_DISABLED_REASON[0] = reason
         _LOG.error("metrics_rust_fold.kernel_autoreverted", reason=reason, **context)
@@ -512,6 +562,15 @@ def fold_wire_via_kernel(
     if not _valid_fold_wire(result, len(trades)):
         # A structurally invalid result is a kernel BUG: refuse it LOUDLY
         # (never silently adopted) and serve the row from the oracle.
+        # THIRD strict choke point (DEC-RUST-STRICT-NO-FALLBACK-001): this
+        # branch does not funnel through warn_fallback_once, so it carries
+        # its own block. "Rust answered wrongly" — refusing is the intent.
+        refuse_if_strict(
+            "brutex.metrics.compute_rust",
+            "kernel_result_refused",
+            result=repr(result),
+            n_trades=len(trades),
+        )
         if "kernel_result_refused" not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add("kernel_result_refused")
             _LOG.error(
@@ -645,6 +704,15 @@ def recency_wire_via_kernel(
     if not _valid_recency_wire(result, n_windowed, net_pnl_paisa):
         # A structurally invalid result is a kernel BUG: refuse it LOUDLY
         # (its own memo key — a fold-face refusal must not mute this one).
+        # FOURTH strict choke point (DEC-RUST-STRICT-NO-FALLBACK-001): the
+        # recency twin of the fold face's inline block, same reason class
+        # ("Rust answered wrongly"), same complete-block obligation.
+        refuse_if_strict(
+            "brutex.metrics.compute_rust",
+            "recency_kernel_result_refused",
+            result=repr(result),
+            n_trades=len(trades),
+        )
         if "recency_kernel_result_refused" not in _OBSERVABILITY_MEMO:
             _OBSERVABILITY_MEMO.add("recency_kernel_result_refused")
             _LOG.error(

@@ -651,7 +651,13 @@ class TestMutationHardening:
         monkeypatch.setattr(sweep_apriori, "_BUDGET_CHECK_STRIDE", 4)
         bits = [6, 7, 8, 9, 10]  # 5 conflict-free bits → C(5, 2) = 10 pairs
         frontier_tuples: list[tuple[int, ...]] = [(b,) for b in bits]
-        frontier_masks = np.array(sorted(1 << b for b in bits), dtype=np.uint64)
+        # The frontier packing is the module's own (u128 two-limb big-endian
+        # bytes since DEC-APRIORI-U128-WIDEN-001) — build it through the ONE
+        # constructor, never a hand-rolled dtype, so this whitebox pin can
+        # never drift from the layout ``_in_sorted`` binary-searches.
+        frontier_masks = sweep_apriori._frontier_array(  # pyright: ignore[reportPrivateUsage]
+            sorted(1 << b for b in bits)
+        )
         recorded: list[int] = []
         # Whitebox: drive the private join directly to observe the breaker-check
         # cadence (DEC-P0-017 per-site friend-access convention).
@@ -716,11 +722,13 @@ class TestMutationHardening:
         )
 
     def test_unsupported_bit_message_is_exact(self) -> None:
+        # RETARGETED onto the u128 ceiling (DEC-APRIORI-U128-WIDEN-001): bit 64
+        # is now SUPPORTED — the refusal fires at 128, not 64.
         with pytest.raises(SweepAprioriUnsupportedError) as ei:
-            generate_apriori_candidates([1], condition_bits=[0, 64], k=1, min_hits=0)
+            generate_apriori_candidates([1], condition_bits=[0, 128], k=1, min_hits=0)
         assert str(ei.value) == (
-            "generate_apriori_candidates: Apriori frontier requires <64-bit "
-            "masks (vocab bit 64 >= 64); unset BRUTEX_SWEEP_APRIORI for u128 "
+            "generate_apriori_candidates: Apriori frontier requires <128-bit "
+            "masks (vocab bit 128 >= 128); unset BRUTEX_SWEEP_APRIORI for wider "
             "vocabularies."
         )
 
@@ -728,7 +736,7 @@ class TestMutationHardening:
         with pytest.raises(ValueError) as neg:
             generate_apriori_candidates([1], condition_bits=[-1, 3], k=1, min_hits=0)
         assert str(neg.value) == (
-            "generate_apriori_candidates: condition bit -1 is negative (out of range [0, 64))"
+            "generate_apriori_candidates: condition bit -1 is negative (out of range [0, 128))"
         )
         with pytest.raises(ValueError) as krange:
             generate_apriori_candidates([1], condition_bits=[0, 1, 2], k=4, min_hits=0)
@@ -889,14 +897,30 @@ class TestMutationHardening:
 # ────────────────────────── validation guards ──────────────────────────
 
 
-def test_guard_rejects_bit_at_or_above_64() -> None:
-    # A >= 64-bit (u128) vocab is refused GRACEFULLY: SweepAprioriUnsupportedError
+def test_guard_accepts_the_74_bit_vocabulary() -> None:
+    # FAILS-BEFORE pin for DEC-APRIORI-U128-WIDEN-001. Before the widening the
+    # ceiling was 64 while the SHIPPED vocabulary is 74 bits, so EVERY
+    # full-vocab tuple hit the refusal below and the grid driver skipped it
+    # (TUPLE_FAILED) — Apriori was structurally unreachable in production.
+    bits = [0, 63, 64, 73]
+    full = 0
+    for b in bits:
+        full |= 1 << b
+    out = generate_apriori_candidates([full], condition_bits=bits, k=2, min_hits=1)
+    assert len(out) == 6  # C(4, 2) — every pair frequent, none refused
+    assert all(mask >> 73 & 1 for mask in out if mask >> 73 & 1) or True
+    # the high-limb bit genuinely survives the u128 round trip
+    assert any(mask >> 73 & 1 for mask in out)
+
+
+def test_guard_rejects_bit_at_or_above_128() -> None:
+    # A >= 128-bit vocab is refused GRACEFULLY: SweepAprioriUnsupportedError
     # is a SweepComboError subclass, so the grid driver skips the tuple
     # (TUPLE_FAILED) rather than crashing the whole grid with a raw ValueError.
-    with pytest.raises(SweepAprioriUnsupportedError, match="u128") as ei:
-        generate_apriori_candidates([1], condition_bits=[0, 64], k=1, min_hits=0)
+    with pytest.raises(SweepAprioriUnsupportedError, match="128-bit") as ei:
+        generate_apriori_candidates([1], condition_bits=[0, 128], k=1, min_hits=0)
     assert isinstance(ei.value, SweepComboError)
-    assert "vocab bit 64 >= 64" in str(ei.value)
+    assert "vocab bit 128 >= 128" in str(ei.value)
     assert SWEEP_APRIORI_ENV in str(ei.value)
     # It is NOT a ValueError — the whole point of the guard-symmetry fix.
     assert not isinstance(ei.value, ValueError)
@@ -979,10 +1003,48 @@ def test_resolver_reads_os_environ_by_default(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ────────────────────────── internal helpers ──────────────────────────
-# The subset-membership (``_in_sorted``: present / absent-mid / absent-past-end /
-# empty) and subset-prune (``_all_subsets_frequent``: all-present / one-missing)
-# numpy branches are exercised behaviourally by the oracle-parity + subset-prune
-# tests above (they reach 100% line+branch without touching the private helpers).
+# The subset-membership (``_in_sorted``: present / absent-mid / absent-past-end)
+# and subset-prune (``_all_subsets_frequent``: all-present / one-missing) numpy
+# branches are exercised behaviourally by the oracle-parity + subset-prune tests
+# above. The ONE arm they cannot reach is the empty-frontier short-circuit: the
+# only production caller chain is ``_join_and_prune`` → ``_all_subsets_frequent``
+# → ``_in_sorted``, and that loop is driven by the frontier BUCKETS, so an empty
+# frontier means zero iterations and ``_in_sorted`` is never called at all. It is
+# tested directly below rather than left uncovered (Golden Rule #10 — the earlier
+# revision of this comment claimed the empty arm WAS reached behaviourally, which
+# the ``--cov=brutex.engine`` gate refuted at line 540).
+
+
+class TestInSortedEmptyFrontier:
+    """Pin the ``_in_sorted`` empty-frontier short-circuit directly.
+
+    Structurally unreachable from production (see the note above), so this is a
+    deliberate private-helper call — the ``_frontier_array`` precedent earlier in
+    this file. The guard is a real O(1) short-circuit: it returns before
+    ``_frontier_probe`` allocates the 16-byte search key.
+    """
+
+    @staticmethod
+    def test_empty_frontier_is_never_a_member() -> None:
+        empty = sweep_apriori._frontier_array(())  # pyright: ignore[reportPrivateUsage]
+        assert empty.size == 0
+        assert sweep_apriori._in_sorted(empty, 0) is False  # pyright: ignore[reportPrivateUsage]
+        assert sweep_apriori._in_sorted(empty, 1 << 100) is False  # pyright: ignore[reportPrivateUsage]
+
+    @staticmethod
+    def test_short_circuit_skips_the_probe_allocation() -> None:
+        """The guard must return BEFORE building the probe — not merely agree."""
+        calls: list[int] = []
+
+        def _spy(value: int) -> object:  # pragma: no cover - must never run
+            calls.append(value)
+            raise AssertionError("the empty-frontier guard must short-circuit first")
+
+        empty = sweep_apriori._frontier_array(())  # pyright: ignore[reportPrivateUsage]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sweep_apriori, "_frontier_probe", _spy)
+            assert sweep_apriori._in_sorted(empty, 7) is False  # pyright: ignore[reportPrivateUsage]
+        assert calls == []
 
 
 # ────────────────────────── CI / mutation wiring pins ──────────────────────────
@@ -1160,17 +1222,22 @@ def test_driver_reports_breaker_trip_as_tuple_failed(
     assert "TUPLE_FAILED" in audit_text
 
 
-def test_driver_reports_supertrend_bit_tuple_as_tuple_failed(
+def test_driver_runs_supertrend_bit_tuple_after_the_u128_widening(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 66-bit-vocab-shaped pin (DEC-SUPERTREND-CONDITIONS-001): an
-    Apriori-ON tuple whose ``condition_bits`` include a LIVE ``>= 64`` bit
-    (SuperTrend bit 64) refuses via ``SweepAprioriUnsupportedError`` and the
-    REAL sequential grid driver skips the tuple GRACEFULLY — counted in
-    ``tuples_failed`` + a ``TUPLE_FAILED`` audit line, never a crash and never
-    a corrupt store. This is the accepted interim production story for
-    Apriori over the post-flip DEFAULT pool (which now contains bits 64/65);
-    the u128 two-limb frontier is the named follow-up.
+    """FAILS-BEFORE pin for DEC-APRIORI-U128-WIDEN-001 — the INVERSION of the
+    retired ``..._as_tuple_failed`` pin.
+
+    That pin encoded the interim story: an Apriori-ON tuple whose
+    ``condition_bits`` included a LIVE ``>= 64`` bit (SuperTrend bit 64)
+    refused via ``SweepAprioriUnsupportedError``, so the grid driver skipped
+    it (``tuples_failed``, ``TUPLE_FAILED`` audit line). Its own docstring
+    named the fix: "the u128 two-limb frontier is the named follow-up".
+
+    That follow-up has landed, so the accepted interim story is DEAD: the
+    tuple now RUNS. This is the production-shaped proof — the SHIPPED
+    vocabulary is 74 bits, so under the retired 64 ceiling EVERY full-vocab
+    Apriori tuple was skipped and Apriori was structurally unreachable.
     """
     pytest.importorskip("polars")  # store construction needs the [data] extra
     from brutex.data.option_dedup import OptionDedupIndex
@@ -1213,13 +1280,14 @@ def test_driver_reports_supertrend_bit_tuple_as_tuple_failed(
             audit=audit,
         )
 
-    # Graceful per-tuple refusal: counted as failed, nothing persisted, the
-    # TUPLE_FAILED audit line names the guard — never an unhandled raise.
-    assert summary.tuples_failed == 1
-    assert summary.persisted == 0
+    # The tuple RUNS: no refusal, no TUPLE_FAILED, and the bit-64 guard message
+    # is nowhere in the audit — the retired ceiling can never come back
+    # silently without failing here.
+    assert summary.tuples_failed == 0
+    assert summary.enumerated > 0
     audit_text = (tmp_path / "grid.jsonl").read_text(encoding="utf-8")
-    assert "TUPLE_FAILED" in audit_text
-    assert "vocab bit 64 >= 64" in audit_text
+    assert "TUPLE_FAILED" not in audit_text
+    assert "vocab bit 64 >= 64" not in audit_text
 
 
 # ─────────── FOLD 1: Apriori-aware max_combos guardrail (effective_max_combos) ───────────

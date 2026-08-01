@@ -130,9 +130,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -160,7 +160,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install pinned actionlint
         env:
           AL_VERSION: "1.7.7"
@@ -187,9 +187,9 @@ jobs:
     needs: build-wheels
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -220,7 +220,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -249,11 +249,15 @@ jobs:
     # crate's rev-pinned polars graph is an estimated ~10+ min COLD build
     # (CI-unverified until the first remote run) on top of the four kernels
     # (cargo-cached across runs; the disclosed CI cold cost).
-    timeout-minutes: 45
+    # 45 → 60 at the DEC-RUST-STRICT-NO-FALLBACK-001 flip: the wheelhouse
+    # grew 8 → 16 crates. The eight added are dependency-light (none pulls
+    # the polars graph), so this is headroom for a COLD run, not a measured
+    # need.
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -272,7 +276,23 @@ jobs:
           # rust-brutex-ops · rust-brutex-pull-state · rust-brutex-refine) +
           # brutex-lake (gated via this required build-wheels job + the
           # ci-ok kernel verify).
-          key: rust-wheels-v2-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**', 'rust/brutex-refine/**', 'rust/brutex-identity/**') }}
+          #
+          # v2 → v3 (DEC-RUST-STRICT-EVERYWHERE): the wheelhouse grew 8 → 16
+          # crates so every strict-enrolled facade can reach its crate in CI.
+          # TWO changes, both load-bearing:
+          #   (a) the version bump INVALIDATES every stale 8-wheel cache — a
+          #       v2 hit would restore the old 8, skip every build step (they
+          #       are all `cache-hit != 'true'`-guarded) and fail the verify
+          #       at `-eq 16`. That is exactly what happened on the first
+          #       16-crate run; the verify caught it, which is the gate
+          #       working. Bumping the version is the only way out.
+          #   (b) hashFiles now covers the SIX newly-built crates too
+          #       (brutex-core · brutex-data · brutex-notify · brutex-meta ·
+          #       brutex-observability · brutex-sweep-ops) so a source change
+          #       in any of them invalidates the wheelhouse. Without (b) the
+          #       stale-wheel-under-green-CI hole the v2 comment closes would
+          #       have silently reopened for a third of the crates.
+          key: rust-wheels-v3-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('rust/fno-math/**', 'rust/trading-core/**', 'rust/brutex-feed/**', 'rust/brutex-strategies/**', 'rust/brutex-calendar/**', 'rust/brutexd/**', 'rust/brutex-ops/**', 'rust/brutex-pull-state/**', 'rust/brutex-lake/**', 'rust/brutex-refine/**', 'rust/brutex-identity/**', 'rust/brutex-core/**', 'rust/brutex-data/**', 'rust/brutex-notify/**', 'rust/brutex-meta/**', 'rust/brutex-observability/**', 'rust/brutex-sweep-ops/**') }}
       - name: Install Rust toolchain (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -290,7 +310,7 @@ jobs:
           workspaces: rust/brutex-lake -> target
           shared-key: brutex-lake-wheel
           key: ${{ hashFiles('rust/brutex-lake/Cargo.toml', 'rust/brutex-lake/Cargo.lock', 'rust/brutex-lake/src/**', 'rust/brutex-lake/python/**') }}
-      - name: Build the eight maturin wheels (cache miss only)
+      - name: Build the sixteen maturin wheels (cache miss only)
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: |
           # Belt-and-suspenders crates.io flake guard (the same 3-attempt
@@ -327,14 +347,33 @@ jobs:
           # store kernel — a HARD import of brutex/engine/snapshot_hash.py,
           # brutex/engine/results_store.py and brutex/data/window_ledger_store.py.
           build_with_retry ./rust/brutex-identity
+          # DEC-RUST-STRICT-NO-FALLBACK-001: strict mode ships ON, so a
+          # facade whose crate is ABSENT no longer degrades to Python — it
+          # raises RustFallbackRefused. The census measures 17 of the 44
+          # enrolled facades behind these eight crates, so a wheelhouse that
+          # omitted them turned every consumer job red at once (measured on
+          # this PR: run-smoke, golden, property and the coverage gates).
+          # `make run` already builds all sixteen (Makefile) and WHEEL_SET
+          # already lists all sixteen — this brings the CI wheelhouse up to
+          # the operator's own install set. None of the eight pulls the
+          # polars graph, so the cold-build cost is small next to
+          # brutex-lake's.
+          build_with_retry ./rust/brutex-core
+          build_with_retry ./rust/brutex-data
+          build_with_retry ./rust/brutex-calendar
+          build_with_retry ./rust/brutex-notify
+          build_with_retry ./rust/brutex-meta
+          build_with_retry ./rust/brutex-observability
+          build_with_retry ./rust/brutex-ops
+          build_with_retry ./rust/brutex-sweep-ops
       - name: Verify the wheels import (runs on the cache-hit arm too)
         # A corrupt/stale cache entry must fail HERE, loudly, not in a
         # dozen downstream jobs.
         run: |
           ls -l wheelhouse/
-          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 8
-          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
-          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_refine, brutex_pull_state, brutex_lake, brutex_identity; print('all eight kernels import OK')"
+          test "$(find wheelhouse -name '*.whl' | wc -l)" -eq 16
+          pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl wheelhouse/brutex_core-*.whl wheelhouse/brutex_data-*.whl wheelhouse/brutex_calendar-*.whl wheelhouse/brutex_notify-*.whl wheelhouse/brutex_meta-*.whl wheelhouse/brutex_observability-*.whl wheelhouse/brutex_ops-*.whl wheelhouse/brutex_sweep_ops-*.whl
+          python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_refine, brutex_pull_state, brutex_lake, brutex_identity, brutex_core, brutex_data, brutex_calendar, brutex_notify, brutex_meta, brutex_observability, brutex_ops, brutex_sweep_ops; print('all sixteen kernels import OK')"
       - name: Upload wheels artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -385,7 +424,7 @@ jobs:
       # tests silently — the fan-in's collection-count law catches it.
       SHARD_COUNT: "6"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -393,7 +432,7 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -434,7 +473,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Compute this shard's file list (deterministic partition)
         run: |
           set -euo pipefail
@@ -503,7 +542,7 @@ jobs:
     needs: build-wheels
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -511,7 +550,7 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -552,7 +591,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Strict per-module 100% coverage gate (Golden Rule #12)
         # New modules ship at 100% line + 100% branch from the start.
         # Add modules to this list as they reach 100%. Legacy modules
@@ -3370,7 +3409,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -3378,7 +3417,7 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3419,7 +3458,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Touched-module 100% coverage gate (auto-discovered, DEC-CICD-GATE-HONESTY-001)
         # COMPLEMENTS (does not replace) the static per-module list above
         # and the whole-package --cov-fail-under=100 floor: AUTO-DISCOVERS
@@ -3519,7 +3558,7 @@ jobs:
             echo "::error::an upstream shard / per-module gate job did not succeed — failing the required coverage context (fail-closed: skipped==pass must never mask a red shard)"
             exit 1
           fi
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DEC-CICD-GATE-HONESTY-001: full history so the auto-discovery
           # coverage gate can diff the PR against origin/main (the merge
@@ -3527,7 +3566,7 @@ jobs:
           # has no base to diff against.
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3568,7 +3607,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Download shard coverage data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -3669,9 +3708,9 @@ jobs:
     # silent merge-green escape hatch (pinned by the discipline test).
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3696,7 +3735,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Resolve Playwright version (Chromium cache key)
         # importlib.metadata — the playwright package exposes NO top-level
         # __version__ attribute (probing it raises AttributeError). The
@@ -3746,9 +3785,9 @@ jobs:
     needs: build-wheels
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3780,7 +3819,7 @@ jobs:
         # home stays the `test:` job's coverage pass. DEC-RUST-STAGE3-REFINE-001:
         # brutex_refine ALSO joins this job's subset — the stage3_wire
         # byte-identical-tree determinism oracle needs the refine wheel here.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       # DEC-RUST-LAKE-WAVED-001 W-6a: NO brutex_lake wheel here — every
       # lake property suite is polars/pyarrow-guarded and module-skips in
       # this [dev]-only job; the wheel-armed execution home for
@@ -3831,11 +3870,11 @@ jobs:
     # regression still fails the ratio gate, Golden Rule #10).
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0   # DEC-BENCH-ABS-BASELINE-001: baseline governance diffs vs base
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3887,7 +3926,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3948,9 +3987,9 @@ jobs:
     needs: build-wheels
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -3981,7 +4020,7 @@ jobs:
         # prerequisite of every suite that reaches the lake surface (an
         # absent wheel is the typed LakeRustWavedUnavailableError, a loud
         # FAIL, never a skip).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: pytest golden tests
         # Discovers every tests/golden/*.py oracle by placement.
         run: |
@@ -3999,9 +4038,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -4055,9 +4094,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -4088,9 +4127,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -4118,7 +4157,7 @@ jobs:
       run:
         working-directory: rust/fno-math
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4148,7 +4187,7 @@ jobs:
       run:
         working-directory: rust/trading-core
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4170,18 +4209,33 @@ jobs:
       # oracle the Python golden test reads). --release runs with overflow-checks.
       - name: cargo test (golden bit-identity vs the Python oracle)
         run: cargo test --release
-      # Verify the optional PyO3 binding (Phase-2 scaffold) still compiles. The
-      # ubuntu runner's python3 satisfies pyo3's abi3 build config (same as the
-      # fno-math job). The wheel itself is NOT built here (that is Phase 2).
-      - name: cargo check --features python (PyO3 binding compiles)
-        run: cargo check --features python
+      # DEC-TRADING-CORE-PYTHON-FEATURE-GATE-001 (MIGRATION.md #2255): RUN the
+      # feature-gated tests, don't merely `cargo check` them. `src/python.rs` is
+      # gated at `src/lib.rs:82-83` (`#[cfg(feature = "python")] mod python;`)
+      # and `spec.rs`'s `mask_hex` module is serde-gated, so the default-feature
+      # `cargo test --release` above compiles a crate those modules are ABSENT
+      # from: measured 228 tests default vs 314 with `python,serde` — 86 tests
+      # that a `cargo check` can never execute. The feature set matches
+      # `.cargo/mutants.toml` EXACTLY so the CI gate and the weekly cargo-mutants
+      # gate can never drift (mutation.yml documents 376 python.rs + 3 mask_hex
+      # mutants as feature-dead without them). Linking is environment-independent:
+      # pyo3's `extension-module` suppresses the libpython link and these tests
+      # call no CPython API, so the test binary carries ZERO undefined `Py*`
+      # symbols (verified with `nm -D --undefined-only`) — no libpython needed on
+      # the runner. HONEST scope note: `python,serde` is a strict SUPERSET of the
+      # retired `cargo check --features python`, so it does not by itself prove
+      # the `python`-ALONE build compiles — that is covered by the Phase-2a
+      # `maturin build` step below, which builds the SHIPPED wheel with exactly
+      # `features = ["python"]` (`pyproject.toml:37`). Nothing is lost.
+      - name: cargo test --features python,serde (feature-gated modules)
+        run: cargo test --release --features python,serde
       # DEC-SHARED-CORE-001 Phase 2a: prove the Python-callable PyO3 binding
       # (trading_core.evaluate_from_raw) is bit-identical to the Python vocab —
       # build the abi3 wheel with maturin, install it, and run the 400-case
       # parity check against the same golden oracle. Isolated here (not the main
       # Python test job) so a wheel-build issue can't destabilise that pipeline.
       - name: Set up Python (binding parity check)
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build wheel + verify the Python binding is bit-identical (Phase 2a)
@@ -4212,7 +4266,7 @@ jobs:
       run:
         working-directory: rust/brutex-feed
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4259,7 +4313,7 @@ jobs:
       run:
         working-directory: rust/brutex-meta
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4282,7 +4336,7 @@ jobs:
       - name: cargo check --features python (PyO3 binding compiles)
         run: cargo check --features python
       - name: Set up Python (parity arms)
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build wheel + run the Python-vs-Rust parity arms
@@ -4307,7 +4361,7 @@ jobs:
           # production kernels are needed too (same retry guard);
           # brutex-identity joins them because results_store.py hard-imports
           # its kernel (DEC-RUST-RUNID-STORES-001).
-          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-identity; do
+          for crate in ./rust/fno-math ./rust/trading-core ./rust/brutex-core ./rust/brutex-identity; do
             n=0
             until pip install "$crate"; do
               n=$((n + 1))
@@ -4341,7 +4395,7 @@ jobs:
       run:
         working-directory: rust/brutex-strategies
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4396,7 +4450,7 @@ jobs:
       run:
         working-directory: rust/brutex-ops
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4432,7 +4486,7 @@ jobs:
       run:
         working-directory: rust/brutex-calendar
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4470,7 +4524,7 @@ jobs:
       run:
         working-directory: rust/brutex-refine
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4513,7 +4567,7 @@ jobs:
       run:
         working-directory: rust/brutexd
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -4551,7 +4605,7 @@ jobs:
       run:
         working-directory: rust/brutex-pull-state
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -4600,11 +4654,17 @@ jobs:
   run-smoke:
     name: make run smoke (cold-start boot)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 15 → 40 (DEC-RUST-STRICT-NO-FALLBACK-001): this job builds the kernels
+    # FROM SOURCE by design (a prebuilt wheel would mask the class it exists
+    # to catch), and the strict flip makes all sixteen hard boot
+    # dependencies rather than five. Fifteen of the sixteen are
+    # dependency-light; brutex-lake's polars graph is cargo-cached across
+    # runs via the shared-key step below.
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -4656,6 +4716,28 @@ jobs:
           # (DEC-RUST-RUNID-STORES-001) — run-smoke's `import brutex.engine`
           # line below crashes without it.
           install_with_retry ./rust/brutex-identity
+          # DEC-RUST-STRICT-NO-FALLBACK-001: strict ships ON, so every crate
+          # backing an enrolled facade is a HARD boot dependency — the same
+          # class the brutex_lake and brutex_identity notes above already
+          # describe. MEASURED on this PR: with brutex_core absent, `brutex
+          # run` refused to boot at hardware_envelope_rust with
+          # `RustFallbackRefused (reason: crate_unavailable)` rather than
+          # silently sizing threads in Python. That refusal is the intended
+          # behaviour; the fix is to install the wheel, not to weaken the
+          # gate. This list now matches the Makefile's sixteen, which is
+          # what this job exists to mirror (it was five before — a
+          # pre-existing drift from `make run`).
+          install_with_retry ./rust/brutex-feed
+          install_with_retry ./rust/brutex-refine
+          install_with_retry ./rust/brutex-core
+          install_with_retry ./rust/brutex-data
+          install_with_retry ./rust/brutex-calendar
+          install_with_retry ./rust/brutex-strategies
+          install_with_retry ./rust/brutex-notify
+          install_with_retry ./rust/brutex-meta
+          install_with_retry ./rust/brutex-observability
+          install_with_retry ./rust/brutex-ops
+          install_with_retry ./rust/brutex-sweep-ops
       - name: Import smoke — the chain that crashed before (#479, #480)
         run: |
           python -c "import trading_core, fno_math, brutex_pull_state; print('kernels OK')"
@@ -4707,9 +4789,9 @@ jobs:
     needs: build-wheels
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -4735,7 +4817,7 @@ jobs:
         # DELETED — the wheel is a HARD prerequisite (the typed
         # LakeRustWavedUnavailableError otherwise; a WIDENING of the
         # pre-shard subset forced by the endgame, not a convenience).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Run chaos suite
         env:
           # PR-gate default is fast; a manual soak overrides these much higher.
@@ -4786,9 +4868,9 @@ jobs:
     needs: build-wheels
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -4818,7 +4900,7 @@ jobs:
         # DELETED — the wheel is a HARD prerequisite (the typed
         # LakeRustWavedUnavailableError otherwise; a WIDENING of the
         # pre-shard subset forced by the endgame, not a convenience).
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Run the full-chain rehearsal + byte-identity proof
         # -s so the measured `rehearsal.<leg>.seconds` lines land in the raw
         # log (the runtime budget stays evidence-backed on every push).
@@ -4843,7 +4925,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run scanner
         run: bash scripts/ci/scan-banned-patterns.sh
 
@@ -4865,7 +4947,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate MIGRATION.md ledger numbering
         # MIGRATION.md entry numbers stay machine-checked unique — the
         # parallel-session collision era (30 groups reconciled 2026-06-10)
@@ -4900,7 +4982,7 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Check commit messages
@@ -4918,7 +5000,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - name: Install gitleaks
@@ -5030,13 +5112,13 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
         with:
           languages: python
           queries: security-extended,security-and-quality
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+      - uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
         with:
           category: "/language:python"
 
@@ -5050,7 +5132,7 @@ jobs:
     container:
       image: semgrep/semgrep:latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: semgrep scan
         # Use `semgrep scan` (not `semgrep ci`) so we don't need a
         # SEMGREP_APP_TOKEN — public rulesets are pulled from the
@@ -5074,7 +5156,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -5107,9 +5189,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -5137,7 +5219,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: typos
         uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0
         continue-on-error: true  # report but don't block
@@ -5156,9 +5238,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -5186,9 +5268,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -5210,7 +5292,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
@@ -5270,9 +5352,9 @@ jobs:
     # long before this job value bites.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -5293,7 +5375,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: mutmut on state.py (FSM) (blocking — DEC-P0-001)
         run: |
           pip install mutmut==2.5.1
@@ -5527,7 +5609,7 @@ jobs:
     timeout-minutes: 3
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Detect PR author
         id: pr-meta
         env:
@@ -5583,7 +5665,7 @@ jobs:
       && github.event.pull_request.state != 'closed'
       && github.event.pull_request.merged != true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Detect PR author
         id: pr-meta
         env:
@@ -5623,11 +5705,11 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0  # need history to diff against base (appropriateness check)
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate DEC-IDs cited in PR body against MIGRATION.md
@@ -5678,11 +5760,11 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0  # need history to diff against base
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan bug-fix PR for regression test
@@ -5722,11 +5804,11 @@ jobs:
     timeout-minutes: 50
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0  # need history for merge-base against the PR base
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -5747,7 +5829,7 @@ jobs:
         # EXACTLY the wheel subset this job built from source before
         # the shared build landed — a superset install could flip
         # wheel-gated skip tests, so each job's subset is preserved.
-        run: pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_identity-*.whl
+        run: pip install wheelhouse/*.whl
       - name: Revert fix to merge-base + run shipped tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -5770,9 +5852,9 @@ jobs:
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan PR body for uncited external-system claims
@@ -5799,9 +5881,9 @@ jobs:
     # job scans TRACKED docs (not the PR body), so it runs on push AND PR and
     # is never legitimately skipped (safe under the ci-ok skipped==pass loop).
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Validate file:line + MIGRATION.md citations in the normative docs

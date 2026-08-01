@@ -190,6 +190,48 @@ _rust = _import_kernel()
 #: carry killable-looking-but-equivalent formatting mutants).
 _warned: set[tuple[str, str]] = set()
 
+#: The facade name every strict refusal from this module carries.
+_STRICT_FACADE: Final[str] = "brutex.exec_rust"
+
+#: CLASS-C fall-back reason PREFIXES — the INPUT is outside the crate's
+#: envelope and the Python arm was ALWAYS the intended handler
+#: (DEC-RUST-STRICT-NO-FALLBACK-001 §"Scope note"). This facade's reason tokens
+#: are ``"<family>:<site>"``, so the exemption is prefix-keyed:
+#:
+#: * ``envelope:`` — :func:`_envelope_fallback`, fired by a seam whose
+#:   :func:`_fits_i64` PRE-gate refused a value the kernel's ``i64`` wire
+#:   cannot carry. The kernel is never called; the exact Python arm serves a
+#:   legal-but-wide input. The real fix is a wider kernel wire (i128), never a
+#:   crash on a legal charge.
+_STRICT_EXEMPT_REASON_PREFIXES: Final[tuple[str, ...]] = ("envelope:",)
+
+#: CLASS-C exact reason tokens. Empty: every remaining token in this module is
+#: CLASS A (``wheel_missing``, ``flag_unrecognised`` — an absent wheel or a
+#: typo'd kill switch is not a legitimate input shape) or CLASS B
+#: (``kernel:<site>`` — the kernel RAN and raised, or returned a malformed
+#: wire; a quiet Python re-run must not paper that over).
+_STRICT_EXEMPT_REASONS: Final[frozenset[str]] = frozenset()
+
+
+def _strict_exempt(reason: str) -> bool:
+    """Whether *reason* is a CLASS-C (legitimate Python-serve) fall-back."""
+    return reason in _STRICT_EXEMPT_REASONS or reason.startswith(_STRICT_EXEMPT_REASON_PREFIXES)
+
+
+def _refuse_if_strict(reason: str, **context: object) -> None:
+    """Refuse a CLASS-A/CLASS-B fall-back under strict mode.
+
+    The :mod:`brutex.config.rust_strict` import is FUNCTION-LOCAL by design:
+    this module is a costs-free leaf (the ``py/cyclic-import`` fix homed
+    :class:`~brutex.costs.types.ChargeStack` here for exactly that reason), and
+    the gate's own root (``brutex.models`` for ``BruteXError``) has no business
+    in this leaf's import-time weight. Pinned by
+    ``test_seam_is_a_costs_free_leaf_ast_pin``.
+    """
+    from brutex.config.rust_strict import refuse_if_strict
+
+    refuse_if_strict(_STRICT_FACADE, reason, **context)
+
 
 def reset_warn_memo_for_tests() -> None:
     """Restore a fresh warn-once view (test isolation only)."""
@@ -197,7 +239,17 @@ def reset_warn_memo_for_tests() -> None:
 
 
 def _warn_once(event: str, *, reason: str, **kw: object) -> None:
-    """Emit *event* at WARNING once per process per ``(event, reason)``."""
+    """Emit *event* at WARNING once per process per ``(event, reason)``.
+
+    This module's ONE fall-back choke point — every degrade path
+    (:func:`exec_rust_enabled`, :func:`_kernel_or_none`,
+    :func:`_envelope_fallback`, :func:`_kernel_fallback`,
+    :func:`_wire_fallback`) announces here — so strict mode
+    (DEC-RUST-STRICT-NO-FALLBACK-001) refuses here, BEFORE the memo write, so
+    an already-warned repeat cannot slip through the early return.
+    """
+    if not _strict_exempt(reason):
+        _refuse_if_strict(reason, event=event, **kw)
     key = (event, reason)
     if key in _warned:
         return

@@ -116,11 +116,29 @@ class ParityFamily:
         :data:`POLICY_BURN_IN` for class (a)/(b) rows or
         :data:`POLICY_ALWAYS` for class (b*) rows (module docstring).
     burn_in_samples
-        The per-process burn-in budget for a :data:`POLICY_BURN_IN` family
+        The per-process budget for a :data:`POLICY_BURN_IN` family
         (ignored by :data:`POLICY_ALWAYS` — its budget is every call).
+    strict_exempt_reasons
+        The owning facade's CLASS-C allowlist (DEC-RUST-STRICT-NO-FALLBACK-001):
+        reasons that announce "this INPUT is outside the crate's declared
+        envelope, Python was ALWAYS the intended handler". They keep serving
+        the oracle under ``BRUTEX_RUST_STRICT`` instead of refusing — refusing
+        would turn a LEGITIMATE input into a crash, the exact inverse of the
+        DEC's intent. Class A (crate absent/stale/errored) and class B (a
+        structurally-refused crate RESULT) are never listed here. The default
+        empty set keeps every family that has not classified an envelope arm
+        byte-identical.
     """
 
-    __slots__ = ("_disabled_reason", "_memo", "_remaining", "name", "policy")
+    __slots__ = (
+        "_disabled_reason",
+        "_memo",
+        "_remaining",
+        "name",
+        "policy",
+        "strict_exempt_reasons",
+        "strict_facade",
+    )
 
     # Class-level (not ``self._disabled_reason: str | None = None`` inline):
     # an inline instance-attribute annotation is runtime-unevaluated under
@@ -130,26 +148,65 @@ class ParityFamily:
     _disabled_reason: str | None
 
     def __init__(
-        self, name: str, *, policy: ParityPolicy, burn_in_samples: int = BURN_IN_SAMPLES
+        self,
+        name: str,
+        *,
+        policy: ParityPolicy,
+        burn_in_samples: int = BURN_IN_SAMPLES,
+        strict_facade: str | None = None,
+        strict_exempt_reasons: frozenset[str] = frozenset(),
     ) -> None:
         self.name = name
         self.policy: ParityPolicy = policy
         self._remaining = burn_in_samples
         self._disabled_reason = None
         self._memo: set[str] = set()
+        #: OPT-IN strict-mode wiring (DEC-RUST-STRICT-NO-FALLBACK-001). When the
+        #: OWNING facade passes its module path, every fall-back this family
+        #: ANNOUNCES refuses under ``BRUTEX_RUST_STRICT`` instead of degrading.
+        #: ``None`` (the default) keeps the historic warn-and-degrade shape, so
+        #: a family whose reasons have not been classified is never swept in.
+        self.strict_facade = strict_facade
+        #: This family's CLASS-C allowlist (constructor docstring). The
+        #: classification knowledge lives in the OWNING facade — this core
+        #: never hardcodes a caller's reason vocabulary.
+        self.strict_exempt_reasons = strict_exempt_reasons
+
+    def _refuse_if_strict(self, reason: str, **context: object) -> None:
+        """Strict-mode gate for this family's three announcement choke points.
+
+        No-op unless the owning facade opted in via ``strict_facade``, and no-op
+        for a CLASS-C reason the facade allowlisted via ``strict_exempt_reasons``
+        (an out-of-envelope INPUT is a legitimate call Python has always served
+        — refusing it would crash a valid caller).
+        """
+        if self.strict_facade is None:
+            return
+        if reason in self.strict_exempt_reasons:
+            return
+        from brutex.config.rust_strict import refuse_if_strict
+
+        refuse_if_strict(self.strict_facade, reason, family=self.name, **context)
 
     def disabled(self) -> bool:
         """``True`` iff the autorevert latch has disabled this family."""
         return self._disabled_reason is not None
 
     def disable(self, reason: str, **context: object) -> None:
-        """Latch the family OFF for the remainder of the process.
+        """Refuse under strict mode; else latch the family OFF for the process.
+
+        DEC-RUST-STRICT-NO-FALLBACK-001 (opt-in ``strict_facade``). The only
+        reason routed here is ``divergence`` — CLASS B, the kernel disagreed
+        with the oracle. The refusal fires BEFORE the latch is written, so
+        under strict mode the latch is never set and the ``disabled()``
+        early-return is structurally unreachable.
 
         The first call logs ``rust_parity.autoreverted`` (ERROR — a genuine
         kernel-wrongness signal, never throttled below the operator's view)
         and increments the family's divergence counter; repeat calls are
         no-ops (the latch is already set).
         """
+        self._refuse_if_strict(reason, **context)
         if self._disabled_reason is not None:
             return
         self._disabled_reason = reason
@@ -185,24 +242,39 @@ class ParityFamily:
             self._remaining -= 1
 
     def warn_fallback_once(self, reason: str, **context: object) -> None:
-        """Log ``rust_parity.fallback`` ONCE per process per *reason*.
+        """Refuse under strict mode; else log ``rust_parity.fallback`` warn-once.
+
+        DEC-RUST-STRICT-NO-FALLBACK-001 (opt-in ``strict_facade``). Reasons
+        routed here are CLASS A (``flag_unrecognised``, ``wheel_missing``,
+        ``wheel_stale``, ``kernel_error`` — the crate is absent, stale or blew
+        up) or CLASS B (``kernel_disabled`` — a prior divergence latched the
+        family), and they REFUSE. A CLASS-C reason the owning facade listed in
+        ``strict_exempt_reasons`` (an INPUT outside the crate's declared
+        envelope) still serves the oracle under strict mode. Strict-OFF is
+        byte-identical to the prior behaviour.
 
         A sticky reason (a stale wheel, a latched family) would otherwise
         flood the logs at leaderboard scale — the rust_metrics warn-once
         memo rationale. The fallback itself is bit-exact regardless (the
         Python oracle serves the call).
         """
+        self._refuse_if_strict(reason, **context)
         if reason in self._memo:
             return
         self._memo.add(reason)
         _LOG.warning("rust_parity.fallback", family=self.name, reason=reason, **context)
 
     def refuse_result_once(self, **context: object) -> None:
-        """Log ``rust_parity.kernel_result_refused`` (ERROR) once per process.
+        """Refuse under strict mode; else log ``kernel_result_refused`` once.
+
+        DEC-RUST-STRICT-NO-FALLBACK-001 (opt-in ``strict_facade``). This is the
+        CLASS-B choke point — a domain-invalid kernel result indicates a kernel
+        BUG — so it refuses; never exempt.
 
         A domain-invalid kernel result indicates a kernel BUG — refused
         loudly, never adopted silently; the call is served by the oracle.
         """
+        self._refuse_if_strict("kernel_result_refused", **context)
         if "kernel_result_refused" in self._memo:
             return
         self._memo.add("kernel_result_refused")
@@ -328,6 +400,12 @@ def run_with_parity(  # noqa: UP047 — PEP 695 unparsable by the mutmut gate's 
         with a warn-once ``kernel_error``; ``MemoryError`` re-raises BARE
         (OOM is a GLOBAL stop, DEC-LAKE-WRITE-HALT-001); any OTHER exception
         type PROPAGATES (a genuine code bug still raises — CLAUDE.md §4).
+        ``kernel_error`` is the CLASS-A token — "the crate ran and blew up".
+        A caller whose kernel declares an INPUT ENVELOPE (class C) must
+        PRE-SCREEN that envelope in Python and announce its own exempt reason
+        instead of reaching this arm, so a legitimate out-of-envelope input is
+        never mistaken for a broken crate (the ranking ``term_inputs`` seam is
+        the worked example).
     oracle
         Zero-arg closure running the retained-forever Python original.
     key

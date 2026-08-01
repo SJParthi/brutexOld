@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from brutex.config.rust_strict import refuse_if_strict
 from brutex.data.lake_rust_render import env_flag_tristate
 
 if TYPE_CHECKING:
@@ -151,10 +152,18 @@ def reset_lake_rust_locks_for_tests() -> None:
 def _warn_once(reason: str, **context: object) -> None:
     """Log ``lake_rust_locks.fallback`` WARN once per process per *reason*.
 
+    DEC-RUST-STRICT-NO-FALLBACK-001: refuses under ``BRUTEX_RUST_STRICT``.
+    Every reason funnelled here is CLASS A (``flag_unrecognised`` — the
+    junk-flag arm; ``crate_unavailable`` — the wheel is absent). There is no
+    class-C reason at this choke point, so no exemption set: the seams take
+    only ints (an fd, a path pair) that the crate always claims. Strict-OFF is
+    byte-identical to the prior behaviour.
+
     The seams run once per lock acquire / atomic write (thousands per
     pull), so a sticky reason would flood the logs; the first occurrence is
     loud, repeats fall through silently (the Python arm serves regardless).
     """
+    refuse_if_strict("brutex.data.lake_rust_locks", reason, **context)
     if reason in _OBSERVABILITY_MEMO:
         return
     _OBSERVABILITY_MEMO.add(reason)
@@ -170,7 +179,25 @@ def _note_engaged() -> None:
 
 
 def _disable(reason: str, *, error: bool = False, **context: object) -> None:
-    """Latch the Rust path OFF for the remainder of the process.
+    """Refuse under strict mode; else latch the Rust path OFF for the process.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. Reasons here are CLASS A
+    (``crate_panic``; ``flock_attempt_failed`` / ``flock_release_failed`` /
+    ``atomic_commit_failed`` — the crate raised mid-operation); none is class
+    C, so none is exempt. The refusal fires BEFORE the latch is written, so
+    under strict mode the latch is never set and every ``lake_rust_locks_
+    disabled()`` early-return is structurally unreachable.
+
+    CONSEQUENCE, stated honestly: the refusal replaces the Python arm that
+    would otherwise have run AFTER the announcement. For ``flock_release_
+    failed`` that arm is ``python_close(fd)`` — under strict mode the fd is
+    left open and the kernel releases the flock at process exit (a leaked
+    descriptor on a fatal path, never a stuck lock). For
+    ``atomic_commit_failed`` the arm is ``python_commit(...)`` — the temp file
+    is left in place and the destination is untouched (no partial write, no
+    corruption; the caller's own error path removes the temp). Both are
+    strictly safer than silently completing an operation the Rust arm was
+    supposed to own. Strict-OFF is byte-identical to the prior behaviour.
 
     ``error=True`` logs ``lake_rust_locks.locks_autoreverted`` at ERROR (a
     crate fault mid-operation — a genuine wrongness signal, never throttled
@@ -178,6 +205,7 @@ def _disable(reason: str, *, error: bool = False, **context: object) -> None:
     ``lake_rust_locks.rust_path_disabled`` at WARN. Repeat calls are no-ops
     (the latch is already set).
     """
+    refuse_if_strict("brutex.data.lake_rust_locks", reason, error=error, **context)
     if _DISABLED_REASON[0] is not None:
         return
     _DISABLED_REASON[0] = reason

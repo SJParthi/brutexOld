@@ -1077,9 +1077,28 @@ class TestCalendarRustSettleSeam:
         return [e["reason"] for e in logs if e["event"] == "calendar_rust.fallback"]
 
     @pytest.fixture(autouse=True)
-    def _fresh_calendar_rust(self) -> Generator[None]:
-        from brutex.calendars import calendar_rust as _cr
+    def _fresh_calendar_rust(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+        """Reset the seam AND declare the DEGRADE-lattice mode for this class.
 
+        DEC-RUST-STRICT-NO-FALLBACK-001. Every refuse-poison test below hands
+        ``_materialize_settle`` / ``_materialize_settle_valid`` a MALFORMED crate
+        return and pins the resulting ``calendar_rust.fallback`` WARN reason —
+        i.e. it pins the DEGRADE, which is exactly what strict mode forbids
+        (these are CLASS B: the Rust arm answered wrongly, so refusing is the
+        correct SHIPPED behaviour and the refusal is pinned positively in
+        :class:`TestStrictRefusesSettleSeam` below).
+
+        So the mode is DECLARED once, here, rather than by weakening any
+        assertion. Uses the SHARED ``monkeypatch`` object (never its own
+        ``MonkeyPatch.context()``) so this class and the strict-ON companion
+        share ONE LIFO undo stack and the value can never be restored out of
+        order and leak past this module — the cross-context leak
+        ``tests/conftest.py::_isolate_rust_strict_env`` exists to contain.
+        """
+        from brutex.calendars import calendar_rust as _cr
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
         _cr.reset_calendar_rust_for_tests()
         yield
         _cr.reset_calendar_rust_for_tests()
@@ -1216,3 +1235,86 @@ class TestCalendarRustSettleSeam:
                 path="probe.json",
             )
         )
+
+
+class TestStrictRefusesSettleSeam:
+    """Strict-ON pins — the companion to :class:`TestCalendarRustSettleSeam`.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001. That class declares the DEGRADE lattice
+    (``BRUTEX_RUST_STRICT=0``) so it can pin the ``calendar_rust.fallback``
+    WARN reasons. This class pins the SHIPPED default from the other side: at
+    the strict default every one of those malformed-crate-return shapes is a
+    CLASS-B fault (the Rust arm answered wrongly) and MUST raise
+    :class:`RustFallbackRefused` rather than quietly serving the Python oracle.
+
+    Without this class the mode declaration above would be a silent coverage
+    hole — the exact "strict-refusal test degrades to a green fall-back" shape
+    the belt in ``tests/conftest.py`` exists to make impossible.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _strict_default(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+        """The SHIPPED default: the var UNSET means strict ON.
+
+        Same shared ``monkeypatch`` object as the sibling class's fixture — one
+        LIFO undo stack, so this ``delenv`` can never be restored out of order.
+        """
+        from brutex.calendars import calendar_rust as _cr
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+        _cr.reset_calendar_rust_for_tests()
+        yield
+        _cr.reset_calendar_rust_for_tests()
+
+    @pytest.mark.parametrize(
+        ("crate_return", "reason"),
+        [
+            (["not", "a", "tuple"], "settle_shape"),
+            ((True, ""), "settle_shape"),
+            ((1, "", "17:30", "x"), "settle_leg_types"),
+            ((False, 42, "17:30", "x"), "settle_leg_types"),
+        ],
+    )
+    def test_materialize_settle_refuses_under_strict_default(
+        self, crate_return: object, reason: str
+    ) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        with pytest.raises(RustFallbackRefused, match=reason):
+            settle_evidence._materialize_settle(crate_return, payload={}, path="p")
+
+    @pytest.mark.parametrize(
+        ("payload", "adopted", "generated", "reason"),
+        [
+            ("nope", "17:30", "x", "settle_valid_shape"),
+            (None, 1730, "x", "settle_valid_shape"),
+            (None, "17:30", 42, "settle_valid_shape"),
+            ({"earliest_all_pass_ist": None}, "17:30", "x", "settle_valid_pluck"),
+            ({"margin_minutes": True}, "17:30", "x", "settle_valid_pluck"),
+            ({"probe_script_version": 11}, "17:30", "x", "settle_valid_pluck"),
+            (None, "99-99", "x", "settle_valid_adopted_shape"),
+        ],
+    )
+    def test_materialize_settle_valid_refuses_under_strict_default(
+        self, payload: object, adopted: object, generated: object, reason: str
+    ) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        # ``None`` means "a conforming payload" — the poison is in the OTHER
+        # argument; a mapping means "a conforming payload MUTATED by it".
+        built: object
+        if payload is None:
+            built = make_evidence_payload()
+        elif isinstance(payload, dict):
+            built = make_evidence_payload(**payload)
+        else:
+            built = payload
+
+        with pytest.raises(RustFallbackRefused, match=reason):
+            settle_evidence._materialize_settle_valid(built, adopted, generated, path="p")
+
+    def test_none_still_abstains_silently_under_strict(self) -> None:
+        """The serde ABSTAIN is a DESIGNED degrade, not a fault — never refuses."""
+        assert settle_evidence._materialize_settle(None, payload={}, path="p.json") is None

@@ -46,6 +46,24 @@ if TYPE_CHECKING:
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
 def _oracle_value(value: str = "ORACLE") -> Callable[[], cr.LawOutcome[str]]:
     """A side-effect-free oracle returning ``Value(value)``."""
 
@@ -752,3 +770,44 @@ class TestRealWheel:
             oracle.generated_at_utc,
         )
         assert crate.validate_settle_evidence is not None  # crate genuinely engaged
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the choke points REFUSE instead of
+    quietly handing the call to the Python oracle.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_warn_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            cr._warn_once("crate_stale")
+
+    def test_class_a_disable_choke_point_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            cr._disable("crate_unavailable")
+
+    def test_class_c_exempt_reason_does_not_refuse(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Class C: the INPUT is outside the crate's envelope, so Python was
+        # ALWAYS the intended handler — enumerated in the facade's
+        # ``_STRICT_EXEMPT_REASONS`` frozenset. Must NOT raise.
+        self._strict_on(monkeypatch)
+        cr._warn_once("observed_error")

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import structlog.testing
+from brutex.config import rust_strict
 from brutex.meta.abstain import abstain_masks_python
 from brutex.meta.logistic import score_logistic as oracle_score
 from brutex.meta.meta_rust import (
@@ -47,7 +48,15 @@ ABSTAIN_ARGS = (
 
 
 @pytest.fixture(autouse=True)
-def _reset() -> None:
+def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fresh process view + strict mode OFF for the degrade-lattice suite.
+
+    Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ships ON; this module
+    exercises every degrade arm, so it opts OUT explicitly rather than
+    weakening an assertion. ``TestStrictRefusal`` opts back IN per test on
+    THIS SAME shared ``monkeypatch`` object.
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     reset_meta_rust_for_tests()
 
 
@@ -366,3 +375,119 @@ class TestRealWheel:
         probs = brutex_meta.score_logistic([0.0], 1, [1.0], 0.0)
         assert type(probs) is list
         assert all(type(p) is float for p in probs)
+
+
+class TestStrictRefusal:
+    """DEC-RUST-STRICT-NO-FALLBACK-001 — all THREE announcement sites refuse.
+
+    This facade does NOT have a single funnel: besides ``_warn_once``
+    (the warn-once memo) and ``_latch_autorevert`` (the burn-in latch),
+    ``meta_gate_enabled`` logs the junk-flag warning DIRECTLY, bypassing
+    the memo helper entirely. All three call ``_refuse_if_strict`` before
+    their memo/latch write, so a latched early-return is structurally
+    unreachable under strict mode.
+
+    CLASS C is EMPTY here. Every reason is a crate fault (``wheel_missing``
+    / ``wheel_stale`` / ``kernel_error`` / ``flag_unrecognised``, CLASS A)
+    or a structurally-refused Rust RESULT (``kernel_invalid`` /
+    ``burn_in_mismatch``, CLASS B). The one input-shaped concern — a NaN
+    feature legitimately producing a NaN probability — is handled by the
+    output gate ITSELF (the range check only fires on all-finite inputs,
+    ``test_non_finite_inputs_permit_non_finite_output``), so it never
+    reaches an announcement at all. Hence all three sites refuse
+    UNCONDITIONALLY (an empty exemption frozenset would leave an
+    unreachable branch under the 100% branch gate).
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Arm strict mode on the SHARED monkeypatch the autouse fixture used."""
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    # ---- CHOKE 1: _warn_once (CLASS A) ------------------------------
+
+    def test_class_a_wheel_missing_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(META_GATE_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_meta", None)  # import raises
+        with pytest.raises(rust_strict.RustFallbackRefused) as excinfo:
+            score_probabilities(FEATURES, 2, WEIGHTS, 0.1)
+        message = str(excinfo.value)
+        assert "brutex.meta.meta_rust" in message
+        assert "wheel_missing" in message
+
+    def test_class_a_wheel_missing_serves_oracle_when_strict_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SAME path with strict OFF degrades to the oracle value."""
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+        monkeypatch.setenv(META_GATE_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_meta", None)
+        assert score_probabilities(FEATURES, 2, WEIGHTS, 0.1) == oracle_probs()
+
+    def test_class_a_wheel_stale_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(META_GATE_ENV, "1")
+        stale = SimpleNamespace(score_logistic=lambda *a: [], abstain_masks=None)
+        monkeypatch.setitem(sys.modules, "brutex_meta", stale)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="wheel_stale"):
+            score_probabilities(FEATURES, 2, WEIGHTS, 0.1)
+
+    def test_class_a_kernel_error_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(META_GATE_ENV, "1")
+
+        def _raise(*_args: object) -> object:
+            raise RuntimeError("panic")
+
+        monkeypatch.setitem(sys.modules, "brutex_meta", fake_kernel(score=_raise))
+        with pytest.raises(rust_strict.RustFallbackRefused, match="kernel_error"):
+            score_probabilities(FEATURES, 2, WEIGHTS, 0.1)
+
+    # ---- CHOKE 2: the meta_gate_enabled direct-log bypass (CLASS A) --
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The junk-flag arm logs DIRECTLY — its own refusal, not the memo's."""
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="flag_unrecognised"):
+            meta_gate_enabled("bogus")
+
+    # ---- CHOKE 1: _warn_once (CLASS B) ------------------------------
+
+    def test_class_b_kernel_invalid_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A poisoned Rust RESULT is a crate answer, never a legitimate input."""
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(META_GATE_ENV, "1")
+        monkeypatch.setitem(sys.modules, "brutex_meta", fake_kernel(score=lambda *a: [0.5]))
+        with pytest.raises(rust_strict.RustFallbackRefused, match="kernel_invalid"):
+            score_probabilities(FEATURES, 2, WEIGHTS, 0.1)
+
+    # ---- CHOKE 3: _latch_autorevert (CLASS B) -----------------------
+
+    def test_class_b_burn_in_mismatch_refuses_before_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal fires BEFORE ``_STATE['latched']`` is written.
+
+        The clear latch is the proof: no later call can take a silent
+        latched early-return under strict mode.
+        """
+        self._strict_on(monkeypatch)
+        monkeypatch.setenv(META_GATE_ENV, "1")
+        drifted = [min(1.0, p + 1e-9) for p in oracle_probs()]
+        monkeypatch.setitem(sys.modules, "brutex_meta", fake_kernel(score=lambda *a: list(drifted)))
+        with pytest.raises(rust_strict.RustFallbackRefused, match="burn_in_mismatch"):
+            score_probabilities(FEATURES, 2, WEIGHTS, 0.1)
+        from brutex.meta import meta_rust as _mod
+
+        assert _mod._STATE["latched"] is False
+
+    # ---- CLASS C (structurally empty) -------------------------------
+
+    def test_no_class_c_exemption_frozenset_exists(self) -> None:
+        """Pin the structural absence of a CLASS-C carve-out on this facade."""
+        from brutex.meta import meta_rust as _mod
+
+        assert not hasattr(_mod, "_STRICT_EXEMPT_REASONS")
+        assert not hasattr(_mod, "_STRICT_UNRESOLVED_REASONS")

@@ -36,13 +36,23 @@ from brutex.backup.backup_rust import (
     route_law,
 )
 from brutex.backup.errors import BackupError
+from brutex.config import rust_strict
 
 # ── shared fixtures / helpers ──────────────────────────────────────────────
 
 
 @pytest.fixture(autouse=True)
-def _fresh_seam() -> Iterator[None]:
-    """Every test starts AND ends with a fresh process view of the seam."""
+def _fresh_seam(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test starts AND ends with a fresh process view of the seam.
+
+    Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ships ON, and this module
+    exists to exercise the DEGRADE lattice — so it opts OUT explicitly here
+    rather than weakening any assertion. ``TestStrictRefusal`` opts back IN
+    per test, on THIS SAME shared ``monkeypatch`` object (never a nested
+    ``MonkeyPatch.context()`` layered on top of a fixture that owns another
+    one — LIFO teardown across two objects leaks the env past the module).
+    """
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
     reset_backup_rust_for_tests()
     yield
     reset_backup_rust_for_tests()
@@ -466,3 +476,99 @@ class TestOutcomeMachinery:
 
 def _raise_backup_error() -> Any:
     raise BackupError("captured")
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ──────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict mode turns every ANNOUNCED fall-back into a refusal.
+
+    Two choke points — :func:`~brutex.backup.backup_rust._warn_once` and
+    :func:`~brutex.backup.backup_rust._disable` — carry the gate; every
+    ``return oracle()`` in :func:`route_law` is preceded by one of them
+    EXCEPT the :data:`USE_ORACLE` abstain arm, which never announces and is
+    therefore structurally exempt (covered below).
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Re-arm strict mode on the SHARED monkeypatch the autouse fixture uses.
+
+        Deliberately NOT a nested ``MonkeyPatch.context()``: two MonkeyPatch
+        objects teardown LIFO and would leak ``BRUTEX_RUST_STRICT`` past this
+        module.
+        """
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_class_a_crate_unavailable_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — an absent wheel refuses instead of serving the oracle."""
+        _on(monkeypatch)
+        _install(monkeypatch, None)  # any import raises ImportError
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="crate_unavailable"):
+            route_law("law", oracle=lambda: "python", compute=_value_compute("rust"))
+        # The refusal fires BEFORE the latch write, so the latch stays clear
+        # and the latched early-return in route_law is unreachable.
+        assert disabled_reason() is None
+        assert backup_rust_disabled() is False
+
+    def test_same_path_serves_the_oracle_strict_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The SAME class-A path degrades normally with the kill switch on."""
+        _on(monkeypatch)
+        _install(monkeypatch, None)
+        assert rust_strict.strict_mode() is False  # set by the autouse fixture
+        assert route_law("law", oracle=lambda: "python", compute=_value_compute("rust")) == "python"
+        assert disabled_reason() == "crate_unavailable"
+
+    def test_class_a_flag_unrecognised_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — an operator typo refuses rather than silently disarming."""
+        monkeypatch.setenv(BACKUP_RUST_ENV, "ture")
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="flag_unrecognised"):
+            backup_rust_enabled()
+
+    def test_class_a_law_error_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS A — a raising crate call refuses instead of degrading."""
+        _on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+
+        def _boom(_crate: ModuleType) -> object:
+            raise ValueError("crate blew up")
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="law_error"):
+            route_law("law", oracle=lambda: "python", compute=_boom)
+
+    def test_class_b_burn_in_mismatch_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS B — the crate DISAGREED with the oracle: never papered over."""
+        _on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        self._strict_on(monkeypatch)
+        with pytest.raises(rust_strict.RustFallbackRefused, match="burn_in_mismatch"):
+            route_law("law", oracle=lambda: "python", compute=_value_compute("rust"))
+        assert disabled_reason() is None  # refusal precedes the latch write
+
+    def test_class_c_use_oracle_abstain_never_refuses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The abstain-to-oracle law is CLASS C and is STRUCTURALLY exempt.
+
+        Layer 3 (the module docstring): a crate decision whose Python
+        spelling embeds a CPython repr, or any input serde parses
+        differently than CPython's ``json`` (``NaN``/``Infinity`` literals,
+        lone surrogates, ``\\x1c``-class whitespace), returns
+        :data:`USE_ORACLE` and :func:`route_law` serves the Python oracle
+        VERBATIM — no warn, no burn-in compare, so NEITHER choke point is
+        reached and there is nothing to exempt in a frozenset. Refusing here
+        would break backup rendering on a legitimate input; the honest fix
+        is widening the crate until the abstain is unreachable.
+        """
+        _on(monkeypatch)
+        _install(monkeypatch, _fake_crate())
+        self._strict_on(monkeypatch)
+        abstain: Callable[[ModuleType], object] = lambda crate: USE_ORACLE  # noqa: E731
+        assert route_law("law", oracle=lambda: "python", compute=abstain) == "python"
+        assert disabled_reason() is None
+        assert backup_rust_disabled() is False

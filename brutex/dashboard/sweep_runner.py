@@ -97,6 +97,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.data.timeframes import DEFAULT_SWEEP_INTERVALS
 from brutex.ranking.multi_select import DEFAULT_PERSIST_TOP_K
 from brutex.universe import ENGINE_SWEEP_SPOT_TRIPLES
 from brutex.vocabulary.bits import IMPLEMENTED_MASK
@@ -121,8 +122,16 @@ DEFAULT_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY"
 #: point only (gap-hunt finding #9 — the old bare default silently dropped
 #: SENSEX, 2 of 3).
 DEFAULT_ONECLICK_SYMBOLS: Final[str] = "NIFTY,BANKNIFTY,SENSEX"
-#: Default lake interval set to sweep (mirrors the CLI ``--intervals`` default).
-DEFAULT_INTERVALS: Final[str] = "1minute,5minute,15minute"
+#: Default lake interval set to sweep — DERIVED from the ONE scope home
+#: :data:`brutex.data.timeframes.SWEEP_TIMEFRAMES` (DEC-SWEEP-TF-SCOPE-5-001),
+#: the SAME object the CLI ``--intervals`` argparse default reads. Deliberately
+#: NOT a second copy: the previous hardcoded ``"1minute,5minute,15minute"``
+#: string was a §11 COMMON violation that let this button and the CLI sweep
+#: DIFFERENT timeframe sets while both claimed to be "the default" (unlike
+#: :data:`DEFAULT_K`, which is a sanctioned copy only because the dashboard
+#: must not import the CLI at module top — ``brutex.data.timeframes`` is a
+#: stdlib-only leaf, so no copy is needed here).
+DEFAULT_INTERVALS: Final[str] = DEFAULT_SWEEP_INTERVALS
 #: Default trade directions (both legs of a directional edge).
 DEFAULT_DIRECTIONS: Final[str] = "BUY,SELL"
 #: Default conditions-per-combo K values (mirrors the CLI ``--k`` default —

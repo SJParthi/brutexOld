@@ -15,10 +15,11 @@
 //!    input shape (burn-in-verified, autoreverted on any divergence).
 //! 2. [`gate_config_fragment`] — `brutex/engine/sweep_identity.py`'s
 //!    gate-config identity-fragment EMISSION law (overfit leg iff the gate is
-//!    set; stage3 leg iff the pass is enabled; empty ⇒ `None`). Values cross
-//!    the FFI as `f64`/`i64` (bit-exact roundtrip — the greeks_batch
-//!    precedent); the facade's exact-type gates (`float`/`int`, `bool`
-//!    excluded) refuse anything lossy to the oracle.
+//!    set; `max_sl_hit_rate` leg iff the Door-6 ceiling is set; cvar leg iff
+//!    the tail gate is set; stage3 leg iff the pass is enabled; empty ⇒
+//!    `None`). Values cross the FFI as `f64`/`i64` (bit-exact roundtrip —
+//!    the greeks_batch precedent); the facade's exact-type gates
+//!    (`float`/`int`, `bool` excluded) refuse anything lossy to the oracle.
 //! 3. [`stall_scaled_timeout`] — `brutex/engine/sweep_stall_policy.py`'s
 //!    raise-only scaled-timeout tail: `scaled = factor × estimate`; above the
 //!    base ⇒ `(scaled, true)`, else `(base, false)`. The fail-loud env parses
@@ -84,26 +85,50 @@ pub fn join_path_segments(base: &str, segments: &[String]) -> String {
 ///
 /// * `overfit` — the four gate knobs `(dsr_min, weight, default_skew,
 ///   default_excess_kurtosis)`, or `None` when the overfit gate is off.
+/// * `max_sl_hit_rate` — the opt-in ranking Door-6 ceiling
+///   (DEC-METRICS-LOSSRATE-FIRSTCLASS-001 Stage B), or `None` when the
+///   knob is off. Emitted verbatim: the Python facade crosses ONLY an
+///   exact `float`, so the f64 round-trip is bit-exact by construction.
+/// * `cvar` — the CVaR tail-gate knobs `(alpha_bps, threshold_paisa)`
+///   (DEC-RANK-CVAR-TAIL-GATE-001), or `None` when the gate is off. Both
+///   are exact ints by `CvarGateConfig.__post_init__`, so the i64
+///   round-trip is bit-exact by construction.
 /// * `stage3_enable` + the three stage-3 knobs — the stage3 leg is emitted
 ///   ONLY when the pass is enabled (a disabled pass's knobs are inert and
 ///   never re-key a light grid — the byte-stable-at-defaults law).
 ///
-/// Returns `(overfit_leg, stage3_leg)`; both `None` ⇒ the Python facade
-/// renders the whole fragment as `None` (the `fragment or None` tail).
+/// Returns `(overfit_leg, max_sl_hit_rate_leg, cvar_leg, stage3_leg)`; ALL
+/// `None` ⇒ the Python facade renders the whole fragment as `None` (the
+/// `fragment or None` tail).
+///
+/// The `max_sl_hit_rate` + `cvar` legs were added by
+/// DEC-RUST-SWEEP-OPS-GATE-FRAGMENT-WIDEN-001: before them BOTH knobs were
+/// outside this law's domain, so a SET knob had to route the WHOLE
+/// computation back to the Python oracle (the facade's
+/// `gate_fragment_beyond_crate` warn-once + the caller's silent cvar
+/// early-return). Emitting them here is what makes those Python arms
+/// unreachable — the widening, not a refusal.
 #[allow(clippy::type_complexity)] // The FFI tuple IS the law's shape.
 pub fn gate_config_fragment(
     overfit: Option<(f64, f64, f64, f64)>,
+    max_sl_hit_rate: Option<f64>,
+    cvar: Option<(i64, i64)>,
     stage3_enable: bool,
     stage3_top_k: i64,
     stage3_max_fevals: i64,
     stage3_max_restarts: i64,
-) -> (Option<(f64, f64, f64, f64)>, Option<(i64, i64, i64)>) {
+) -> (
+    Option<(f64, f64, f64, f64)>,
+    Option<f64>,
+    Option<(i64, i64)>,
+    Option<(i64, i64, i64)>,
+) {
     let stage3 = if stage3_enable {
         Some((stage3_top_k, stage3_max_fevals, stage3_max_restarts))
     } else {
         None
     };
-    (overfit, stage3)
+    (overfit, max_sl_hit_rate, cvar, stage3)
 }
 
 /// The raise-only scaled stall-timeout tail
@@ -367,33 +392,64 @@ mod tests {
     }
 
     #[test]
-    fn gate_fragment_both_off_is_empty() {
-        assert_eq!(gate_config_fragment(None, false, 1, 2, 3), (None, None));
+    fn gate_fragment_all_off_is_empty() {
+        assert_eq!(
+            gate_config_fragment(None, None, None, false, 1, 2, 3),
+            (None, None, None, None)
+        );
     }
 
     #[test]
     fn gate_fragment_overfit_only() {
         let overfit = Some((0.95, 0.05, 0.0, 0.0));
         assert_eq!(
-            gate_config_fragment(overfit, false, 1, 2, 3),
-            (overfit, None)
+            gate_config_fragment(overfit, None, None, false, 1, 2, 3),
+            (overfit, None, None, None)
         );
     }
 
     #[test]
     fn gate_fragment_stage3_only_carries_knobs() {
         assert_eq!(
-            gate_config_fragment(None, true, 10, 200, 3),
-            (None, Some((10, 200, 3)))
+            gate_config_fragment(None, None, None, true, 10, 200, 3),
+            (None, None, None, Some((10, 200, 3)))
         );
     }
 
     #[test]
-    fn gate_fragment_both_legs() {
+    fn gate_fragment_max_sl_hit_rate_leg_is_verbatim() {
+        // The Door-6 ceiling rides through untouched — the facade crosses
+        // ONLY an exact float, so this is a bit-exact f64 round-trip.
+        assert_eq!(
+            gate_config_fragment(None, Some(0.5), None, false, 1, 2, 3),
+            (None, Some(0.5), None, None)
+        );
+    }
+
+    #[test]
+    fn gate_fragment_cvar_leg_is_verbatim() {
+        assert_eq!(
+            gate_config_fragment(None, None, Some((500, 1000)), false, 1, 2, 3),
+            (None, None, Some((500, 1000)), None)
+        );
+    }
+
+    #[test]
+    fn gate_fragment_stage3_knobs_inert_when_disabled() {
+        // The byte-stable-at-defaults law: a DISABLED stage-3 pass drops its
+        // knobs even when the other legs are live.
+        assert_eq!(
+            gate_config_fragment(None, Some(0.25), Some((1, 7)), false, 99, 98, 97),
+            (None, Some(0.25), Some((1, 7)), None)
+        );
+    }
+
+    #[test]
+    fn gate_fragment_all_four_legs() {
         let overfit = Some((0.9, 0.1, -0.5, 2.0));
         assert_eq!(
-            gate_config_fragment(overfit, true, 5, 100, 2),
-            (overfit, Some((5, 100, 2)))
+            gate_config_fragment(overfit, Some(0.75), Some((500, 25_000)), true, 5, 100, 2),
+            (overfit, Some(0.75), Some((500, 25_000)), Some((5, 100, 2)))
         );
     }
 

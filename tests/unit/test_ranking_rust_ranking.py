@@ -41,6 +41,24 @@ from tests.fakes.pow_identity import pow_identity_holds
 
 
 @pytest.fixture(autouse=True)
+def _strict_off_degrade_lattice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module is the *degrade-lattice* suite — pin ``BRUTEX_RUST_STRICT=0``.
+
+    DEC-RUST-STRICT-NO-FALLBACK-001 ships strict mode ON by default, so every
+    class-A (crate absent / stale / errored) and class-B (structurally refused
+    crate result) reason now RAISES ``RustFallbackRefused`` instead of quietly
+    serving the Python oracle.  The tests in this module exist precisely to
+    exercise that oracle machinery — the still-supported ``BRUTEX_RUST_STRICT=0``
+    mode — so the mode is DECLARED once, here, rather than by weakening any
+    assertion.  Strict-ON refusal is pinned separately in ``TestStrictRefusal``
+    at the end of this module.
+    """
+    from brutex.config import rust_strict
+
+    monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
 def _fresh_families() -> Any:
     """Every test observes fresh burn-in budgets, latches and memos."""
     reset_ranking_rust_for_tests()
@@ -293,12 +311,21 @@ class TestRankCombosViaRust:
         monkeypatch.setitem(sys.modules, "fno_math", None)
         assert rank_combos_via_rust(_exact_pool()) is None
 
-    def test_beyond_2_53_paisa_serves_the_oracle_via_kernel_error(
+    def test_beyond_2_53_paisa_serves_the_oracle_via_class_c_reason(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # avg MFE beyond the cr_div fast-path envelope: the term kernel
-        # raises ValueError → the family serves the Python oracle (which
-        # computes CPython's correctly-rounded int/int) — never a wrong bit.
+        """An out-of-envelope operand is CLASS C, NOT ``kernel_error``.
+
+        avg MFE beyond the ``cr_div_i64`` fast-path envelope: the Python
+        pre-screen routes the term step to the oracle (which computes
+        CPython's correctly-rounded ``int / int``) — never a wrong bit.
+
+        The reason token was ``kernel_error`` until the class split: the
+        crate's envelope refusal shared the CLASS-A "the crate blew up" token,
+        so DEC-RUST-STRICT-NO-FALLBACK-001 turned this LEGITIMATE input into a
+        crash. The served VALUE is unchanged (the ``_keys`` equality below is
+        the byte pin, kept verbatim); only the announcement is now distinct.
+        """
         pool = [
             (0b01, _m(avg_mfe_paisa=(1 << 53) + 1, avg_mae_paisa=3)),
             (0b10, _m(avg_mfe_paisa=(1 << 53) + 3, avg_mae_paisa=3)),
@@ -308,9 +335,10 @@ class TestRankCombosViaRust:
         assert on is not None
         assert _keys(on) == _keys(_rank_off(pool))
         events = [e for e in logs if e["event"] == "rust_parity.fallback"]
-        assert ("kernel_error", "ranking.term_inputs") in {
-            (e["reason"], e["family"]) for e in events
-        }
+        reasons = {(e["reason"], e["family"]) for e in events}
+        assert ("term_inputs_beyond_crate", "ranking.term_inputs") in reasons
+        # The CLASS-A token must NOT be minted for a legitimate input.
+        assert ("kernel_error", "ranking.term_inputs") not in reasons
 
     def test_junk_loss_rate_row_computes_the_door5_sentinel(self) -> None:
         """A non-finite ``loss_rate`` row computes the Door-5 sentinel
@@ -336,6 +364,112 @@ class TestRankCombosViaRust:
 
 
 # ── refuse-poison validators + divergence laws ──────────────────────────
+
+
+class TestTermInputEnvelopeScreen:
+    """The CLASS-C pre-screen — a literal twin of the crate's own guard.
+
+    ``_term_inputs_within_crate_envelope`` decides in Python what
+    ``cr_div_i64`` would decide in Rust, so an out-of-envelope operand is
+    announced as CLASS C (``term_inputs_beyond_crate``) instead of reaching
+    ``run_with_parity``'s CLASS-A ``kernel_error`` arm. If the twin ever
+    drifts from the crate, the equivalence pin below fails loudly.
+    """
+
+    @staticmethod
+    def _screen(rows: list[tuple[int, ResultMetrics]]) -> bool:
+        from brutex.ranking.rust_ranking import _term_inputs_within_crate_envelope
+
+        return _term_inputs_within_crate_envelope(rows)
+
+    def test_in_envelope_rows_pass(self) -> None:
+        limit = 1 << 53
+        rows = [
+            (0b01, _m(avg_mfe_paisa=limit, avg_mae_paisa=limit)),
+            (0b10, _m(avg_mfe_paisa=-limit, avg_mae_paisa=1)),
+        ]
+        assert self._screen(rows) is True
+
+    def test_numerator_beyond_envelope_fails(self) -> None:
+        rows = [(0b01, _m(avg_mfe_paisa=(1 << 53) + 1, avg_mae_paisa=3))]
+        assert self._screen(rows) is False
+
+    def test_denominator_beyond_envelope_fails(self) -> None:
+        # The numerator is well inside; only ``max(avg_mae_paisa, 1)`` breaks.
+        rows = [(0b01, _m(avg_mfe_paisa=10, avg_mae_paisa=(1 << 53) + 1))]
+        assert self._screen(rows) is False
+
+    def test_negative_mae_is_floored_to_one_not_rejected(self) -> None:
+        # ``max(avg_mae_paisa, 1)`` floors a huge NEGATIVE MAE to 1 — exactly
+        # the crate's operand — so the row is IN envelope. A screen that
+        # tested ``abs(avg_mae_paisa)`` before the floor would wrongly reject.
+        rows = [(0b01, _m(avg_mfe_paisa=10, avg_mae_paisa=-(1 << 60)))]
+        assert self._screen(rows) is True
+
+    @pytest.mark.parametrize(
+        "mfe",
+        [
+            0,
+            1,
+            -1,
+            (1 << 53) - 1,
+            1 << 53,
+            -(1 << 53),
+            (1 << 53) + 1,
+            -((1 << 53) + 1),
+            (1 << 60) + 7,
+            (1 << 62),
+        ],
+    )
+    @pytest.mark.parametrize("mae", [1, 3, (1 << 53) - 1, 1 << 53, (1 << 53) + 1, (1 << 54) + 5])
+    def test_screen_matches_the_crate_verdict(self, mfe: int, mae: int) -> None:
+        """The screen says exactly what ``cr_div_i64`` does — both directions.
+
+        The anti-drift pin: for every operand pair the Python twin's verdict
+        equals whether the REAL crate kernel serves or raises.
+        """
+        rows = [(0b01, _m(avg_mfe_paisa=mfe, avg_mae_paisa=mae))]
+        screen_says_ok = self._screen(rows)
+        try:
+            fno_math.ranking_cr_div_i64(mfe, max(mae, 1))
+        except ValueError:
+            crate_says_ok = False
+        else:
+            crate_says_ok = True
+        assert screen_says_ok is crate_says_ok
+
+    @staticmethod
+    def _term_kernel_calls(pool: list[tuple[int, ResultMetrics]]) -> int:
+        """Rank *pool* and count REAL term-kernel invocations."""
+        from brutex.ranking import rust_ranking as rr
+
+        calls: list[int] = []
+        real = fno_math.ranking_composite_term_inputs
+
+        def _spy(*args: Any, **kwargs: Any) -> Any:
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(fno_math, "ranking_composite_term_inputs", _spy)
+            rr.reset_ranking_rust_for_tests()
+            assert rank_combos_via_rust(pool) is not None
+        return len(calls)
+
+    def test_screen_skips_the_kernel_entirely_out_of_envelope(self) -> None:
+        """Out of envelope the term kernel is never CALLED (no doomed FFI).
+
+        The in-envelope leg is the ANTI-VACUOUS control: it proves the spy is
+        actually installed, so the zero below is a real observation and not a
+        monkeypatch that silently missed a memoised symbol.
+        """
+        in_envelope = [
+            (0b01, _m(avg_mfe_paisa=10, avg_mae_paisa=3)),
+            (0b10, _m(avg_mfe_paisa=20, avg_mae_paisa=3)),
+        ]
+        assert self._term_kernel_calls(in_envelope) == 1
+        beyond = [(0b01, _m(avg_mfe_paisa=(1 << 53) + 1, avg_mae_paisa=3))]
+        assert self._term_kernel_calls(beyond) == 0
 
 
 class TestPoisonAndDivergence:
@@ -675,3 +809,125 @@ class TestMutationHardening:
         assert _keys(on) == _keys(_rank_off(pool))
         reverted = [e for e in logs if e["event"] == "rust_parity.autoreverted"]
         assert [e["family"] for e in reverted] == ["ranking.order"]
+
+
+# ── Strict mode (DEC-RUST-STRICT-NO-FALLBACK-001) ───────────────────────────
+
+
+class TestStrictRefusal:
+    """Strict-ON pins — the companion to ``_strict_off_degrade_lattice``.
+
+    Everything else in this module runs with ``BRUTEX_RUST_STRICT=0`` (the
+    degrade lattice). These tests DELETE the kill switch so strict mode takes
+    its shipped default (ON) and pin that the shared ``ParityFamily`` choke
+    points REFUSE instead of quietly handing the call to the Python oracle.
+
+    Almost every ParityFamily fall-back here is class A (wheel absent/stale,
+    kernel raised) or class B (burn-in mismatch / refuse-poison) and REFUSES.
+    The ONE class-C arm — ``term_inputs_beyond_crate``, an out-of-envelope
+    ``cr_div_i64`` operand — is exempt and keeps serving the oracle.
+
+    Every test here takes the SAME ``monkeypatch`` object the module's autouse
+    ``_strict_off_degrade_lattice`` fixture owns and hands it to
+    ``_strict_on``. Never open a second ``MonkeyPatch.context()`` around this:
+    two independent objects tear down LIFO across the fixture boundary and
+    leak ``BRUTEX_RUST_STRICT`` past the module.
+    """
+
+    @staticmethod
+    def _strict_on(monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config import rust_strict
+
+        monkeypatch.delenv(rust_strict.RUST_STRICT_ENV, raising=False)
+        assert rust_strict.strict_mode() is True
+
+    def test_family_disable_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+        from brutex.ranking import rust_ranking as rr
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            rr._SEAM.disable("wheel_missing")  # pyright: ignore[reportPrivateUsage]
+
+    def test_family_warn_fallback_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+        from brutex.ranking import rust_ranking as rr
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            rr._GATES.warn_fallback_once("kernel_error")  # pyright: ignore[reportPrivateUsage]
+
+    def test_family_refuse_result_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.config.rust_strict import RustFallbackRefused
+        from brutex.ranking import rust_ranking as rr
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused):
+            rr._TERMS.refuse_result_once()  # pyright: ignore[reportPrivateUsage]
+
+    def test_class_c_beyond_crate_does_not_refuse(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CLASS C under strict-ON: serves the oracle, never raises.
+
+        The regression for the golden-breaking bug: an out-of-envelope
+        ``cr_div_i64`` operand is a LEGITIMATE ranking input, so strict mode
+        must NOT turn it into a crash. Pins the served value too — the oracle's
+        leaderboard, bit-for-bit the OFF arm's.
+        """
+        from brutex.ranking import rust_ranking as rr
+
+        self._strict_on(monkeypatch)
+        pool = [
+            (0b01, _m(avg_mfe_paisa=(1 << 53) + 1, avg_mae_paisa=3)),
+            (0b10, _m(avg_mfe_paisa=(1 << 60) + 7, avg_mae_paisa=(1 << 54) + 5)),
+        ]
+        with capture_logs() as logs:
+            on = rank_combos_via_rust(pool)
+        assert on is not None
+        assert _keys(on) == _keys(_rank_off(pool))
+        assert ("term_inputs_beyond_crate", "ranking.term_inputs") in {
+            (e["reason"], e["family"]) for e in logs if e["event"] == "rust_parity.fallback"
+        }
+        # The exemption is the family's, declared by the OWNING facade.
+        assert rr._TERMS.strict_exempt_reasons == rr._STRICT_EXEMPT_REASONS  # pyright: ignore[reportPrivateUsage]
+
+    def test_class_a_kernel_error_still_refuses_on_the_same_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The split is a SPLIT, not a blanket exemption.
+
+        The very family that exempts ``term_inputs_beyond_crate`` must still
+        refuse ``kernel_error`` — a genuine crate fault stays CLASS A.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+        from brutex.ranking import rust_ranking as rr
+
+        self._strict_on(monkeypatch)
+        with pytest.raises(RustFallbackRefused, match="kernel_error"):
+            rr._TERMS.warn_fallback_once("kernel_error")  # pyright: ignore[reportPrivateUsage]
+
+    def test_class_c_token_is_not_shared_with_an_unexempt_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exemption is PER FAMILY — only the envelope-carrying one has it.
+
+        A sibling family announcing the same token would still refuse, so the
+        allowlist can never silently widen to a family with no envelope arm.
+        """
+        from brutex.config.rust_strict import RustFallbackRefused
+        from brutex.ranking import rust_ranking as rr
+
+        self._strict_on(monkeypatch)
+        assert rr._GATES.strict_exempt_reasons == frozenset()  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(RustFallbackRefused):
+            rr._GATES.warn_fallback_once("term_inputs_beyond_crate")  # pyright: ignore[reportPrivateUsage]
+
+    def test_unclassified_family_is_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The ``strict_facade`` kwarg is OPT-IN: a ParityFamily built without
+        # it (no consumer has classified its reasons yet) stays byte-identical
+        # — it degrades silently even under strict mode. This pins the opt-in.
+        from brutex.engine.rust_parity_core import POLICY_BURN_IN, ParityFamily
+
+        self._strict_on(monkeypatch)
+        unclassified = ParityFamily("test.unclassified", policy=POLICY_BURN_IN)
+        unclassified.disable("wheel_missing")
+        assert unclassified.disabled() is True
