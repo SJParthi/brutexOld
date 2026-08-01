@@ -9663,6 +9663,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # must too or a multi-cell price-source sweep undercounts.
             * len(grid.price_source_cells)
         )
+        # DEC-SLA-EXTINCTION-BREAKER-CLAMP-001: under Apriori-to-extinction the
+        # ladder is materialised EAGERLY (k=1..n_unique) but the deterministic
+        # mask·bar breaker REFUSES any level whose emitted work exceeds the
+        # budget — that level is marked TUPLE_FAILED and costs ~zero wall-clock.
+        # Pricing it at the raw C(n_bits, k) × N_bars is therefore FICTION, and
+        # it is a fiction that REFUSED EVERY EXTINCTION LAUNCH: the operator's
+        # own logs (c9e10f59 / 1785df72, 2026-08-01, three runs across NIFTY +
+        # BANKNIFTY) projected 1.378e+23 s against the 345,600 s envelope with
+        # dominant_tuples k=37/36/38 — levels the breaker was already raising
+        # its own guard for in the SAME run (sweep.apriori.max_combos_raised).
+        # Clamping each cell to the breaker's budget prices what the engine
+        # will ACTUALLY execute. Explicit-k (Apriori OFF) keeps the raw weight
+        # byte-identical — every level there really is enumerated.
+        sla_max_mask_bars = resolve_max_mask_bars() if apriori_enabled() else None
         sla_cells = [
             TupleCostCell(
                 label=f"{inst} {tf.label} k={k_value}",
@@ -9670,6 +9684,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 n_bits=n_condition_bits,
                 n_bars=len(slices.get((inst, tf.label), ())),
                 multiplicity=per_group_multiplicity,
+                max_mask_bars=sla_max_mask_bars,
             )
             for inst in grid.instruments
             for tf in grid.timeframes
@@ -9681,6 +9696,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 count_sweep_tuples(grid),
                 acknowledge=acknowledge_sla_overrun,
                 cells=sla_cells or None,
+                # An extinction ladder has no launch-time projection to gate on
+                # (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001) — the breaker does.
+                breaker_bounded=sla_max_mask_bars is not None,
             )
         except ValueError as exc:
             print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)

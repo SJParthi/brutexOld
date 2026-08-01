@@ -196,6 +196,11 @@ class TupleCostCell:
     multiplicity
         How many actual grid tuples share this cost (the folded
         direction/SL/TP/proximity/fib fan-out; ``>= 1``).
+    max_mask_bars
+        OPTIONAL per-level mask·bar ceiling (``>= 1``) — the Apriori breaker's
+        budget (:func:`~brutex.engine.sweep_apriori.resolve_max_mask_bars`).
+        ``None`` (the default) keeps the raw ``C(n_bits, k) × N_bars`` weight,
+        byte-identical to the pre-clamp model.
     """
 
     label: str
@@ -203,6 +208,7 @@ class TupleCostCell:
     n_bits: int
     n_bars: int
     multiplicity: int
+    max_mask_bars: int | None = None
 
     def __post_init__(self) -> None:
         """Fail loud on a malformed cell — a silently-wrong weight poisons the ETA."""
@@ -221,10 +227,44 @@ class TupleCostCell:
                 f"TupleCostCell({self.label!r}): multiplicity must be >= 1; "
                 f"got {self.multiplicity!r}"
             )
+        if self.max_mask_bars is not None and self.max_mask_bars < 1:
+            raise ValueError(
+                f"TupleCostCell({self.label!r}): max_mask_bars must be >= 1 when "
+                f"given; got {self.max_mask_bars!r}"
+            )
 
     def weight(self) -> int:
-        """The per-tuple cost weight ``C(n_bits, k) × N_bars`` (the work proxy)."""
-        return math.comb(self.n_bits, self.k) * self.n_bars
+        """The per-tuple cost weight ``C(n_bits, k) × N_bars`` (the work proxy).
+
+        DEC-SLA-EXTINCTION-BREAKER-CLAMP-001. Under Apriori-to-extinction the
+        raw ``C(n_bits, k)`` is FICTION for deep ``k``: the ladder only ever
+        emits candidates whose ``(k-1)``-subsets survived ``min_hits``, and the
+        deterministic mask·bar breaker
+        (:func:`~brutex.engine.sweep_apriori.resolve_max_mask_bars`) REFUSES any
+        level whose emitted work exceeds the budget — that level is marked
+        ``TUPLE_FAILED`` and costs ~zero wall-clock, NOT
+        ``C(n_bits, k) × N_bars × per_tuple_seconds``.
+
+        MEASURED (operator log ``c9e10f59``/``1785df72``, 2026-08-01, three runs
+        across NIFTY + BANKNIFTY): the unclamped model priced the declared
+        ladder out to ``k=37`` — 1,332 cells — and projected
+        ``1.378e+23`` seconds against the 4-day envelope, so EVERY
+        extinction launch was refused at the gate while the engine's own
+        ``sweep.apriori.max_combos_raised`` event showed the breaker
+        correctly raising the guard to ``1.746e+21``. The SLA projector was
+        the wall, not the engine.
+
+        So when *max_mask_bars* is set the weight is clamped to it: a level can
+        never emit more mask·bar than the breaker admits, by construction. The
+        clamp is an UPPER bound (Apriori prunes far below it in practice), so
+        the projection stays conservative — it can still refuse a genuinely
+        oversized grid, it just stops refusing on arithmetic that describes work
+        the engine would never perform.
+        """
+        raw = math.comb(self.n_bits, self.k) * self.n_bars
+        if self.max_mask_bars is None:
+            return raw
+        return min(raw, self.max_mask_bars)
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +386,15 @@ class SlaProjection:
     dominant_tuples
         When *weighted*, the labels of the heaviest ``(instrument, tf, k)`` cost
         groups — named in the refusal so the operator sees the cost drivers.
+    breaker_bounded
+        ``True`` iff the grid is an Apriori-to-extinction ladder whose deep
+        levels are governed by the deterministic mask·bar breaker rather than
+        by this projection (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001). A
+        would-be REFUSED verdict is then downgraded to
+        :attr:`SlaDecision.ACKNOWLEDGED` — the projection is LOGGED as an
+        observation but does not gate, because the ladder's depth is
+        data-dependent and unknowable at launch. See
+        :func:`check_sweep_sla` for the full justification.
     """
 
     tuple_count: int
@@ -355,6 +404,7 @@ class SlaProjection:
     decision: SlaDecision
     weighted: bool = False
     dominant_tuples: tuple[str, ...] = field(default_factory=tuple)
+    breaker_bounded: bool = False
 
     @property
     def projected_days(self) -> float:
@@ -402,6 +452,19 @@ class SlaProjection:
 
     def acknowledged_warning(self) -> str:
         """The loud proceed-anyway warning for an acknowledged overrun."""
+        if self.breaker_bounded:
+            return (
+                f"SLA PROJECTION NOT DECIDABLE: {self._projection_clause()}."
+                f"{self._dominant_clause()} Proceeding anyway because this is an "
+                "Apriori-to-EXTINCTION ladder: its depth is DATA-DEPENDENT (the "
+                "ladder stops when no combo survives min_hits) and the projection "
+                "prices every declared level, so it over-counts by an unknowable "
+                "factor. The deterministic mask·bar breaker "
+                "(BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS) is the real per-level guard "
+                "here, alongside the stall watchdog and the resumable checkpoint. "
+                "This projection is LOGGED as an observation, not a gate "
+                "(DEC-SLA-EXTINCTION-BREAKER-CLAMP-001)."
+            )
         return (
             f"SLA OVERRUN ACKNOWLEDGED: {self._projection_clause()}."
             f"{self._dominant_clause()} Proceeding because "
@@ -418,8 +481,41 @@ def check_sweep_sla(
     envelope_seconds: float = SLA_ENVELOPE_SECONDS,
     env: Mapping[str, str] | None = None,
     cells: Sequence[TupleCostCell] | None = None,
+    breaker_bounded: bool = False,
 ) -> SlaProjection:
     """Project a grid's wall-clock and decide allowed / refused / acknowledged.
+
+    EXTINCTION LADDERS ARE NOT GATED (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001).
+    When *breaker_bounded* is set — the caller runs Apriori-to-extinction — a
+    would-be REFUSED verdict is downgraded to ACKNOWLEDGED: the projection is
+    still computed and LOGGED loudly, it just stops being the gate. Three
+    MEASURED facts force that (2026-08-01, against the operator's own grid:
+    74 bits, 562,500 bars, 1,332 tuples):
+
+    1. The ladder is materialised EAGERLY (k=1..n_unique) but the mask·bar
+       breaker REFUSES any over-budget level at ~zero wall-clock, so pricing
+       ``C(74, 37) x N_bars`` describes work that never happens. Unclamped this
+       projected ``1.5e+23`` seconds and REFUSED EVERY EXTINCTION LAUNCH — three
+       runs across NIFTY + BANKNIFTY (operator logs ``c9e10f59`` / ``1785df72``)
+       — while the SAME runs logged ``sweep.apriori.max_combos_raised``, the
+       breaker correctly doing its job. :attr:`TupleCostCell.max_mask_bars` fixes
+       this arm (``1.5e+23`` -> ``1.0e+9``, a ``1.5e+14x`` correction).
+    2. The remaining ``per_tuple_seconds`` anchor is itself unbenchmarked
+       (``per_tuple_estimate_benchmarked=False``) and implies **1.39e+6
+       mask-bar/s** — **180x slower** than this repo's OWN conservative kernel
+       floor ``STALL_MIN_MASK_BARS_PER_SEC = 2.5e+8`` (DEC-SWEEP-STALL-OOM-GUARDS-001),
+       and ~720x slower than the measured kernel. The clamped grid prices at
+       11,693 days on that anchor vs 65 days at the repo's own floor.
+    3. Even at an honest rate the clamped model prices EVERY level at the full
+       budget, but extinction terminates when no combo survives ``min_hits`` —
+       a DATA-DEPENDENT depth that is unknowable before the run. The over-count
+       is real and its factor cannot be bounded at launch.
+
+    So the honest verdict is that an extinction ladder has no launch-time
+    projection to gate on. The real guards are deterministic and already
+    shipped: the per-level mask·bar breaker, the stall watchdog, and the
+    resumable per-tuple checkpoint. Explicit-K grids (Apriori OFF) are fully
+    enumerated and therefore still GATED — pass ``breaker_bounded=False`` there.
 
     Emits ONE loud ``sweep.sla_projection`` structlog event (INFO when allowed,
     WARNING otherwise) carrying the tuple count, the per-tuple estimate, the
@@ -514,6 +610,13 @@ def check_sweep_sla(
             decision = SlaDecision.ALLOWED
         elif acknowledge:
             decision = SlaDecision.ACKNOWLEDGED
+        elif breaker_bounded:
+            # DEC-SLA-EXTINCTION-BREAKER-CLAMP-001: an extinction ladder is NOT
+            # projectable at launch — see `check_sweep_sla`'s docstring for the
+            # measured justification. Downgrade to ACKNOWLEDGED so the number is
+            # still LOGGED loudly (and rendered by `acknowledged_warning`, whose
+            # breaker_bounded arm names the real reason) without gating on it.
+            decision = SlaDecision.ACKNOWLEDGED
         else:
             decision = SlaDecision.REFUSED
 
@@ -525,6 +628,7 @@ def check_sweep_sla(
         decision=decision,
         weighted=weighted,
         dominant_tuples=dominant_tuples,
+        breaker_bounded=breaker_bounded and weighted,
     )
     log = logger.info if decision is SlaDecision.ALLOWED else logger.warning
     log(

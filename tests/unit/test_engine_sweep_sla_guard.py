@@ -483,3 +483,186 @@ class TestClassCFallbackUnreachable:
         """Validation is untouched — a junk env still raises, quoting the raw value."""
         with pytest.raises(ValueError, match=ENV_PER_TUPLE_SECONDS):
             resolve_per_tuple_seconds({ENV_PER_TUPLE_SECONDS: "not-a-number"})
+
+
+class TestExtinctionBreakerClamp:
+    """DEC-SLA-EXTINCTION-BREAKER-CLAMP-001 — the two fixes that unblocked the sweep.
+
+    THE DEFECT (measured, operator logs ``c9e10f59`` / ``1785df72``, 2026-08-01,
+    three runs across NIFTY + BANKNIFTY): every Apriori-to-extinction launch was
+    REFUSED at this gate. The ladder is materialised eagerly (k=1..n_unique) and
+    the projector priced every level at the raw ``C(n_bits, k) x N_bars`` — but
+    the deterministic mask-bar breaker REFUSES an over-budget level at ~zero
+    wall-clock, so that arithmetic described work the engine would never perform.
+    It projected ``1.4e+23`` seconds against a 345,600 s envelope while the SAME
+    runs logged ``sweep.apriori.max_combos_raised`` — the breaker doing its job.
+
+    THE FIXES: (1) ``TupleCostCell.max_mask_bars`` clamps each cell to the
+    breaker's budget; (2) ``breaker_bounded`` stops the (still-undecidable)
+    projection from GATING an extinction launch, since the ladder's depth is
+    data-dependent. Explicit-K grids stay fully gated.
+    """
+
+    # The operator's real grid: 74-condition vocabulary, 2020-01-01 -> 2026-07-31
+    # at 1minute, 2 directions x 18 SL/TP cells.
+    _N_BITS = 74
+    _N_BARS = 562_500
+    _MULT = 36
+    _BUDGET = 1_159_200_000_000  # DEFAULT_MAX_MASK_BARS
+
+    def _ladder(self, *, clamp: int | None) -> list[TupleCostCell]:
+        return [
+            TupleCostCell(
+                label=f"NIFTY 1minute k={k}",
+                k=k,
+                n_bits=self._N_BITS,
+                n_bars=self._N_BARS,
+                multiplicity=self._MULT,
+                max_mask_bars=clamp,
+            )
+            for k in range(1, 38)
+        ]
+
+    def test_max_mask_bars_below_one_is_refused(self) -> None:
+        """A zero/negative budget is a malformed cell — a silent 0 weight would
+        make EVERY grid project as free."""
+        with pytest.raises(ValueError, match="max_mask_bars must be >= 1"):
+            TupleCostCell(
+                label="NIFTY 1minute k=1",
+                k=1,
+                n_bits=74,
+                n_bars=100,
+                multiplicity=1,
+                max_mask_bars=0,
+            )
+
+    def test_unclamped_weight_is_byte_identical_to_the_pre_clamp_model(self) -> None:
+        """``None`` (the default) must not perturb the explicit-K path at all."""
+        cell = TupleCostCell(
+            label="NIFTY 1minute k=5",
+            k=5,
+            n_bits=74,
+            n_bars=562_500,
+            multiplicity=36,
+        )
+        assert cell.max_mask_bars is None
+        assert cell.weight() == math.comb(74, 5) * 562_500
+
+    def test_clamp_binds_only_above_the_budget(self) -> None:
+        """Sub-budget levels keep their exact weight; over-budget levels clamp."""
+        sub = TupleCostCell(
+            label="k=3",
+            k=3,
+            n_bits=74,
+            n_bars=562_500,
+            multiplicity=36,
+            max_mask_bars=self._BUDGET,
+        )
+        over = TupleCostCell(
+            label="k=10",
+            k=10,
+            n_bits=74,
+            n_bars=562_500,
+            multiplicity=36,
+            max_mask_bars=self._BUDGET,
+        )
+        assert sub.weight() == math.comb(74, 3) * 562_500 < self._BUDGET
+        assert math.comb(74, 10) * 562_500 > self._BUDGET
+        assert over.weight() == self._BUDGET
+
+    def test_clamp_collapses_the_measured_fiction(self) -> None:
+        """The 1.5e+14x correction, pinned against the operator's own grid."""
+        raw = project_weighted_grid_cost(self._ladder(clamp=None), per_tuple_seconds=30.0)
+        clamped = project_weighted_grid_cost(
+            self._ladder(clamp=self._BUDGET), per_tuple_seconds=30.0
+        )
+        # The unclamped model is the astronomical number that refused the runs.
+        assert raw.projected_seconds > 1e22
+        # Clamped, it describes work the breaker will actually admit.
+        assert clamped.projected_seconds < 1.1e9
+        assert raw.projected_seconds / clamped.projected_seconds > 1e13
+        # Tuple count is a property of the GRID, never of the cost model.
+        assert raw.total_tuples == clamped.total_tuples
+
+    def test_extinction_launch_is_not_gated(self) -> None:
+        """The headline fix: an extinction ladder proceeds instead of refusing."""
+        sla = check_sweep_sla(
+            1332,
+            acknowledge=False,
+            cells=self._ladder(clamp=self._BUDGET),
+            breaker_bounded=True,
+        )
+        assert sla.decision is SlaDecision.ACKNOWLEDGED
+        assert sla.breaker_bounded is True
+
+    def test_extinction_warning_names_the_real_reason_not_a_phantom_flag(self) -> None:
+        """The operator never passed --acknowledge-sla-overrun, so the message
+        must not claim they did — it must name the breaker + the data-dependent
+        depth (Golden Rule #10)."""
+        sla = check_sweep_sla(
+            1332,
+            acknowledge=False,
+            cells=self._ladder(clamp=self._BUDGET),
+            breaker_bounded=True,
+        )
+        msg = sla.acknowledged_warning()
+        assert "NOT DECIDABLE" in msg
+        assert "EXTINCTION" in msg
+        assert "BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS" in msg
+        assert "DATA-DEPENDENT" in msg
+        assert "--acknowledge-sla-overrun was passed" not in msg
+
+    def test_explicit_k_grid_is_still_refused(self) -> None:
+        """The gate is NOT disabled: a fully-enumerated fixed-K grid still refuses."""
+        sla = check_sweep_sla(
+            1332, acknowledge=False, cells=self._ladder(clamp=None), breaker_bounded=False
+        )
+        assert sla.decision is SlaDecision.REFUSED
+        assert sla.breaker_bounded is False
+        assert "REFUSED" in sla.refusal_message()
+
+    def test_explicit_acknowledge_still_names_the_flag(self) -> None:
+        """An operator who really did pass the flag keeps the original wording."""
+        sla = check_sweep_sla(
+            1332, acknowledge=True, cells=self._ladder(clamp=None), breaker_bounded=False
+        )
+        assert sla.decision is SlaDecision.ACKNOWLEDGED
+        assert "--acknowledge-sla-overrun was passed" in sla.acknowledged_warning()
+
+    def test_within_envelope_extinction_grid_is_allowed_not_downgraded(self) -> None:
+        """breaker_bounded only rescues a would-be REFUSED — it never masks ALLOWED."""
+        tiny = [
+            TupleCostCell(
+                label="NIFTY 1minute k=1",
+                k=1,
+                n_bits=74,
+                n_bars=1000,
+                multiplicity=1,
+                max_mask_bars=self._BUDGET,
+            )
+        ]
+        sla = check_sweep_sla(1, acknowledge=False, cells=tiny, breaker_bounded=True)
+        assert sla.decision is SlaDecision.ALLOWED
+
+    def test_flat_model_never_reports_breaker_bounded(self) -> None:
+        """``breaker_bounded`` is a WEIGHTED-arm concept — the flat law is
+        untouched (it is the DEC-RUST-SWEEP-OPS-001 facade's mirrored domain)."""
+        sla = check_sweep_sla(10**9, acknowledge=False, cells=None, breaker_bounded=True)
+        assert sla.weighted is False
+        assert sla.breaker_bounded is False
+        assert sla.decision is SlaDecision.REFUSED
+
+    def test_projection_is_still_logged_loudly_when_not_gating(self) -> None:
+        """Not gating must never mean not observable (Golden Rule #8)."""
+        with capture_logs() as logs:
+            check_sweep_sla(
+                1332,
+                acknowledge=False,
+                cells=self._ladder(clamp=self._BUDGET),
+                breaker_bounded=True,
+            )
+        events = [e for e in logs if e["event"] == "sweep.sla_projection"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "warning"
+        assert events[0]["decision"] == "acknowledged"
+        assert events[0]["per_tuple_estimate_benchmarked"] is False

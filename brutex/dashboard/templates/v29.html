@@ -1081,8 +1081,21 @@
     <label>TO
       <input id="swEnd" type="date">
     </label>
+    <!--
+      K-DEPTH input REMOVED (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001). It offered
+      1..5 but was a trap: an explicit K DISABLES Apriori, so the classic
+      fixed-K path enumerates C(n_bits, k) masks against the engine's
+      DEFAULT_MAX_COMBOS = 100,000 ceiling, which the dashboard has no override
+      for. At the shipped 74-condition vocabulary C(74,4) = 1,150,626 already
+      breaches it — so of the five values the field accepted, TWO were refused
+      outright and the refusal named a ceiling the operator could not raise from
+      this page. The correct depth is the Apriori-to-extinction ladder, which is
+      DYNAMIC and data-driven: it climbs k until no combo survives min_hits, and
+      the deterministic mask·bar breaker bounds each level. That is now the only
+      behaviour, so there is nothing left to type.
+    -->
     <label>K-DEPTH
-      <input id="swK" type="number" min="1" max="5" placeholder="extinction (default)" title="blank = Apriori-to-extinction default; a number = classic fixed-K sweep">
+      <span id="swKNote" class="mono muted" title="The ladder climbs k=1,2,3,… and stops when no combination survives min_hits. Depth is data-driven, not typed; the mask·bar breaker bounds each level.">Apriori → extinction (dynamic)</span>
     </label>
     <label>DIRECTIONS
       <select id="swDirections">
@@ -2536,6 +2549,16 @@
     // progress bar therefore updates at the shared 3 s cadence (was 1.2 s) —
     // an accepted trade for one-poller-per-endpoint.
     let watching = false;
+    // DEC-SLA-EXTINCTION-BREAKER-CLAMP-001 (UI half): the sweep-progress file is
+    // written BY the running sweep, so a launch that dies BEFORE the first
+    // progress write (an SLA refusal, a preflight refusal, a config error —
+    // every early `cmd_sweep_all` return) leaves the PREVIOUS run's terminal
+    // record in place. The poller then faithfully renders that stale record as
+    // this launch's outcome: the operator saw "✅ Sweep done — 0 survivor(s)"
+    // on three consecutive runs that never executed a single tuple. Tracking
+    // whether we ever observed `running` for THIS launch is what lets us tell
+    // "finished" apart from "never started".
+    let sawRunning = false;
 
     function renderSweep(p) {
       const pct = Math.max(0, Math.min(100, p.percent || 0));
@@ -2553,6 +2576,7 @@
 
     function onRunSweepProgress(p) {
       if (!watching || !p) return;
+      if (p.running) sawRunning = true;
       renderSweep(p);
       if (!p.running && p.state !== 'idle') {
         watching = false; sweepBtn.disabled = false;
@@ -2560,9 +2584,21 @@
         // Stop button on terminal settle, and name a cancelled run honestly
         // instead of a fabricated ✅.
         if (stopBtn) { stopBtn.hidden = true; stopBtn.disabled = false; stopBtn.textContent = '⏹ Stop'; }
-        if (p.state === 'cancelled') {
+        if (!sawRunning) {
+          // We never once observed `running` for this launch, so this terminal
+          // record belongs to an EARLIER run — the sweep we just started died
+          // before writing any progress. Claiming its survivor count would be a
+          // fabrication (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001).
+          sweepMsg.textContent = '❌ Sweep did NOT start — it exited before running a single ' +
+            'tuple, so the progress shown belongs to an earlier run. The reason is on stderr ' +
+            'in the dashboard log (look for "sweep-all config error", "REFUSED", or a preflight ' +
+            'refusal). Nothing was computed and no results were written.';
+        } else if (p.state === 'cancelled') {
           sweepMsg.textContent = '⏹ Sweep cancelled — ' + (p.detail || 'stopped at the tuple boundary') +
             '. Run again to resume from the checkpoint.';
+        } else if (p.state === 'error') {
+          sweepMsg.textContent = '❌ Sweep FAILED — ' + (p.detail || 'the run errored; see the dashboard log') +
+            '. Partial results (if any) are on disk; re-run to resume from the checkpoint.';
         } else {
           sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
             ' survivor(s). The report above refreshes from the new run artifacts.';
@@ -2610,7 +2646,9 @@
       const itv = (document.getElementById('swIntervals').value || '').trim();
       const st = (document.getElementById('swStart').value || '').trim();
       const en = (document.getElementById('swEnd').value || '').trim();
-      const k = (document.getElementById('swK').value || '').trim();
+      // K is DYNAMIC — never typed (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001).
+      // Omitting `k` from the query is exactly what selects the
+      // Apriori-to-extinction ladder in `build_sweep_kwargs`.
       const dir = (document.getElementById('swDirections').value || '').trim();
       const sl = (document.getElementById('swSl').value || '').trim();
       const tp = (document.getElementById('swTp').value || '').trim();
@@ -2619,7 +2657,6 @@
       if (itv) q.set('intervals', itv);
       if (st) q.set('start', st);
       if (en) q.set('end', en);
-      if (k) q.set('k', k);
       if (dir) q.set('directions', dir);
       if (sl) q.set('sl', sl);
       if (tp) q.set('tp', tp);
@@ -2638,6 +2675,7 @@
         sweepMsg.textContent = 'Sweep started — ' + j.symbols + ' · ' + j.intervals +
           ' · ' + j.start + ' → ' + j.end + '. Watching progress…';
         watching = true;
+        sawRunning = false;
         // Immediate refresh through the ONE shared poller (no second timer).
         if (window.__bxSweepProgressPollNow) window.__bxSweepProgressPollNow();
       } catch (e) {

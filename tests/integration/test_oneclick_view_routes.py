@@ -178,13 +178,22 @@ class TestPagesServe:
             "swIntervals",
             "swStart",
             "swEnd",
-            "swK",
             "swDirections",
             "swSl",
             "swTp",
             "swTop",
         ):
             assert f'id="{control}"' in html, control
+        # K-DEPTH is NOT an input (DEC-SLA-EXTINCTION-BREAKER-CLAMP-001): an
+        # explicit K disables Apriori and routes to the fixed-K path, whose
+        # DEFAULT_MAX_COMBOS = 100,000 ceiling the dashboard cannot raise — at
+        # the shipped 74-condition vocabulary C(74,4) = 1,150,626 already
+        # breaches it, so the field could only ever refuse. The ladder is
+        # dynamic; there is nothing to type.
+        assert 'id="swK"' not in html
+        assert "q.set('k'," not in html, "the sweep launcher must never send an explicit k"
+        assert 'id="swKNote"' in html
+        assert "Apriori → extinction (dynamic)" in html
         assert 'id="swConditions"' in html
         assert "disabled" in html.split('id="swConditions"')[1][:120]
         assert "condition-subset — not wired yet, lands at merge-integration" in html
