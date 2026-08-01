@@ -3875,3 +3875,77 @@ class TestHeldOutCrateInternalOverflow:
                 ("q-" + str(2**64),), "q-", "", python_law=lambda: 2**64 + 1
             )
             assert got == 2**64 + 1
+
+
+# ─────────────────────────── the resolved-crate memo ───────────────────────
+
+
+@pytest.mark.usefixtures("strict_off")
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every crate swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it per routed law call.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _good_crate()
+        calls: list[str] = []
+
+        def import_module(name: str) -> object:
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(
+            sweep_ops_rust, "importlib", SimpleNamespace(import_module=import_module)
+        )
+        _enable(monkeypatch)
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        for _ in range(5):
+            _call_run_path()
+        assert calls == ["brutex_sweep_ops"], "the crate must be imported exactly ONCE"
+        assert sweep_ops_rust._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _install_crate(monkeypatch, SimpleNamespace())  # no API -> crate_stale
+        _enable(monkeypatch)
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        assert _call_run_path() == _run_path_oracle()
+        assert sweep_ops_rust._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install_crate` swaps the resolver WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_isolate_facade_state` fixture clearing the memo.
+        _install_crate(monkeypatch, _good_crate())
+        _enable(monkeypatch)
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        assert _call_run_path() == _run_path_oracle()
+        _install_crate(monkeypatch, SimpleNamespace())  # swap AFTER the first resolve
+        reset_sweep_ops_rust_for_tests(remaining=0)  # the autouse fixture's job
+        assert _call_run_path() == _run_path_oracle()
+        assert sweep_ops_rust_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # every routed law resolves `getattr(crate, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _good_crate()
+        _install_crate(monkeypatch, crate)
+        _enable(monkeypatch)
+        reset_sweep_ops_rust_for_tests(remaining=0)
+        assert _call_run_path() == _run_path_oracle()
+        monkeypatch.setattr(crate, "join_path_segments", lambda root, parts: "/swapped")
+        assert _call_run_path() == Path("/swapped")

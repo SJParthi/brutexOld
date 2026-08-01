@@ -1008,3 +1008,72 @@ class TestStrictRefusal:
         self._strict_on(monkeypatch)
         with pytest.raises(RustFallbackRefused):
             her._disable("crate_unavailable")
+
+
+# ── The resolved-crate memo ─────────────────────────────────────────────────
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every ``sys.modules`` swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it per routed derivation.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate()
+        calls: list[str] = []
+
+        def _counting(name: str) -> types.ModuleType:
+            assert name == "brutex_core"
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(her.importlib, "import_module", _counting)
+        monkeypatch.setenv(her.HWENV_RUST_ENV, "1")
+        her.reset_hwenv_rust_for_tests(remaining=0)
+        for _ in range(5):
+            assert he.cpu_pool_workers({}, envelope=_M4) == 8
+        assert calls == ["brutex_core"], "the crate must be imported exactly ONCE"
+        assert her._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _arm(monkeypatch, types.ModuleType("brutex_core"))  # no API -> crate_stale
+        her.reset_hwenv_rust_for_tests(remaining=0)
+        assert he.cpu_pool_workers({}, envelope=_M4) == 8
+        assert her._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_arm` swaps `sys.modules` WITHOUT resetting,
+        # so this file's isolation rests on the autouse `_fresh_seam` fixture
+        # clearing the memo.
+        _arm(monkeypatch, _fake_crate())
+        her.reset_hwenv_rust_for_tests(remaining=0)
+        assert he.cpu_pool_workers({}, envelope=_M4) == 8
+        _arm(monkeypatch, types.ModuleType("brutex_core"))  # swap AFTER the resolve
+        her.reset_hwenv_rust_for_tests(remaining=0)  # the autouse fixture's job
+        assert he.cpu_pool_workers({}, envelope=_M4) == 8  # oracle now
+        assert her.hwenv_rust_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # every routed law resolves `getattr(crate, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _fake_crate()
+        _arm(monkeypatch, crate)
+        her.reset_hwenv_rust_for_tests(remaining=0)
+        assert he.cpu_pool_workers({}, envelope=_M4) == 8
+        monkeypatch.setattr(crate, "hwenv_pool_workers", lambda *a, **kw: 3)
+        assert he.cpu_pool_workers({}, envelope=_M4) == 3

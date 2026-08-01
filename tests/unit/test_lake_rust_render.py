@@ -836,18 +836,23 @@ class TestShapeGate:
     def test_shape_compare_mismatch_autoreverts_with_the_token(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"WRONG"))
-        lrr.reset_lake_rust_render_for_tests(remaining=1)
-        # Burn the budget on a clean shape first.
         clean = _fake_crate(render=lambda ipc: PY_BYTES)
         _install_crate(monkeypatch, clean)
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        # Burn the COUNT budget on a clean shape first, so the mismatch below
+        # can only come from the SHAPE gate.
         lrr.render_parquet_bytes(
             ipc_bytes_factory=_ipc_factory,
             python_render=_python_render,
             polars_version="1.42.1",
             schema_token="shape-a",
         )
-        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"WRONG"))
+        # Poison the SAME crate module by ATTRIBUTE rather than swapping
+        # `sys.modules`: the resolved-crate memo holds the MODULE (never a
+        # bound callable), so an attribute patch is still seen — and no reset
+        # is needed, which is what keeps the spent count budget + the recorded
+        # `shape-a` intact for the assertion below.
+        monkeypatch.setattr(clean, "render_parquet_from_ipc", lambda ipc: b"WRONG")
         with capture_logs() as logs:
             out = lrr.render_parquet_bytes(
                 ipc_bytes_factory=_ipc_factory,
@@ -1527,3 +1532,104 @@ class TestStrictRefusal:
         self._strict_on(monkeypatch)
         with pytest.raises(RustFallbackRefused):
             lrr._disable("render_result_refused")
+
+
+# ---------------------------------------------------------------------------
+# The resolved-crate memo
+# ---------------------------------------------------------------------------
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, why it is
+    NOT profile-keyed, and the reset that keeps every crate swap visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it once per partition render.
+    """
+
+    def _render(self, *, profile: str | None = None, shape: str | None = "shape-a") -> bytes:
+        kwargs: dict[str, object] = {
+            "ipc_bytes_factory": _ipc_factory,
+            "python_render": _python_render,
+            "polars_version": "1.42.1",
+            "schema_token": shape,
+        }
+        if profile is not None:
+            kwargs["profile"] = profile
+        return lrr.render_parquet_bytes(**kwargs)  # type: ignore[arg-type]
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate(render=lambda ipc: b"rust-bytes")
+        calls: list[str] = []
+
+        def _counting(name: str) -> Any:
+            assert name == "brutex_lake"
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(lrr.importlib, "import_module", _counting)
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        for _ in range(5):
+            assert self._render() == b"rust-bytes"
+        assert calls == ["brutex_lake"], "the crate must be imported exactly ONCE"
+        assert lrr._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_the_memo_is_not_profile_keyed_because_the_module_is_shared(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `_resolve_crate(profile=...)` takes `profile` for LOG CONTEXT ONLY —
+        # the surface check is all-or-nothing across BOTH profiles and the
+        # latch is shared — so the RETURNED module is profile-independent and
+        # ONE un-keyed memo entry serves both. Pinned so a future reader does
+        # not "fix" it into a per-profile dict.
+        crate = _fake_crate(render=lambda ipc: b"bars", render_defaults=lambda ipc: b"defaults")
+        calls: list[str] = []
+
+        def _counting(name: str) -> Any:
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(lrr.importlib, "import_module", _counting)
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        assert self._render(profile=lrr.PROFILE_BARS) == b"bars"
+        assert self._render(profile=lrr.PROFILE_OPTIONS_DEFAULTS, shape="shape-b") == b"defaults"
+        assert calls == ["brutex_lake"], "one memo entry must serve BOTH profiles"
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _install_crate(monkeypatch, types.ModuleType("brutex_lake"))  # no API
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        assert self._render() == PY_BYTES
+        assert lrr._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install_crate` swaps `sys.modules` WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_fresh_process_view` fixture clearing the memo.
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"first"))
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        assert self._render() == b"first"
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: b"second"))
+        lrr.reset_lake_rust_render_for_tests(remaining=0)  # the autouse fixture's job
+        assert self._render() == b"second"
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # the render path resolves `getattr(crate, entry)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _fake_crate(render=lambda ipc: b"first")
+        _install_crate(monkeypatch, crate)
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        assert self._render() == b"first"
+        monkeypatch.setattr(crate, "render_parquet_from_ipc", lambda ipc: b"patched")
+        assert self._render() == b"patched"

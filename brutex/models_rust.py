@@ -157,6 +157,31 @@ _BURN_IN_REMAINING: Final[list[int]] = [BURN_IN_SAMPLES]
 #: Warn-once registry (per-process, test-resettable).
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
+#: Resolved-crate memo (``[None]`` = not yet resolved this process) — the
+#: ``money_rust`` pattern (DEC-MONEY-RUST-WRAPPER-COST-001), which measured
+#: ``_resolve_crate`` at 911 ns/call because ``importlib.import_module``
+#: costs ~574 ns even on a ``sys.modules`` HIT and the symbol handshake the
+#: rest. This seam pays that resolve on EVERY routed call.
+#:
+#: THE MODULE is memoized, never a bound callable: every routed law does
+#: ``getattr(crate, name)`` per call, so a test that monkeypatches a crate
+#: ATTRIBUTE is still seen — a callable memo would silently miss it.
+#:
+#: SUCCESS ONLY. A FAILED resolve is never cached: the failure arms go
+#: through :func:`_disable`, which under strict mode REFUSES *before* it
+#: latches, so caching a failure would convert "every call re-attempts and
+#: re-refuses, loudly" into the silently-latched steady state strict mode
+#: exists to forbid.
+#:
+#: Deliberately NOT shared with :func:`_panic_belt_errors`, which loops over
+#: SEVERAL import homes and whose per-home blocking the suites use to prove
+#: belt narrowing — this memo is scoped to ``_resolve_crate`` alone.
+#:
+#: Cleared by :func:`reset_models_rust_for_tests` — a test that swaps
+#: ``sys.modules['brutex_core']`` must reset, or it is served the crate
+#: resolved before its swap.
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
 #: The engaged-INFO memo key (never a warn reason).
 _ENGAGED_KEY: Final[str] = "__engaged__"
 
@@ -271,6 +296,7 @@ def reset_models_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _DISABLED_REASON[0] = None
     _BURN_IN_REMAINING[0] = remaining
     _OBSERVABILITY_MEMO.clear()
+    _CRATE_MEMO[0] = None
 
 
 def _refuse_if_strict(reason: str, **context: object) -> None:
@@ -334,6 +360,9 @@ def _resolve_crate() -> ModuleType | None:
     (no version guard — module docstring). Fail-closed: never an
     ``AttributeError`` out of this seam.
     """
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return memo
     try:
         crate = importlib.import_module("brutex_core")
     except ImportError as exc:
@@ -352,6 +381,7 @@ def _resolve_crate() -> ModuleType | None:
                 remedy="rebuild + reinstall rust/brutex-core (see rust/brutex-core/README.md)",
             )
             return None
+    _CRATE_MEMO[0] = crate
     return crate
 
 

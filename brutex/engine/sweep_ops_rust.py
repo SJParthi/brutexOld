@@ -651,6 +651,28 @@ _I64_MAX: Final[int] = 2**63 - 1
 #: Once-per-process-per-reason log memo.
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
+#: Resolved-crate memo (``[None]`` = not yet resolved this process) — the
+#: ``money_rust`` pattern (DEC-MONEY-RUST-WRAPPER-COST-001), which measured
+#: :func:`_resolve_crate` at 911 ns/call because ``importlib.import_module``
+#: costs ~574 ns even on a ``sys.modules`` HIT and the symbol handshake the
+#: rest. This seam routes 27 laws on the sweep orchestration path, so the
+#: resolve is paid per routed call.
+#:
+#: THE MODULE is memoized, never a bound callable: every routed law does
+#: ``getattr(crate, name)`` per call, so a test that monkeypatches a crate
+#: ATTRIBUTE is still seen — a callable memo would silently miss it.
+#:
+#: SUCCESS ONLY. A FAILED resolve is never cached: both failure arms go
+#: through :func:`_disable`, which under strict mode REFUSES *before* it
+#: latches, so caching a failure would convert "every call re-attempts and
+#: re-refuses, loudly" into the silently-latched steady state strict mode
+#: exists to forbid.
+#:
+#: Cleared by :func:`reset_sweep_ops_rust_for_tests` — a test that swaps
+#: ``sys.modules["brutex_sweep_ops"]`` must reset, or it is served the crate
+#: resolved before its swap.
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
 #: The engaged-INFO memo key (not a fallback reason — namespaced apart).
 _ENGAGED_KEY: Final[str] = "__engaged__"
 
@@ -711,11 +733,16 @@ def reset_sweep_ops_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     Rust value ships with no oracle in the path — the parity suites depend
     on that). Never called from production code (the sibling facades'
     reset-seam convention).
+
+    Clears :data:`_CRATE_MEMO` too — a test that swaps
+    ``sys.modules["brutex_sweep_ops"]`` must never be served a crate
+    resolved before its swap.
     """
     _DISABLED_REASON[0] = None
     for law in _ALL_LAWS:
         _BURN_IN_REMAINING[law] = remaining
     _OBSERVABILITY_MEMO.clear()
+    _CRATE_MEMO[0] = None
 
 
 #: Fall-back reasons DELIBERATELY exempt from the strict-Rust refusal
@@ -892,7 +919,14 @@ def _resolve_crate() -> ModuleType | None:
     lacks any :data:`_CRATE_API` callable is a pre-slice-1 (or
     foreign/broken) install — latch ``crate_stale``. Fail-closed: never a
     new crash class.
+
+    A SUCCESSFUL resolve is memoized in :data:`_CRATE_MEMO` (module
+    constant — the reasoning, and why failures are deliberately NOT cached,
+    is on that constant). Cleared by :func:`reset_sweep_ops_rust_for_tests`.
     """
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return memo
     try:
         crate = importlib.import_module("brutex_sweep_ops")
     except ImportError as exc:
@@ -912,6 +946,7 @@ def _resolve_crate() -> ModuleType | None:
                 remedy="rebuild + reinstall rust/brutex-sweep-ops (maturin develop --release)",
             )
             return None
+    _CRATE_MEMO[0] = crate
     return crate
 
 

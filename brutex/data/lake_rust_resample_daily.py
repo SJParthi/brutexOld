@@ -112,6 +112,31 @@ _DISABLED_REASON: Final[list[str | None]] = [None]
 #: Burn-in samples still to run this process (same documented exception).
 _BURN_IN_REMAINING: Final[list[int]] = [BURN_IN_SAMPLES]
 
+#: Resolved-crate memo (``[None]`` = not yet resolved this process) — the
+#: ``money_rust`` pattern (DEC-MONEY-RUST-WRAPPER-COST-001), which measured
+#: ``_resolve_crate`` at 911 ns/call because ``importlib.import_module``
+#: costs ~574 ns even on a ``sys.modules`` HIT and the symbol handshake the
+#: rest. This seam pays that resolve on EVERY routed call.
+#:
+#: THE MODULE is memoized, never a bound callable: every routed law does
+#: ``getattr(crate, name)`` per call, so a test that monkeypatches a crate
+#: ATTRIBUTE is still seen — a callable memo would silently miss it.
+#:
+#: SUCCESS ONLY. A FAILED resolve is never cached: the failure arms go
+#: through :func:`_disable`, which under strict mode REFUSES *before* it
+#: latches, so caching a failure would convert "every call re-attempts and
+#: re-refuses, loudly" into the silently-latched steady state strict mode
+#: exists to forbid.
+#:
+#: Deliberately NOT shared with :func:`_panic_belt_errors`, which loops over
+#: SEVERAL import homes and whose per-home blocking the suites use to prove
+#: belt narrowing — this memo is scoped to ``_resolve_crate`` alone.
+#:
+#: Cleared by :func:`reset_lake_rust_resample_daily_for_tests` — a test that swaps
+#: ``sys.modules['brutex_lake']`` must reset, or it is served the crate
+#: resolved before its swap.
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
 #: ``schema × oi_aware`` shape tokens already frame-compared this process.
 #: Bounded by construction: the two production callers see the lake's few
 #: 1-minute schemas (OHLCV-6 spot / 7-column OI / 17-column Greeks overlay)
@@ -181,6 +206,7 @@ def reset_lake_rust_resample_daily_for_tests(*, remaining: int = BURN_IN_SAMPLES
     _BURN_IN_SHAPES_SEEN.clear()
     _BURN_IN_SHAPE_GATE[0] = remaining > 0
     _OBSERVABILITY_MEMO.clear()
+    _CRATE_MEMO[0] = None
 
 
 def days_since_epoch(before: date) -> int:
@@ -251,6 +277,9 @@ def _resolve_crate() -> ModuleType | None:
     face / a foreign install) latches ``crate_unavailable`` — never an
     ``AttributeError`` mid-derive.
     """
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return memo
     try:
         crate = importlib.import_module("brutex_lake")
     except ImportError as exc:
@@ -268,6 +297,7 @@ def _resolve_crate() -> ModuleType | None:
                 remedy="pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)",
             )
             return None
+    _CRATE_MEMO[0] = crate
     return crate
 
 

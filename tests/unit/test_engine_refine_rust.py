@@ -21,13 +21,31 @@ from brutex.engine.refine_rust import (
     RefineRustUnavailableError,
     optimizer_versions,
     require_refine_rust,
+    reset_refine_rust_for_tests,
 )
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import ModuleType
 
 pytest.importorskip("brutex_refine")  # the Stage-3 Rust wheel — built in the CI unit job
+
+
+@pytest.fixture(autouse=True)
+def _fresh_process_view() -> Iterator[None]:
+    """Give every test a cold resolved-runtime memo.
+
+    ``require_refine_rust`` memoizes the module on success
+    (DEC-MONEY-RUST-WRAPPER-COST-001), so the wheel-absent tests below —
+    which patch ``importlib.import_module`` WITHOUT swapping ``sys.modules``
+    — must start from an unresolved state or they would be served a module
+    resolved by an earlier test. Runs before AND after so this file also
+    leaves a clean memo for the rest of the session.
+    """
+    reset_refine_rust_for_tests()
+    yield
+    reset_refine_rust_for_tests()
 
 
 class TestFlagLaw:
@@ -152,3 +170,101 @@ class TestFlagVocabularyDriftPin:
 
         assert refine_rust._TRUTHY == sweep_lookahead._TRUTHY
         assert refine_rust._FALSY == sweep_lookahead._FALSY
+
+
+class TestRuntimeMemo:
+    """The resolved-runtime memo: what it caches, what it must NOT, and the
+    reset that keeps this file's ``import_module`` patches visible.
+
+    Motivation (measured on the sibling ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``importlib.import_module`` costs
+    ~574 ns even on a ``sys.modules`` HIT, and Stage-3 resolves the runtime
+    per ask/tell hop.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(REFINE_RUST_ENV, raising=False)
+        wheel = importlib.import_module("brutex_refine")
+        calls: list[str] = []
+
+        def _counting(name: str, package: str | None = None) -> ModuleType:
+            calls.append(name)
+            return wheel
+
+        reset_refine_rust_for_tests()
+        monkeypatch.setattr(importlib, "import_module", _counting)
+        for _ in range(5):
+            assert require_refine_rust() is wheel
+        assert calls == ["brutex_refine"], "the wheel must be imported exactly ONCE"
+        assert refine_rust._CRATE_MEMO[0] is wheel
+
+    def test_failed_import_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED import must NOT be cached. `require_refine_rust` RAISES on
+        # failure, so a cached failure would turn "every call re-attempts and
+        # re-refuses, loudly" into a silent latch — and a wheel installed
+        # mid-process could never be picked up.
+        monkeypatch.delenv(REFINE_RUST_ENV, raising=False)
+        real_import = importlib.import_module
+
+        def _no_wheel(name: str, package: str | None = None) -> ModuleType:
+            if name == "brutex_refine":
+                raise ImportError("No module named 'brutex_refine'")
+            return real_import(name, package)
+
+        reset_refine_rust_for_tests()
+        monkeypatch.setattr(importlib, "import_module", _no_wheel)
+        for _ in range(3):
+            with pytest.raises(RefineRustUnavailableError):
+                require_refine_rust()
+        assert refine_rust._CRATE_MEMO[0] is None
+
+    def test_reset_clears_the_memo_so_a_wheel_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. The wheel-absent tests in this file patch
+        # `importlib.import_module` WITHOUT resetting, so their isolation
+        # rests entirely on the autouse `_fresh_process_view` fixture.
+        monkeypatch.delenv(REFINE_RUST_ENV, raising=False)
+        real = require_refine_rust()
+        assert refine_rust._CRATE_MEMO[0] is not None
+        real_import = importlib.import_module
+
+        def _no_wheel(name: str, package: str | None = None) -> ModuleType:
+            if name == "brutex_refine":
+                raise ImportError("gone")
+            return real_import(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", _no_wheel)
+        assert require_refine_rust() is real, "warm memo still serves — no re-import"
+        reset_refine_rust_for_tests()  # the autouse fixture's job
+        with pytest.raises(RefineRustUnavailableError, match="not importable"):
+            require_refine_rust()
+
+    def test_memo_holds_the_module_not_a_bound_attribute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `RefineRuntime` is a Protocol read attribute-wise per call, so an
+        # ATTRIBUTE monkeypatch on the memoized module must still be seen —
+        # a memo holding a bound factory would serve the pre-patch object.
+        monkeypatch.delenv(REFINE_RUST_ENV, raising=False)
+        wheel = require_refine_rust()
+        before = wheel.__version__
+        monkeypatch.setattr(wheel, "__version__", "9.9.9-patched")
+        assert require_refine_rust().__version__ == "9.9.9-patched"
+        assert optimizer_versions()[0] == "brutex-refine-9.9.9-patched"
+        monkeypatch.undo()
+        assert require_refine_rust().__version__ == before
+
+    def test_the_flag_verdict_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The memo read sits AFTER the flag verdict, so a falsy/junk value
+        # set AFTER a successful resolve must still refuse loudly.
+        monkeypatch.delenv(REFINE_RUST_ENV, raising=False)
+        require_refine_rust()
+        monkeypatch.setenv(REFINE_RUST_ENV, "0")
+        with pytest.raises(RefineRustUnavailableError, match="NO fallback"):
+            require_refine_rust()
+        monkeypatch.setenv(REFINE_RUST_ENV, "junk")
+        with pytest.raises(RefineRustUnavailableError, match="not a recognised"):
+            require_refine_rust()

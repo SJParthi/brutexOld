@@ -19,9 +19,12 @@ is NO Python fallback —
   wheel, so the dashboard boots wheel-free (the brutex_feed guard pattern,
   minus the fallback).
 
-Everything here is O(1) per call: one env read + one ``sys.modules``-cached
-import. Deliberately NOT memoized — tests monkeypatch the env per case and a
-cached verdict would leak across them.
+Everything here is O(1) per call: one env read + (on the first call only) one
+import. The FLAG VERDICT is deliberately NOT memoized — tests monkeypatch the
+env per case and a cached verdict would leak across them — but the resolved
+MODULE is (:data:`_CRATE_MEMO`, DEC-MONEY-RUST-WRAPPER-COST-001), because
+``importlib.import_module`` costs ~574 ns even on a ``sys.modules`` HIT.
+:func:`reset_refine_rust_for_tests` clears it.
 
 MAINTAINER NOTE (hostile-review round 1, NIT-2): the wheel is built with the
 house ``panic = "abort"`` profile, so an UNGUARDED crate panic does not
@@ -37,9 +40,12 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from brutex.models import BruteXError
+
+if TYPE_CHECKING:  # pragma: no cover — typing-only import
+    from types import ModuleType
 
 #: The runtime flag (default ON). Falsy/junk values refuse loudly — the
 #: Python optimizer oracle is deleted, so OFF is a refusal, never a fallback.
@@ -56,6 +62,39 @@ BUILD_HINT: Final = (
     "build + install the wheel with `maturin develop --release` inside "
     "rust/brutex-refine (with the project venv active), or run `make setup`"
 )
+
+#: The resolved ``brutex_refine`` module, memoized after the FIRST successful
+#: import (DEC-MONEY-RUST-WRAPPER-COST-001 — measured on the sibling
+#: ``money_rust``: ``importlib.import_module`` costs ~574 ns even on a
+#: ``sys.modules`` HIT, and Stage-3 resolves the runtime per ask/tell hop).
+#:
+#: Four load-bearing rules, all obeyed here:
+#:
+#: 1. It holds the MODULE, never a bound callable — :class:`RefineRuntime` is
+#:    a Protocol read attribute-wise per call, so a monkeypatched session
+#:    factory on the memoized module is still seen.
+#: 2. A FAILED import is NEVER memoized: :func:`require_refine_rust` RAISES
+#:    on failure, so control never reaches the write. Caching failure would
+#:    turn "every call re-attempts and re-refuses, loudly" into a silent
+#:    latch — the exact shape DEC-RUST-STRICT-NO-FALLBACK-001 forbids.
+#: 3. The memo read sits AFTER the flag verdict, so a falsy/junk
+#:    ``BRUTEX_REFINE_RUST`` still refuses on EVERY call, warm memo or not.
+#: 4. Nothing else in this leaf reads it (there is no panic belt / no
+#:    surface handshake to share it with).
+#:
+#: Reset by :func:`reset_refine_rust_for_tests` — a test that patches
+#: ``importlib.import_module`` (or ``sys.modules``) must never be served a
+#: module resolved before its patch.
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
+
+def reset_refine_rust_for_tests() -> None:
+    """Clear the resolved-runtime memo (tests ONLY).
+
+    This leaf carries no flag latch and no burn-in budget — the memo is the
+    entire per-process state, so clearing it restores a fresh-process view.
+    """
+    _CRATE_MEMO[0] = None
 
 
 class RefineRustUnavailableError(BruteXError):
@@ -146,9 +185,11 @@ class RefineRuntime(Protocol):
 def require_refine_rust() -> RefineRuntime:
     """Resolve the Stage-3 Rust runtime, or raise the typed refusal.
 
-    The flag verdict is re-read per call (cheap; keeps tests hermetic) and
-    the wheel import rides ``sys.modules`` caching. Every refusal names the
-    DEC + the remediation — never a silent fallback (there is none).
+    The flag verdict is re-read per call (cheap; keeps tests hermetic); the
+    resolved module is memoized in :data:`_CRATE_MEMO` after the FIRST
+    successful import (the reasoning, and why a FAILED import is never
+    cached, is on that constant). Every refusal names the DEC + the
+    remediation — never a silent fallback (there is none).
 
     Raises
     ------
@@ -172,6 +213,9 @@ def require_refine_rust() -> RefineRuntime:
                 f"(truthy: {sorted(_TRUTHY)}; falsy: {sorted(_FALSY)}) — refusing "
                 "loudly rather than guessing (DEC-RUST-STAGE3-REFINE-001)."
             )
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return cast("RefineRuntime", memo)
     try:
         module = importlib.import_module("brutex_refine")
     except ImportError as exc:
@@ -181,6 +225,7 @@ def require_refine_rust() -> RefineRuntime:
             f"Python optimizer math is deleted). Remedy: {BUILD_HINT}. "
             f"(import failed: {exc})"
         ) from exc
+    _CRATE_MEMO[0] = module
     return cast(RefineRuntime, module)
 
 
@@ -211,4 +256,5 @@ __all__ = [
     "SelectSessionLike",
     "optimizer_versions",
     "require_refine_rust",
+    "reset_refine_rust_for_tests",
 ]

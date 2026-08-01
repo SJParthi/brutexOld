@@ -106,6 +106,28 @@ _STATE: Final[dict[str, int | bool]] = {
     "latched": False,
 }
 
+#: Resolved-kernel memo (``[None]`` = not yet resolved this process) — the
+#: ``money_rust`` pattern (DEC-MONEY-RUST-WRAPPER-COST-001), which measured
+#: the resolve at 911 ns/call because ``importlib.import_module`` costs
+#: ~574 ns even on a ``sys.modules`` HIT and the symbol handshake the rest.
+#: This facade pays it per scored trade batch / per abstain mask call.
+#:
+#: THE MODULE is memoized, never a bound callable: both kernels are read as
+#: ``compiled.score_logistic`` / ``compiled.abstain_masks`` per call, so a
+#: test that monkeypatches a kernel ATTRIBUTE is still seen — a callable
+#: memo would silently miss it.
+#:
+#: SUCCESS ONLY. A FAILED resolve is never cached: both failure arms go
+#: through :func:`_warn_once`, which under strict mode REFUSES *before* it
+#: records, so caching failure would convert "every call re-attempts and
+#: re-refuses, loudly" into the silently-latched steady state strict mode
+#: exists to forbid.
+#:
+#: Cleared by :func:`reset_meta_rust_for_tests` — a test that swaps
+#: ``sys.modules['brutex_meta']`` must reset, or it is served the kernel
+#: resolved before its swap.
+_KERNEL_MEMO: Final[list[object | None]] = [None]
+
 
 def reset_meta_rust_for_tests() -> None:
     """Clear the warn-once registry, burn-in counters and latch (tests)."""
@@ -113,6 +135,7 @@ def reset_meta_rust_for_tests() -> None:
     _STATE["score_burn_in"] = 0
     _STATE["abstain_burn_in"] = 0
     _STATE["latched"] = False
+    _KERNEL_MEMO[0] = None
 
 
 def _refuse_if_strict(reason: str, **fields: object) -> None:
@@ -187,7 +210,14 @@ def _resolve_kernel() -> object | None:
     handshake refusal — or the AttributeError shape a partially initialised
     module can raise) degrades as ``wheel_missing``; an importable wheel
     missing either kernel symbol degrades as ``wheel_stale``.
+
+    A SUCCESSFUL resolve is memoized in :data:`_KERNEL_MEMO` (module
+    constant — the reasoning, and why failures are deliberately NOT cached,
+    is on that constant). Cleared by :func:`reset_meta_rust_for_tests`.
     """
+    memo = _KERNEL_MEMO[0]
+    if memo is not None:
+        return memo
     import importlib
 
     try:
@@ -200,6 +230,7 @@ def _resolve_kernel() -> object | None:
     ):
         _warn_once("wheel_stale")
         return None
+    _KERNEL_MEMO[0] = compiled
     return compiled
 
 

@@ -573,3 +573,92 @@ class TestStrictFacadeOptIn:
         assert _adopt(seam) is None
         assert seam.disabled_reason == "burn_in_mismatch_law_a"
         assert errors[0][1] == "burn_in_mismatch_law_a"
+
+
+# ---------------------------------------------------------------------------
+# The resolved-crate memo (PER INSTANCE)
+# ---------------------------------------------------------------------------
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, why it is
+    per-INSTANCE, and the reset that keeps a ``sys.modules`` swap visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): the crate resolve cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. :meth:`ConfigRustSeam.adopt` pays it per engaged call.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate(lambda _v: "rust")
+        calls: list[str] = []
+
+        def _counting(name: str) -> types.ModuleType:
+            assert name == "brutex_core"
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(seam_core.importlib, "import_module", _counting)
+        seam = _make_seam()
+        seam.reset_for_tests(remaining=0)
+        for _ in range(5):
+            assert _adopt(seam) == "rust"
+        assert calls == ["brutex_core"], "the crate must be imported exactly ONCE"
+        assert seam._crate_memo is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_the_memo_is_per_instance_so_each_handshake_still_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A module-level memo would let seam A's SUCCESSFUL handshake satisfy
+        # seam B, whose `crate_api` names a symbol this crate does NOT carry —
+        # exactly the stale-wheel hole the handshake exists to close.
+        crate = _fake_crate(lambda _v: "rust")
+        monkeypatch.setitem(sys.modules, "brutex_core", crate)
+        seam_a = _make_seam()
+        seam_a.reset_for_tests(remaining=0)
+        assert _adopt(seam_a) == "rust"
+        seam_b = _make_seam(crate_api=("demo_fn", "absent_fn"))
+        seam_b.reset_for_tests(remaining=0)
+        assert _adopt(seam_b) is None
+        assert seam_b.disabled_reason == "crate_stale"
+        assert seam_b._crate_memo is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        monkeypatch.setitem(sys.modules, "brutex_core", types.ModuleType("brutex_core"))
+        seam = _make_seam()
+        seam.reset_for_tests(remaining=0)
+        assert _adopt(seam) is None
+        assert seam._crate_memo is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN — a `sys.modules` swap without a reset is
+        # served the crate resolved BEFORE the swap.
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(lambda _v: "first"))
+        seam = _make_seam()
+        seam.reset_for_tests(remaining=0)
+        assert _adopt(seam) == "first"
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(lambda _v: "second"))
+        seam.reset_for_tests(remaining=0)
+        assert _adopt(seam) == "second"
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # `adopt` resolves `getattr(crate, crate_name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _fake_crate(lambda _v: "first")
+        monkeypatch.setitem(sys.modules, "brutex_core", crate)
+        seam = _make_seam()
+        seam.reset_for_tests(remaining=0)
+        assert _adopt(seam) == "first"
+        monkeypatch.setattr(crate, "demo_fn", lambda _v: "patched")
+        assert _adopt(seam) == "patched"

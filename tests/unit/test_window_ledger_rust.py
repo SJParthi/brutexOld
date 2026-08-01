@@ -704,3 +704,123 @@ class TestStrictRefusal:
         self._strict_on(monkeypatch)
         result = wlr.routed_window_merge_key(key, python_law=window_key_python)
         assert result[3] == "2024-01-02T09:15:00+00:00"
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every crate swap in this file visible.
+
+    Motivation (measured on the sibling ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): the resolve cost 911 ns/call because
+    ``importlib.import_module`` is ~574 ns even on a ``sys.modules`` HIT and
+    the symbol handshake the rest. This seam pays it per routed call.
+
+    Self-contained by design: it builds its fake crate from the facade's OWN
+    API tuple and drives ``_resolve_crate`` directly, so it needs nothing
+    from this file's routed-call harness.
+    """
+
+    @staticmethod
+    def _mod() -> object:
+        from brutex.data import window_ledger_rust as _memo_wl
+
+        return _memo_wl
+
+    @classmethod
+    def _fake(cls, *, drop: str | None = None) -> object:
+        import types as _t
+
+        mod = cls._mod()
+        crate = _t.SimpleNamespace()
+        for name in mod._CRATE_API:  # type: ignore[attr-defined]
+            if name != drop:
+                setattr(crate, name, lambda *a, **k: None)
+        return crate
+
+    @classmethod
+    def _route_import(cls, monkeypatch: pytest.MonkeyPatch, crate: object) -> list[str]:
+        """Point the facade's importer at *crate*; return the call log."""
+        import importlib as _il
+
+        mod = cls._mod()
+        calls: list[str] = []
+        real = _il.import_module
+
+        def _import(name: str, package: str | None = None) -> object:
+            if name == "brutex_lake":
+                calls.append(name)
+                return crate
+            return real(name, package)
+
+        monkeypatch.setattr(mod.importlib, "import_module", _import)  # type: ignore[attr-defined]
+        return calls
+
+    @classmethod
+    def _strict_off(cls, monkeypatch: pytest.MonkeyPatch) -> None:
+        """This class exercises the DEGRADE lattice — pin strict OFF itself.
+
+        Self-contained rather than relying on a module-level fixture, so the
+        failed-resolve pin below cannot be silently turned into a strict-mode
+        refusal by an unrelated harness change.
+        """
+        from brutex.config import rust_strict
+
+        monkeypatch.setenv(rust_strict.RUST_STRICT_ENV, "0")
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = self._mod()
+        crate = self._fake()
+        calls = self._route_import(monkeypatch, crate)
+        mod.reset_window_ledger_rust_for_tests()  # type: ignore[attr-defined]
+        for _ in range(5):
+            assert mod._resolve_crate() is crate  # type: ignore[attr-defined]
+        assert calls == ["brutex_lake"], "the crate must be imported exactly ONCE"
+        assert mod._CRATE_MEMO[0] is crate  # type: ignore[attr-defined]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` REFUSES before it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid — and a
+        # wheel rebuilt mid-process could never be picked up.
+        mod = self._mod()
+        self._strict_off(monkeypatch)
+        self._route_import(monkeypatch, self._fake(drop="classify_window_status"))
+        mod.reset_window_ledger_rust_for_tests()  # type: ignore[attr-defined]
+        assert mod._resolve_crate() is None  # type: ignore[attr-defined]
+        assert mod._CRATE_MEMO[0] is None  # type: ignore[attr-defined]
+
+    def test_reset_clears_the_memo_so_a_crate_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. This file's crate installers swap WITHOUT
+        # resetting, so per-test isolation rests on the reset seam clearing
+        # the memo (this file's autouse fixture calls it).
+        mod = self._mod()
+        first = self._fake()
+        self._route_import(monkeypatch, first)
+        mod.reset_window_ledger_rust_for_tests()  # type: ignore[attr-defined]
+        assert mod._resolve_crate() is first  # type: ignore[attr-defined]
+        second = self._fake()
+        self._route_import(monkeypatch, second)
+        assert mod._resolve_crate() is first, "warm memo still serves — no re-import"  # type: ignore[attr-defined]
+        mod.reset_window_ledger_rust_for_tests()  # type: ignore[attr-defined]
+        assert mod._resolve_crate() is second  # type: ignore[attr-defined]
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every routed law reads `getattr(crate, name)` per call, so an
+        # ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # a memo holding a bound callable would serve the pre-patch function
+        # forever, silently breaking ~85 attribute-monkeypatch test sites.
+        mod = self._mod()
+        crate = self._fake()
+        self._route_import(monkeypatch, crate)
+        mod.reset_window_ledger_rust_for_tests()  # type: ignore[attr-defined]
+        assert mod._resolve_crate() is crate  # type: ignore[attr-defined]
+        sentinel = object()
+        monkeypatch.setattr(crate, "classify_window_status", lambda *a, **k: sentinel)
+        served = mod._resolve_crate().classify_window_status  # type: ignore[attr-defined]
+        assert served() is sentinel

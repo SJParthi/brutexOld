@@ -1074,3 +1074,72 @@ class TestStrictRefusal:
         _arm(monkeypatch, None)
         assert _route(Decimal("0.05")) == Decimal("0.05")
         assert models_rust._DISABLED_REASON[0] == "crate_unavailable"  # pyright: ignore[reportPrivateUsage]
+
+
+# ── The resolved-crate memo ─────────────────────────────────────────────────
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every ``sys.modules`` swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it per routed call.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate()
+        calls: list[str] = []
+
+        def _counting(name: str) -> types.ModuleType:
+            assert name == "brutex_core"
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(models_rust.importlib, "import_module", _counting)
+        monkeypatch.setenv(models_rust.MODELS_RUST_ENV, "1")
+        models_rust.reset_models_rust_for_tests(remaining=0)
+        for _ in range(5):
+            assert _route("0.05") == Decimal("0.05")
+        assert calls == ["brutex_core"], "the crate must be imported exactly ONCE"
+        assert models_rust._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _arm(monkeypatch, types.ModuleType("brutex_core"))  # no API -> crate_stale
+        models_rust.reset_models_rust_for_tests(remaining=0)
+        assert _route("0.05") == Decimal("0.05")
+        assert models_rust._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_arm` swaps `sys.modules` WITHOUT resetting,
+        # so this file's isolation rests on the autouse `_fresh_seam` fixture
+        # clearing the memo.
+        _arm(monkeypatch, _fake_crate())
+        models_rust.reset_models_rust_for_tests(remaining=0)
+        assert _route("0.05") == Decimal("0.05")
+        _arm(monkeypatch, _bomb_crate())  # swap AFTER the first resolve
+        models_rust.reset_models_rust_for_tests(remaining=0)  # the fixture's job
+        assert _route("0.05") == Decimal("0.05")  # bomb degrades -> oracle
+        assert models_rust.models_rust_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # the routed law resolves `getattr(crate, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _fake_crate()
+        _arm(monkeypatch, crate)
+        models_rust.reset_models_rust_for_tests(remaining=0)
+        assert _route("0.05") == Decimal("0.05")
+        monkeypatch.setattr(crate, "models_normalise_tick_size_str", lambda k, p: "0.10")
+        assert _route("0.05") == Decimal("0.10")

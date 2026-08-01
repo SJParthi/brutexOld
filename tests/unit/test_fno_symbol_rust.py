@@ -1148,3 +1148,84 @@ class TestStrictRefusal:
         with self._strict_off():
             assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
         assert fsr._DISABLED_REASON[0] == "crate_stale"
+
+
+# ---------------------------------------------------------------------------
+# The resolved-crate memo
+# ---------------------------------------------------------------------------
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every crate swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it per parsed symbol.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate()
+        calls: list[str] = []
+        real_import_module = fsr.importlib.import_module
+
+        def _counting(name: str) -> object:
+            if name != "brutex_data":
+                return real_import_module(name)
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(fsr.importlib, "import_module", _counting)
+        _english_probe(monkeypatch)
+        _flag_on(monkeypatch)
+        fsr.reset_fno_symbol_rust_for_tests(remaining=0)
+        for _ in range(5):
+            assert _routed(FUT_SYM) is not None
+        assert calls == ["brutex_data"], "the crate must be imported exactly ONCE"
+        assert fsr._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _install_crate(monkeypatch, SimpleNamespace())  # no API -> crate_stale
+        _english_probe(monkeypatch)
+        _flag_on(monkeypatch)
+        fsr.reset_fno_symbol_rust_for_tests(remaining=0)
+        assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
+        assert fsr._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install_crate` swaps the resolver WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_isolated_facade` fixture clearing the memo.
+        _install_crate(monkeypatch, _fake_crate())
+        _english_probe(monkeypatch)
+        _flag_on(monkeypatch)
+        fsr.reset_fno_symbol_rust_for_tests(remaining=0)
+        assert _routed(FUT_SYM) is not None
+        _install_crate(monkeypatch, SimpleNamespace())  # swap AFTER the first resolve
+        fsr.reset_fno_symbol_rust_for_tests(remaining=0)  # the autouse fixture's job
+        _english_probe(monkeypatch)
+        assert _routed(FUT_SYM) == _parse_fno_symbol_python(FUT_SYM)
+        assert fsr.data_rust_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # the routed law resolves `getattr(crate, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _fake_crate()
+        _install_crate(monkeypatch, crate)
+        _english_probe(monkeypatch)
+        _flag_on(monkeypatch)
+        fsr.reset_fno_symbol_rust_for_tests(remaining=0)
+        assert _routed(FUT_SYM) is not None
+        monkeypatch.setattr(crate, "parse_fno_symbol_coords", lambda symbol: None)
+        assert _routed(FUT_SYM) is None

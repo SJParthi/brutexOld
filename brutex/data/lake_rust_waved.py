@@ -158,6 +158,28 @@ _REMEDY: Final[str] = (
 #: The waved read result's tuple arity — ``(ipc_bytes, events_json)``.
 _READ_RESULT_ARITY: Final[int] = 2
 
+#: The resolved ``brutex_lake`` module, memoized after the FIRST successful
+#: precondition chain (DEC-MONEY-RUST-WRAPPER-COST-001 — measured on the
+#: sibling ``money_rust``: ``importlib.import_module`` costs ~574 ns even on
+#: a ``sys.modules`` HIT, and this seam pays the chain per waved call).
+#:
+#: Four load-bearing rules, all obeyed here:
+#:
+#: 1. It holds the MODULE, never a bound callable — every waved surface reads
+#:    ``crate.<symbol>`` per call, so an attribute monkeypatch is still seen.
+#: 2. A FAILED chain is NEVER memoized: :func:`_require_crate` RAISES on
+#:    failure, so control never reaches the write. A cached failure would turn
+#:    "every call re-attempts and re-raises, loudly" into a silent latch.
+#: 3. It is NOT shared with :func:`_panic_belt_errors`, which probes THREE
+#:    homes (crate + ``pyo3_runtime`` + ``polars.exceptions``) and whose
+#:    per-home narrowing is separately pinned.
+#: 4. The memo read sits AFTER :func:`require_waved_env_unset` — the retired
+#:    flag must refuse on EVERY call, warm memo or not.
+#:
+#: Reset by :func:`reset_lake_rust_waved_for_tests` (this file's autouse
+#: fixture runs it before AND after every test).
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
 #: The event-payload keys every bad-tick warn record must carry (the crate
 #: wire contract — see ``rust/brutex-lake/src/waved/mod.rs``).
 _EVENT_KEYS: Final[frozenset[str]] = frozenset(
@@ -210,8 +232,16 @@ def _require_crate() -> ModuleType:
     :class:`LakeRustWavedUnavailableError` naming the exact failure + the
     rebuild remedy. ``MemoryError`` out of the metadata probe re-raises
     raw (a global stop, never re-labelled).
+
+    A SUCCESSFUL chain is memoized in :data:`_CRATE_MEMO` (module constant —
+    the reasoning, and why a FAILED chain is never cached, is on that
+    constant). The retired-flag refusal runs FIRST, on every call, warm memo
+    or not.
     """
     require_waved_env_unset()
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return memo
     try:
         crate = importlib.import_module("brutex_lake")
     except ImportError as exc:
@@ -247,6 +277,7 @@ def _require_crate() -> ModuleType:
             f"{pinned!r} — the wheel/crate lockstep is broken "
             f"(DEC-RUST-LAKE-WAVED-001 endgame). Remedy: {_REMEDY}"
         )
+    _CRATE_MEMO[0] = crate
     return crate
 
 
@@ -703,8 +734,16 @@ _SCAN_EVENT_KINDS: Final[frozenset[str]] = frozenset({"log", "finding", "drift"}
 
 
 def reset_lake_rust_waved_for_tests() -> None:
-    """Reset the per-process scan-reads witness (tests ONLY)."""
+    """Reset the per-process scan-reads witness + the resolved-crate memo (tests ONLY).
+
+    Clears :data:`_CRATE_MEMO` (DEC-MONEY-RUST-WRAPPER-COST-001, applied to
+    this seam) — every test that swaps ``sys.modules["brutex_lake"]`` must
+    see its OWN crate, never one resolved before the swap. This file's
+    autouse ``_fresh_process_view`` fixture calls it BEFORE and AFTER every
+    test, so the swap sites need no further ceremony.
+    """
     _LAST_SCAN_READS[0] = None
+    _CRATE_MEMO[0] = None
 
 
 class _PauseEscape(BaseException):

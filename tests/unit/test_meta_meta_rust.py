@@ -491,3 +491,98 @@ class TestStrictRefusal:
 
         assert not hasattr(_mod, "_STRICT_EXEMPT_REASONS")
         assert not hasattr(_mod, "_STRICT_UNRESOLVED_REASONS")
+
+
+class TestKernelMemo:
+    """The resolved-kernel memo: what it caches, what it must NOT, and the
+    reset that keeps every ``sys.modules`` swap in this file visible.
+
+    Motivation (measured on the sibling ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): the resolve cost 911 ns/call because
+    ``importlib.import_module`` is ~574 ns even on a ``sys.modules`` HIT and
+    the symbol handshake the rest. This facade pays it per scored batch.
+    """
+
+    @staticmethod
+    def _mod() -> object:
+        from brutex.meta import meta_rust as _mod
+
+        return _mod
+
+    @staticmethod
+    def _fake(*, drop: str | None = None) -> SimpleNamespace:
+        kernel = SimpleNamespace(
+            score_logistic=lambda *a, **k: None,
+            abstain_masks=lambda *a, **k: None,
+        )
+        if drop is not None:
+            delattr(kernel, drop)
+        return kernel
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = self._mod()
+        kernel = self._fake()
+        monkeypatch.setitem(sys.modules, "brutex_meta", kernel)
+        mod.reset_meta_rust_for_tests()
+        import importlib
+
+        calls: list[str] = []
+        real = importlib.import_module
+
+        def _counting(name: str, package: str | None = None) -> object:
+            if name == "brutex_meta":
+                calls.append(name)
+                return kernel
+            return real(name, package)
+
+        monkeypatch.setattr(importlib, "import_module", _counting)
+        for _ in range(5):
+            assert mod._resolve_kernel() is kernel
+        assert calls == ["brutex_meta"], "the kernel must be imported exactly ONCE"
+        assert mod._KERNEL_MEMO[0] is kernel
+
+    @pytest.mark.parametrize("drop", ["score_logistic", "abstain_masks"])
+    def test_failed_resolve_is_never_memoized(
+        self, monkeypatch: pytest.MonkeyPatch, drop: str
+    ) -> None:
+        # A FAILED resolve must NOT be cached: `_warn_once` REFUSES before it
+        # records under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        mod = self._mod()
+        monkeypatch.setitem(sys.modules, "brutex_meta", self._fake(drop=drop))
+        mod.reset_meta_rust_for_tests()
+        assert mod._resolve_kernel() is None
+        assert mod._KERNEL_MEMO[0] is None
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. This file's `sys.modules` swaps do NOT reset,
+        # so isolation rests on the reset seam clearing the memo.
+        mod = self._mod()
+        first = self._fake()
+        monkeypatch.setitem(sys.modules, "brutex_meta", first)
+        mod.reset_meta_rust_for_tests()
+        assert mod._resolve_kernel() is first
+        second = self._fake()
+        monkeypatch.setitem(sys.modules, "brutex_meta", second)
+        assert mod._resolve_kernel() is first, "warm memo still serves — no re-import"
+        mod.reset_meta_rust_for_tests()
+        assert mod._resolve_kernel() is second
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Both kernels are read as `compiled.<name>` per call, so an
+        # ATTRIBUTE monkeypatch on the memoized module must still be seen —
+        # a memo holding a bound callable would serve the pre-patch function.
+        mod = self._mod()
+        kernel = self._fake()
+        monkeypatch.setitem(sys.modules, "brutex_meta", kernel)
+        mod.reset_meta_rust_for_tests()
+        assert mod._resolve_kernel() is kernel
+        sentinel = object()
+        monkeypatch.setattr(kernel, "score_logistic", lambda *a, **k: sentinel)
+        assert mod._resolve_kernel().score_logistic() is sentinel

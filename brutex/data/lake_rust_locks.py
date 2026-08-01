@@ -108,6 +108,31 @@ _OBSERVABILITY_MEMO: Final[set[str]] = set()
 #: Memo key for the engaged-once INFO (namespaced apart from warn reasons).
 _ENGAGED_KEY: Final = "__engaged__"
 
+#: Resolved-crate memo (``[None]`` = not yet resolved this process) — the
+#: ``money_rust`` pattern (DEC-MONEY-RUST-WRAPPER-COST-001), which measured
+#: ``_resolve_crate`` at 911 ns/call because ``importlib.import_module``
+#: costs ~574 ns even on a ``sys.modules`` HIT and the symbol handshake the
+#: rest. This seam pays that resolve on EVERY routed call.
+#:
+#: THE MODULE is memoized, never a bound callable: every routed law does
+#: ``getattr(crate, name)`` per call, so a test that monkeypatches a crate
+#: ATTRIBUTE is still seen — a callable memo would silently miss it.
+#:
+#: SUCCESS ONLY. A FAILED resolve is never cached: the failure arms go
+#: through :func:`_disable`, which under strict mode REFUSES *before* it
+#: latches, so caching a failure would convert "every call re-attempts and
+#: re-refuses, loudly" into the silently-latched steady state strict mode
+#: exists to forbid.
+#:
+#: Deliberately NOT shared with :func:`_panic_belt_errors`, which loops over
+#: SEVERAL import homes and whose per-home blocking the suites use to prove
+#: belt narrowing — this memo is scoped to ``_resolve_crate`` alone.
+#:
+#: Cleared by :func:`reset_lake_rust_locks_for_tests` — a test that swaps
+#: ``sys.modules['brutex_lake']`` must reset, or it is served the crate
+#: resolved before its swap.
+_CRATE_MEMO: Final[list[ModuleType | None]] = [None]
+
 
 def lake_rust_locks_enabled() -> bool:
     """Resolve ``BRUTEX_LAKE_RUST_LOCKS`` (default ON per
@@ -147,6 +172,7 @@ def reset_lake_rust_locks_for_tests() -> None:
     """Reset the latch + warn memo (test isolation ONLY — never production)."""
     _DISABLED_REASON[0] = None
     _OBSERVABILITY_MEMO.clear()
+    _CRATE_MEMO[0] = None
 
 
 def _warn_once(reason: str, **context: object) -> None:
@@ -229,6 +255,9 @@ def _resolve_crate() -> ModuleType | None:
     locks primitives are polars-free (module docstring — the ONE deliberate
     PR-1-pattern deviation beside the dropped burn-in).
     """
+    memo = _CRATE_MEMO[0]
+    if memo is not None:
+        return memo
     try:
         crate = importlib.import_module("brutex_lake")
     except ImportError as exc:
@@ -246,6 +275,7 @@ def _resolve_crate() -> ModuleType | None:
                 remedy="rebuild + reinstall the brutex-lake wheel (PR-4 added the lock symbols)",
             )
             return None
+    _CRATE_MEMO[0] = crate
     return crate
 
 

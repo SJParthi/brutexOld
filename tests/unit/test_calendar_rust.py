@@ -811,3 +811,112 @@ class TestStrictRefusal:
         # ``_STRICT_EXEMPT_REASONS`` frozenset. Must NOT raise.
         self._strict_on(monkeypatch)
         cr._warn_once("observed_error")
+
+
+# ---------------------------------------------------------------------------
+# The resolved-crate memo
+# ---------------------------------------------------------------------------
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every crate swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it per routed law call.
+    """
+
+    @staticmethod
+    def _route(rust_value: str = "RUST") -> str:
+        out = cr.routed(
+            cr._LAW_CLASSIFY,  # pyright: ignore[reportPrivateUsage]
+            rust_call=lambda _c: rust_value,
+            materialize=cr.Value,
+            oracle=_oracle_value(),
+        )
+        return cast("str", cr.unwrap(out))
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _fake_crate()
+        calls: list[str] = []
+        real_import = importlib.import_module
+
+        def _counting(name: str) -> object:
+            if name != "brutex_calendar":
+                return real_import(name)
+            calls.append(name)
+            return crate
+
+        monkeypatch.setattr(importlib, "import_module", _counting)
+        _flag_on(monkeypatch)
+        cr.reset_calendar_rust_for_tests(remaining=0)
+        for _ in range(5):
+            assert self._route() == "RUST"
+        assert calls == ["brutex_calendar"], "the crate must be imported exactly ONCE"
+        assert cr._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _install_crate(monkeypatch, _fake_crate(drop_symbols=("classify_month_drift",)))
+        _flag_on(monkeypatch)
+        cr.reset_calendar_rust_for_tests(remaining=0)
+        assert self._route() == "ORACLE"
+        assert cr._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install_crate` swaps the resolver WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_isolated_facade` fixture clearing the memo.
+        _install_crate(monkeypatch, _fake_crate())
+        _flag_on(monkeypatch)
+        cr.reset_calendar_rust_for_tests(remaining=0)
+        assert self._route() == "RUST"
+        # swap AFTER the first resolve
+        _install_crate(monkeypatch, _fake_crate(drop_symbols=("classify_month_drift",)))
+        cr.reset_calendar_rust_for_tests(remaining=0)  # the autouse fixture's job
+        assert self._route() == "ORACLE"
+        assert cr.rust_calendar_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen.
+        # `routed` hands `rust_call` the MODULE and every caller reads
+        # `crate.<symbol>` per call, so a memo holding a bound callable would
+        # silently serve the pre-patch function forever.
+        #
+        # The vehicle reads the attribute for real (this file's `_route`
+        # helper ignores the crate by design — the fake's callables are inert
+        # placeholders, so patching one would prove nothing there).
+        crate = _fake_crate()
+        _install_crate(monkeypatch, crate)
+        _flag_on(monkeypatch)
+        cr.reset_calendar_rust_for_tests(remaining=0)
+
+        def _read_attr(rust_value: str) -> str:
+            out = cr.routed(
+                cr._LAW_CLASSIFY,  # pyright: ignore[reportPrivateUsage]
+                rust_call=lambda c: c.classify_month_drift(),
+                materialize=lambda raw: cr.Value(cast("str", raw)),
+                oracle=_oracle_value(),
+            )
+            assert cr.unwrap(out) == rust_value
+            return rust_value
+
+        monkeypatch.setattr(crate, "classify_month_drift", lambda: "BEFORE")
+        _read_attr("BEFORE")
+        assert cr._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+        # The memo is now WARM. Re-patch the SAME module object: no reset, no
+        # re-import — the new attribute must still reach the routed call.
+        monkeypatch.setattr(crate, "classify_month_drift", lambda: "AFTER")
+        _read_attr("AFTER")
+        assert cr._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+        assert cr.rust_calendar_disabled() is False

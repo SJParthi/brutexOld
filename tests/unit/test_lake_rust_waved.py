@@ -1545,3 +1545,88 @@ class TestScanLakeSurface:
         assert lrw.last_rust_scan_reads() == 9
         lrw.reset_lake_rust_waved_for_tests()
         assert lrw.last_rust_scan_reads() is None
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every ``sys.modules`` swap in this file visible.
+
+    Motivation (measured on the sibling ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): the resolve cost 911 ns/call because
+    ``importlib.import_module`` is ~574 ns even on a ``sys.modules`` HIT.
+    This seam pays the FULL precondition chain — import + a 10-name API
+    surface walk + a polars-version lockstep probe — per waved call.
+    """
+
+    def test_success_is_memoized_and_the_chain_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pinned_calls: list[int] = []
+        crate = _fake_crate(pinned=lambda: (pinned_calls.append(1), pl.__version__)[1])
+        _install_crate(monkeypatch, crate)
+        lrw.reset_lake_rust_waved_for_tests()
+        for _ in range(5):
+            assert lrw._require_crate() is crate
+        assert pinned_calls == [1], "the precondition chain must run exactly ONCE"
+        assert lrw._CRATE_MEMO[0] is crate
+
+    def test_failed_chain_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED chain must NOT be cached. `_require_crate` RAISES on
+        # failure, so a cached failure would turn "every call re-raises,
+        # loudly" into a silent latch — and a wheel rebuilt mid-process
+        # could never be picked up.
+        broken = _fake_crate()
+        del broken.waved_endgame_witness  # type: ignore[attr-defined]
+        _install_crate(monkeypatch, broken)
+        lrw.reset_lake_rust_waved_for_tests()
+        for _ in range(3):
+            with pytest.raises(LakeRustWavedUnavailableError):
+                lrw._require_crate()
+        assert lrw._CRATE_MEMO[0] is None
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install_crate` swaps `sys.modules` WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_fresh_process_view` fixture clearing the memo.
+        first = _fake_crate()
+        _install_crate(monkeypatch, first)
+        lrw.reset_lake_rust_waved_for_tests()
+        assert lrw._require_crate() is first
+        second = _fake_crate()
+        _install_crate(monkeypatch, second)
+        lrw.reset_lake_rust_waved_for_tests()  # the autouse fixture's job
+        assert lrw._require_crate() is second
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Every waved surface reads `crate.<symbol>` per call, so an
+        # ATTRIBUTE monkeypatch on the memoized module must still be seen —
+        # a callable-level memo would serve the pre-patch function forever.
+        crate = _fake_crate(scan=lambda *a: _scan_clean_wire(reads_performed=3))
+        _install_crate(monkeypatch, crate)
+        lrw.reset_lake_rust_waved_for_tests()
+        _scan_call(monkeypatch, crate)
+        assert lrw.last_rust_scan_reads() == 3
+        # Re-patch the SAME module object: no swap, no reset.
+        monkeypatch.setattr(
+            crate, "waved_scan_lake", lambda *a: _scan_clean_wire(reads_performed=77)
+        )
+        _scan_call(monkeypatch, crate)
+        assert lrw.last_rust_scan_reads() == 77
+        assert lrw._CRATE_MEMO[0] is crate
+
+    def test_the_retired_flag_still_refuses_on_a_warm_memo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The memo read sits AFTER `require_waved_env_unset`, so the retired
+        # flag refuses on EVERY call — a warm memo must never bypass it.
+        crate = _fake_crate()
+        _install_crate(monkeypatch, crate)
+        lrw.reset_lake_rust_waved_for_tests()
+        assert lrw._require_crate() is crate
+        monkeypatch.setenv(lrw.LAKE_WAVED_RUST_ENV, "1")
+        with pytest.raises(lrw.LakeRustWavedFlagRemovedError):
+            lrw._require_crate()

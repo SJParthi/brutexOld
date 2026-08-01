@@ -158,6 +158,35 @@ class ConfigRustSeam:
         self._disabled_reason: str | None = None
         self._burn_in: dict[str, int] = dict.fromkeys(laws, BURN_IN_SAMPLES)
         self._memo: set[str] = set()
+        #: Resolved-crate memo (``None`` = not yet resolved) — the
+        #: ``money_rust`` pattern (DEC-MONEY-RUST-WRAPPER-COST-001), which
+        #: measured the crate resolve at 911 ns/call because
+        #: ``importlib.import_module`` costs ~574 ns even on a
+        #: ``sys.modules`` HIT and the symbol handshake the rest.
+        #: :meth:`adopt` pays it on EVERY engaged call.
+        #:
+        #: PER-INSTANCE, not module-level: each seam carries its own
+        #: :attr:`crate_api` handshake and its own latch, so a memo shared
+        #: across instances would let one seam's successful handshake
+        #: satisfy another's — the crate module is the same object, but the
+        #: SURFACE CHECK is not, and skipping it is exactly the stale-wheel
+        #: hole the handshake exists to close.
+        #:
+        #: THE MODULE is memoized, never a bound callable: :meth:`adopt`
+        #: does ``getattr(crate, crate_name)`` per call, so a test that
+        #: monkeypatches a crate ATTRIBUTE is still seen — a callable memo
+        #: would silently miss it.
+        #:
+        #: SUCCESS ONLY. A FAILED resolve is never cached: both failure arms
+        #: go through :meth:`_disable`, which under strict mode REFUSES
+        #: *before* it latches, so caching a failure would convert "every
+        #: call re-attempts and re-refuses, loudly" into the silently-latched
+        #: steady state strict mode exists to forbid.
+        #:
+        #: Cleared by :meth:`reset_for_tests` — a test that swaps
+        #: ``sys.modules["brutex_core"]`` must reset, or it is served the
+        #: crate resolved before its swap.
+        self._crate_memo: ModuleType | None = None
 
     # ── Flag + latch + reset ────────────────────────────────────────────
 
@@ -207,6 +236,7 @@ class ConfigRustSeam:
         for law in self._burn_in:
             self._burn_in[law] = remaining
         self._memo.clear()
+        self._crate_memo = None
 
     def burn_in_remaining(self, law: str) -> int:
         """The live burn-in budget for *law* (test/observability read)."""
@@ -286,7 +316,13 @@ class ConfigRustSeam:
         member is a pre-milestone-3 (or foreign/broken) install — latch
         ``crate_stale``. Fail-closed: never an ``AttributeError`` out of
         this seam.
+
+        A SUCCESSFUL resolve is memoized in :attr:`_crate_memo` (the
+        reasoning, and why failures are deliberately NOT cached, is on that
+        attribute). Cleared by :meth:`reset_for_tests`.
         """
+        if self._crate_memo is not None:
+            return self._crate_memo
         try:
             crate = importlib.import_module("brutex_core")
         except ImportError as exc:
@@ -305,6 +341,7 @@ class ConfigRustSeam:
                     remedy="rebuild + reinstall rust/brutex-core (see rust/brutex-core/README.md)",
                 )
                 return None
+        self._crate_memo = crate
         return crate
 
     # ── The engaged-call core (layers 3-6) ──────────────────────────────

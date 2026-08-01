@@ -1284,3 +1284,87 @@ class TestStrictRefusal:
         self._strict_on(monkeypatch)
         with pytest.raises(RustFallbackRefused):
             lake_keys_rust._disable("result_refused_fold")
+
+
+# ---------------------------------------------------------------------------
+# The resolved-crate memo
+# ---------------------------------------------------------------------------
+
+
+class TestCrateMemo:
+    """The resolved-crate memo: what it caches, what it must NOT, and the
+    reset that keeps every crate swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): ``_resolve_crate`` cost 911 ns/call
+    because ``importlib.import_module`` is ~574 ns even on a ``sys.modules``
+    HIT. This seam pays it per routed call.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crate = _OracleCrate()
+        calls: list[str] = []
+        real_import = importlib.import_module
+
+        def _counting(name: str, *args: object, **kwargs: object) -> object:
+            if name == _CRATE_NAME:
+                calls.append(name)
+                return crate
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(lake_keys_rust.importlib, "import_module", _counting)
+        _enable(monkeypatch)
+        lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)
+        for _ in range(5):
+            assert lake_keys.stock_drift_fold("BAJAJ-AUTO") == (
+                lake_keys._stock_drift_fold_python("BAJAJ-AUTO")
+            )
+        assert calls == [_CRATE_NAME], "the crate must be imported exactly ONCE"
+        assert lake_keys_rust._CRATE_MEMO[0] is crate  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _install_crate(monkeypatch, object())  # no API -> crate_stale
+        _enable(monkeypatch)
+        lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)
+        assert lake_keys.stock_drift_fold("BAJAJ-AUTO") == (
+            lake_keys._stock_drift_fold_python("BAJAJ-AUTO")
+        )
+        assert lake_keys_rust._CRATE_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install_crate` swaps the resolver WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_isolated_facade` fixture clearing the memo.
+        _install_crate(monkeypatch, _OracleCrate())
+        _enable(monkeypatch)
+        lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)
+        assert lake_keys.stock_drift_fold("BAJAJ-AUTO") == (
+            lake_keys._stock_drift_fold_python("BAJAJ-AUTO")
+        )
+        _install_crate(monkeypatch, object())  # swap AFTER the first resolve
+        lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)  # the fixture's job
+        assert lake_keys.stock_drift_fold("BAJAJ-AUTO") == (
+            lake_keys._stock_drift_fold_python("BAJAJ-AUTO")
+        )
+        assert lake_keys_rust.lake_keys_rust_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized crate must still be seen —
+        # every routed law resolves `getattr(crate, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        crate = _OracleCrate()
+        _install_crate(monkeypatch, crate)
+        _enable(monkeypatch)
+        lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)
+        assert lake_keys.stock_drift_fold("BAJAJ-AUTO") == "BAJAJAUTO"
+        monkeypatch.setattr(crate, "stock_drift_fold", lambda symbol: "SWAPPED")
+        assert lake_keys.stock_drift_fold("BAJAJ-AUTO") == "SWAPPED"

@@ -145,6 +145,17 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch, *, steady: bool = False) -> None:
         ocr.reset_optcost_rust_for_tests(remaining=0)
 
 
+def _reset_after_swap() -> None:
+    """Re-arm the steady state after a mid-test ``_install`` kernel swap.
+
+    ``_install`` swaps ``sys.modules["fno_math"]`` but does NOT reset the
+    seam, so the resolved-kernel memo (DEC-MONEY-RUST-WRAPPER-COST-001,
+    applied to :mod:`brutex.optcost_rust`) would keep serving the kernel
+    resolved BEFORE the swap. Every mid-test swap must be followed by this.
+    """
+    ocr.reset_optcost_rust_for_tests(remaining=0)
+
+
 def _boom(*_args: object, **_kwargs: object) -> object:
     raise AssertionError("kernel callable must not be invoked in this test")
 
@@ -838,11 +849,14 @@ class TestHistoryAndExpirySeams:
         _flag_on(monkeypatch, steady=True)
         assert ocr.next_weekly(table, date(2024, 1, 1), python=lambda: None) == target
         _install(monkeypatch, _fake_kernel(optcost_next_weekly_expiry=lambda s, d, o: (4, 0)))
+        _reset_after_swap()
         assert ocr.next_weekly(table, date(2024, 1, 1), python=lambda: None) is None
         _install(monkeypatch, _fake_kernel(optcost_next_weekly_expiry=lambda s, d, o: (3, 0)))
+        _reset_after_swap()
         with pytest.raises(ValueError, match="before recorded history start"):
             ocr.next_weekly(table, date(2019, 1, 1), python=lambda: None)
         _install(monkeypatch, _fake_kernel(optcost_next_weekly_expiry=lambda s, d, o: (9, 0)))
+        _reset_after_swap()
         assert ocr.next_weekly(table, date(2024, 1, 1), python=lambda: target) == target
 
     def test_next_weekly_out_of_domain_ordinal_refused(
@@ -871,11 +885,13 @@ class TestHistoryAndExpirySeams:
         _install(
             monkeypatch, _fake_kernel(optcost_next_monthly_expiry=lambda s, d, y, m, o: (3, 0))
         )
+        _reset_after_swap()
         with pytest.raises(ValueError, match="before recorded history start"):
             ocr.next_monthly(table, date(2019, 1, 1), python=lambda: target)
         _install(
             monkeypatch, _fake_kernel(optcost_next_monthly_expiry=lambda s, d, y, m, o: (9, 0))
         )
+        _reset_after_swap()
         assert ocr.next_monthly(table, date(2024, 1, 1), python=lambda: target) == target
 
     def test_next_monthly_burn_in_compares_raise_outcomes_equal(
@@ -986,6 +1002,7 @@ class TestMoneynessSeams:
         assert got is not None
         assert got.as_tuple() == Decimal("50.00").as_tuple()  # exponent preserved
         _install(monkeypatch, _fake_kernel(optcost_strike_step=lambda c: (5, 0)))
+        _reset_after_swap()
         assert ocr.strike_step((Decimal("24000"),), python=lambda: Decimal("1")) is None
 
     def test_strike_step_poison_and_mixed_exponent_arms(
@@ -998,10 +1015,12 @@ class TestMoneynessSeams:
             ocr.strike_step((Decimal("24000"), Decimal("24050")), python=lambda: oracle) == oracle
         )
         _install(monkeypatch, _fake_kernel(optcost_strike_step=lambda c: (9, 0)))
+        _reset_after_swap()
         assert (
             ocr.strike_step((Decimal("24000"), Decimal("24050")), python=lambda: oracle) == oracle
         )
         _install(monkeypatch, _fake_kernel())  # bombs — mixed exponents never engage
+        _reset_after_swap()
         assert (
             ocr.strike_step((Decimal("24000"), Decimal("24050.0")), python=lambda: oracle) == oracle
         )
@@ -1068,15 +1087,18 @@ class TestStrikeSeams:
         assert ocr.grid_around(24_000, 50, 2, python=lambda: []) == good
         # wrong length → refused
         _install(monkeypatch, _fake_kernel(optcost_grid_around_atm=lambda a, s, h: good[:3]))
+        _reset_after_swap()
         assert ocr.grid_around(24_000, 50, 2, python=lambda: list(good)) == good
         # non-list → refused
         _install(monkeypatch, _fake_kernel(optcost_grid_around_atm=lambda a, s, h: tuple(good)))
+        _reset_after_swap()
         assert ocr.grid_around(24_000, 50, 2, python=lambda: list(good)) == good
         # non-int element → refused
         _install(
             monkeypatch,
             _fake_kernel(optcost_grid_around_atm=lambda a, s, h: [*good[:4], "x"]),
         )
+        _reset_after_swap()
         assert ocr.grid_around(24_000, 50, 2, python=lambda: list(good)) == good
 
     def test_grid_around_negative_half_width_is_empty(
@@ -1872,3 +1894,78 @@ class TestStrictRefusal:
         _flag_on(monkeypatch, steady=True)
         with pytest.raises(RustFallbackRefused):
             ocr.offset_strike(24_000, 1, 50, is_bull=True, python=lambda: -1)
+
+
+# ---------------------------------------------------------------------------
+# The resolved-kernel memo
+# ---------------------------------------------------------------------------
+
+
+class TestKernelMemo:
+    """The resolved-kernel memo: what it caches, what it must NOT, and the
+    reset that keeps every ``sys.modules`` swap in this file visible.
+
+    Motivation (measured on ``money_rust``,
+    DEC-MONEY-RUST-WRAPPER-COST-001): the resolve cost 911 ns/call because
+    ``importlib.import_module`` is ~574 ns even on a ``sys.modules`` HIT.
+    This seam pays it per routed call — the module docstring already names
+    the resolve as part of the per-call wrapper cost.
+    """
+
+    def test_success_is_memoized_and_import_runs_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        kernel = _fake_kernel(optcost_history_lookup=lambda s, v, o: (0, 25))
+        _install(monkeypatch, kernel)
+        calls: list[str] = []
+
+        def _counting(name: str) -> types.ModuleType:
+            assert name == "fno_math"
+            calls.append(name)
+            return kernel
+
+        monkeypatch.setattr(ocr.importlib, "import_module", _counting)
+        _flag_on(monkeypatch, steady=True)
+        for _ in range(5):
+            # 25 is a TABLE value the oracle would not return for this date,
+            # so a served 25 proves the kernel — not the oracle — answered.
+            assert _history_value() == 25
+        assert calls == ["fno_math"], "the kernel must be imported exactly ONCE"
+        assert ocr._KERNEL_MEMO[0] is kernel  # pyright: ignore[reportPrivateUsage]
+
+    def test_failed_resolve_is_never_memoized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A FAILED resolve must NOT be cached: `_disable` refuses BEFORE it
+        # latches under strict mode, so caching failure would manufacture the
+        # silently-latched steady state strict mode exists to forbid.
+        _install(monkeypatch, types.ModuleType("fno_math"))  # no API -> kernel_stale
+        _flag_on(monkeypatch, steady=True)
+        assert _history_value() == 75
+        assert ocr._KERNEL_MEMO[0] is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_reset_clears_the_memo_so_a_module_swap_is_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE LOAD-BEARING PIN. `_install` swaps `sys.modules` WITHOUT
+        # resetting, so this file's isolation rests on the autouse
+        # `_fresh_facade` fixture (and, mid-test, `_reset_after_swap`)
+        # clearing the memo.
+        _install(monkeypatch, _fake_kernel(optcost_history_lookup=lambda s, v, o: (0, 75)))
+        _flag_on(monkeypatch, steady=True)
+        assert _history_value() == 75
+        _install(monkeypatch, types.ModuleType("fno_math"))  # swap AFTER the first resolve
+        _reset_after_swap()
+        assert _history_value() == 75  # served by the oracle now
+        assert ocr.optcost_rust_disabled() is True
+
+    def test_memo_holds_the_module_not_a_bound_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An ATTRIBUTE monkeypatch on the memoized kernel must still be seen —
+        # every routed law resolves `getattr(kernel, name)` per call. A
+        # callable-level memo would silently serve the pre-patch function.
+        kernel = _fake_kernel(optcost_history_lookup=lambda s, v, o: (0, 75))
+        _install(monkeypatch, kernel)
+        _flag_on(monkeypatch, steady=True)
+        assert _history_value() == 75
+        monkeypatch.setattr(kernel, "optcost_history_lookup", lambda s, v, o: (0, 25))
+        assert _history_value() == 25  # a TABLE value the oracle never returns here
