@@ -83,7 +83,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Install cargo-audit
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-audit
       - name: cargo audit
