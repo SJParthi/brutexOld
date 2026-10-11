@@ -74,7 +74,7 @@ jobs:
           python -c "import json; d=json.load(open('sbom-out/sbom-python.cdx.json')); print('components:', len(d.get('components', [])))"
 
       - name: Upload Python SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom-python-cyclonedx
           path: sbom-out/sbom-python.cdx.json
@@ -116,7 +116,7 @@ jobs:
           mv rust/fno-math/fno-math.cdx.json sbom-out/sbom-rust-fno-math.cdx.json
 
       - name: Upload Rust SBOM artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom-rust-cyclonedx
           path: sbom-out/sbom-rust-*.cdx.json

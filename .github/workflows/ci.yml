@@ -212,7 +212,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -375,7 +375,7 @@ jobs:
           pip install wheelhouse/fno_math-*.whl wheelhouse/trading_core-*.whl wheelhouse/brutex_feed-*.whl wheelhouse/brutex_strategies-*.whl wheelhouse/brutex_refine-*.whl wheelhouse/brutex_pull_state-*.whl wheelhouse/brutex_lake-*.whl wheelhouse/brutex_identity-*.whl wheelhouse/brutex_core-*.whl wheelhouse/brutex_data-*.whl wheelhouse/brutex_calendar-*.whl wheelhouse/brutex_notify-*.whl wheelhouse/brutex_meta-*.whl wheelhouse/brutex_observability-*.whl wheelhouse/brutex_ops-*.whl wheelhouse/brutex_sweep_ops-*.whl
           python -c "import fno_math, trading_core, brutex_feed, brutex_strategies, brutex_refine, brutex_pull_state, brutex_lake, brutex_identity, brutex_core, brutex_data, brutex_calendar, brutex_notify, brutex_meta, brutex_observability, brutex_ops, brutex_sweep_ops; print('all sixteen kernels import OK')"
       - name: Upload wheels artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rust-wheels
           path: wheelhouse/
@@ -460,7 +460,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -519,7 +519,7 @@ jobs:
             --ignore=tests/bench \
             "${SHARD_FILES[@]}"
       - name: Upload shard coverage data
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-shard-${{ matrix.shard }}
           path: |
@@ -578,7 +578,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -3445,7 +3445,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -3594,7 +3594,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -3609,7 +3609,7 @@ jobs:
         # FAIL, never a skip).
         run: pip install wheelhouse/*.whl
       - name: Download shard coverage data
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: coverage-shard-*
           path: covdata
@@ -3678,7 +3678,7 @@ jobs:
         run: python scripts/ci/spec_test_crosswalk.py
       - name: Upload coverage XML
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-xml
           path: coverage.xml
@@ -3727,7 +3727,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -3768,7 +3768,7 @@ jobs:
         run: pytest tests/browser -q
       - name: Upload failure artifacts (traces + screenshots + ledgers)
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: browser-failure-artifacts
           path: test-artifacts/browser/
@@ -3800,7 +3800,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -3918,7 +3918,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -3970,7 +3970,7 @@ jobs:
           fi
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: bench-results
           path: bench-results.json
@@ -4007,7 +4007,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -4804,7 +4804,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -4887,7 +4887,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -5113,12 +5113,12 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
         with:
           languages: python
           queries: security-extended,security-and-quality
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
         with:
           category: "/language:python"
 
@@ -5175,7 +5175,7 @@ jobs:
           limit-severities-for-sarif: 'true'
       - name: Upload SARIF
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: trivy-results
           path: trivy-results.sarif
@@ -5205,7 +5205,7 @@ jobs:
           cyclonedx-py environment --output-file sbom-python.json
       - name: Upload SBOM
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom
           path: sbom-python.json
@@ -5221,7 +5221,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: typos
-        uses: crate-ci/typos@bee27e3a4fd1ea2111cf90ab89cd076c870fce14 # v1.48.0
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
         continue-on-error: true  # report but don't block
       - name: codespell
         run: |
@@ -5293,7 +5293,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: '22'
       - name: Install jscpd
@@ -5367,7 +5367,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -5573,7 +5573,7 @@ jobs:
 
       - name: Upload mutmut results XML for analysis
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mutmut-results-xml
           path: mutmut-results.xml
@@ -5821,7 +5821,7 @@ jobs:
         # installing the shared artifact wheel is equivalent by
         # construction — same crates, same committed Cargo.locks, same
         # backend — minus the repeated per-job cargo build. No gate change.
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rust-wheels
           path: wheelhouse
@@ -5912,28 +5912,28 @@ jobs:
     steps:
       - name: Download coverage artifact
         if: always()
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: coverage-xml
           path: proof/coverage/
         continue-on-error: true
       - name: Download benchmark artifact
         if: always()
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: bench-results
           path: proof/bench/
         continue-on-error: true
       - name: Download Trivy artifact
         if: always()
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: trivy-results
           path: proof/trivy/
         continue-on-error: true
       - name: Download SBOM artifact
         if: always()
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: sbom
           path: proof/sbom/
@@ -5982,7 +5982,7 @@ jobs:
           find proof -type f -print
       - name: Upload proof bundle
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: proof-bundle
           path: proof/
