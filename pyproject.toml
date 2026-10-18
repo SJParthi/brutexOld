@@ -51,7 +51,7 @@ data = [
     # the fail-closed version guard on every fresh install. Bumps follow
     # docs/runbooks/lake-rust-render-lockstep.md (crate rev + this pin +
     # the parity corpus move TOGETHER, one commit).
-    "polars==1.42.1",
+    "polars==2.0.0",
     "duckdb>=1.0,<2.0",
     "pyarrow>=16,<26",   # was <19; PyPI latest 24.0.0 (DEC-P0-012)
     "pytz>=2024.1",
