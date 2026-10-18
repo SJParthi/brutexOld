@@ -22,7 +22,7 @@ authors = [
 dependencies = [
     "pydantic>=2.7,<3.0",
     "structlog>=24.1,<27.0",  # was <25.0; PyPI latest 25.5.0 (DEC-P0-012)
-    "lmdb>=1.5,<3.0",
+    "lmdb>=1.5,<4.0",
     "fastbloom-rs>=0.5,<1.0",  # DEC-P0-047: PyO3-backed Rust Bloom for the L1 4-tier dedup
     # DEC-SWEEP-REALTIME-GUARANTEE-001 (MIGRATION.md #549): wheel-free BLAKE3 for
     # the sweep assurance layer (engine/sweep_audit hash-chain + engine/sweep_cache
